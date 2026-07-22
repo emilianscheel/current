@@ -63,7 +63,7 @@ public final class InsertionService {
         if insertWithAccessibility(text, element: target?.element) { return .inserted }
         return await paste(
             text,
-            into: target?.processIdentifier,
+            into: target,
             restoreClipboard: restoreClipboard
         )
     }
@@ -82,7 +82,7 @@ public final class InsertionService {
         return AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
     }
 
-    private func paste(_ text: String, into processIdentifier: pid_t?, restoreClipboard: Bool) async -> Result {
+    private func paste(_ text: String, into target: Target?, restoreClipboard: Bool) async -> Result {
         let pasteboard = NSPasteboard.general
         let previous = restoreClipboard ? pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
             var values: [NSPasteboard.PasteboardType: Data] = [:]
@@ -92,14 +92,29 @@ public final class InsertionService {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         guard AXIsProcessTrusted(),
-              let processIdentifier,
+              let target,
+              let processIdentifier = target.processIdentifier,
               let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return .copied }
+
+        if let element = target.element {
+            _ = AXUIElementSetAttributeValue(
+                element,
+                kAXFocusedAttribute as CFString,
+                kCFBooleanTrue
+            )
+        }
+        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else {
+            return .copied
+        }
+        _ = application.activate(options: [])
+        try? await Task.sleep(for: .milliseconds(80))
+
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.postToPid(processIdentifier)
-        up.postToPid(processIdentifier)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
         if let previous {
             try? await Task.sleep(for: .milliseconds(450))
             pasteboard.clearContents()

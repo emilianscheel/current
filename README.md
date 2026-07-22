@@ -39,7 +39,7 @@ Licensing:
 - FluidAudio: Apache License 2.0
 - Parakeet Unified English Core ML: CC BY 4.0
 
-Attributions are included in `Licenses/NOTICE.md` and the app’s About panel.
+Attributions are included in `app/Licenses/NOTICE.md` and the app’s About panel.
 
 ## First launch and permissions
 
@@ -100,14 +100,15 @@ Every asynchronous transcription is matched against its session UUID before inse
 ## Repository layout
 
 ```text
-Package.swift                    SwiftPM products and pinned FluidAudio dependency
-Sources/CurrentCore/             Capture, shortcut, model, insertion, settings, coordinator
-Sources/Current/                 App lifecycle, menu, onboarding, settings, notch overlay
-Sources/CurrentRelauncher/       Permission-restart helper
-Packaging/                       Info.plist and signing entitlements
-Assets/                          Editable SVG artwork and deterministic app-icon renditions
-Tests/CurrentCoreTests/          State, hardware, permission, and insertion tests
-build-install-restart.sh         Test, build, sign, install, and relaunch workflow
+README.md                        Product, setup, architecture, and troubleshooting guide
+app/Package.swift                SwiftPM products and pinned FluidAudio dependency
+app/Sources/CurrentCore/         Capture, shortcut, model, insertion, settings, coordinator
+app/Sources/Current/             App lifecycle, menu, onboarding, settings, notch overlay
+app/Sources/CurrentRelauncher/   Permission-restart helper
+app/Packaging/                   Info.plist and signing entitlements
+app/Assets/                      Editable SVG artwork and deterministic app-icon renditions
+app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion tests
+app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
 ```
 
 ## Build, install, and restart
@@ -115,13 +116,13 @@ build-install-restart.sh         Test, build, sign, install, and relaunch workfl
 The supported development loop is:
 
 ```sh
-./build-install-restart.sh
+./app/build-install-restart.sh
 ```
 
 To validate compilation and bundle assembly without changing Keychain, installing, or launching anything:
 
 ```sh
-./build-install-restart.sh --assemble-only
+./app/build-install-restart.sh --assemble-only
 ```
 
 The script:
@@ -146,6 +147,7 @@ Changing the signing identity, `local.Current` bundle identifier, or installatio
 ## Manual development commands
 
 ```sh
+cd app
 swift test
 swift build -c release --arch arm64
 swift scripts/generate-icon.swift
@@ -181,7 +183,7 @@ Before release, manually test:
 - a notched display plus a non-notched external display
 - full-screen apps, Spaces, menu-bar auto-hide, sleep/wake, and microphone changes
 - first request, denial, later approval, revocation, and Input Monitoring restart
-- two consecutive runs of `build-install-restart.sh` with permissions and settings preserved
+- two consecutive runs of `app/build-install-restart.sh` with permissions and settings preserved
 - offline dictation after model setup
 - M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 

@@ -35,11 +35,23 @@ public final class InsertionService {
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         target = Target(
             element: element,
-            processIdentifier: hasElementPID ? elementPID : frontmostPID
+            processIdentifier: Self.eventProcessIdentifier(
+                frontmost: frontmostPID,
+                accessibilityElement: hasElementPID ? elementPID : nil
+            )
         )
     }
 
     public func clearTarget() { target = nil }
+
+    nonisolated static func eventProcessIdentifier(
+        frontmost: pid_t?,
+        accessibilityElement: pid_t?
+    ) -> pid_t? {
+        // Safari exposes website controls from a WebKit content process, but
+        // keyboard events must be delivered to the frontmost browser process.
+        frontmost ?? accessibilityElement
+    }
 
     public func insert(_ rawText: String, trailingSpace: Bool, restoreClipboard: Bool) async throws -> Result {
         let text = Self.preparedText(rawText, trailingSpace: trailingSpace)

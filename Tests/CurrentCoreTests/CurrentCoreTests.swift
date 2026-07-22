@@ -55,6 +55,21 @@ import Testing
     #expect(InsertionService.preparedText("", trailingSpace: true) == "")
 }
 
+@Test func pasteTargetsFrontmostAppInsteadOfWebContentProcess() {
+    #expect(
+        InsertionService.eventProcessIdentifier(
+            frontmost: 101,
+            accessibilityElement: 202
+        ) == 101
+    )
+    #expect(
+        InsertionService.eventProcessIdentifier(
+            frontmost: nil,
+            accessibilityElement: 202
+        ) == 202
+    )
+}
+
 @Test func audioAccumulatorTransfersAndClearsSamples() {
     let accumulator = AudioSampleAccumulator()
     accumulator.append([0.1, 0.2])

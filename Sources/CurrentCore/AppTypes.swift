@@ -18,6 +18,10 @@ public enum DictationPhase: String, Sendable, Codable, CaseIterable {
     }
 }
 
+public enum MenuBarPresentation {
+    public static func symbol(for _: DictationPhase) -> String { "alternatingcurrent" }
+}
+
 public struct DictationSession: Identifiable, Sendable, Equatable {
     public let id: UUID
     public let startedAt: Date

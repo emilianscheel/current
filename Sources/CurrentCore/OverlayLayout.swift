@@ -23,15 +23,15 @@ public struct OverlayLayout: Sendable, Equatable {
             attachment = .notch
             collapsedSize = CGSize(width: notchBounds.width, height: max(safeAreaTop, notchBounds.height))
             expandedSize = CGSize(
-                width: min(max(notchBounds.width + 340, 520), screenFrame.width * 0.68),
-                height: max(safeAreaTop + 36, 64)
+                width: min(max(notchBounds.width + 160, 360), screenFrame.width * 0.5),
+                height: max(max(safeAreaTop, notchBounds.height) + 18, 50)
             )
             topPadding = 0
         } else {
             attachment = .detached
             collapsedSize = CGSize(width: 92, height: 10)
-            expandedSize = CGSize(width: min(260, screenFrame.width - 40), height: 54)
-            topPadding = 8
+            expandedSize = CGSize(width: min(220, screenFrame.width - 40), height: 46)
+            topPadding = 6
         }
 
         let panelHeight = expandedSize.height + topPadding

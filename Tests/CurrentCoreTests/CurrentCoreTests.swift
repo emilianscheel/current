@@ -114,7 +114,7 @@ import Testing
 
     #expect(layout.attachment == .notch)
     #expect(layout.collapsedSize == CGSize(width: 200, height: 32))
-    #expect(layout.expandedSize == CGSize(width: 540, height: 68))
+    #expect(layout.expandedSize == CGSize(width: 360, height: 50))
     #expect(layout.panelFrame.midX == screen.midX)
     #expect(layout.panelFrame.maxY == screen.maxY)
     #expect(layout.topPadding == 0)
@@ -125,10 +125,10 @@ import Testing
     let layout = OverlayLayout(screenFrame: screen, safeAreaTop: 0, notchBounds: nil)
 
     #expect(layout.attachment == .detached)
-    #expect(layout.expandedSize == CGSize(width: 260, height: 54))
+    #expect(layout.expandedSize == CGSize(width: 220, height: 46))
     #expect(layout.panelFrame.midX == screen.midX)
     #expect(layout.panelFrame.maxY == screen.maxY)
-    #expect(layout.topPadding == 8)
+    #expect(layout.topPadding == 6)
 }
 
 @Test func overlayLayoutCapsExpansionOnNarrowDisplays() {
@@ -136,9 +136,15 @@ import Testing
     let notch = CGRect(x: 200, y: 768, width: 200, height: 32)
     let layout = OverlayLayout(screenFrame: screen, safeAreaTop: 32, notchBounds: notch)
 
-    #expect(abs(layout.expandedSize.width - 408) < 0.001)
+    #expect(abs(layout.expandedSize.width - 300) < 0.001)
     #expect(layout.panelFrame.minX >= screen.minX)
     #expect(layout.panelFrame.maxX <= screen.maxX)
+}
+
+@Test func menuBarSymbolStaysDefaultForEveryPhase() {
+    for phase in DictationPhase.allCases {
+        #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")
+    }
 }
 
 @Test func onboardingRepairsTheFirstMissingPermission() {

@@ -10,14 +10,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     init(runtime: AppRuntime) {
         self.runtime = runtime
         super.init()
-        item.button?.image = NSImage(systemSymbolName: "alternatingcurrent", accessibilityDescription: "Current")
+        item.button?.image = NSImage(
+            systemSymbolName: MenuBarPresentation.symbol(for: runtime.coordinator.phase),
+            accessibilityDescription: "Current"
+        )
         item.button?.image?.isTemplate = true
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
-        runtime.coordinator.onPhaseChange = { [weak self, weak runtime] phase in
+        runtime.coordinator.onPhaseChange = { [weak runtime] phase in
             runtime?.overlay.show(phase: phase)
-            self?.updateIcon(for: phase)
         }
     }
 
@@ -53,19 +55,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         item.target = self
         item.isEnabled = enabled
         menu.addItem(item)
-    }
-
-    private func updateIcon(for phase: DictationPhase) {
-        let symbol: String
-        switch phase {
-        case .paused: symbol = "alternatingcurrent"
-        case .recording: symbol = "waveform.circle.fill"
-        case .transcribing, .inserting: symbol = "ellipsis.circle"
-        case .error: symbol = "exclamationmark.circle"
-        default: symbol = "alternatingcurrent"
-        }
-        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: phase.displayName)
-        item.button?.image?.isTemplate = true
     }
 
     @objc private func toggleCapture() { runtime.coordinator.beginFromMenu() }

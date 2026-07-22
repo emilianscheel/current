@@ -232,7 +232,7 @@ private struct NotchOverlayView: View {
                 .frame(width: size.width, height: size.height)
                 .overlay {
                     content
-                        .padding(.horizontal, 30)
+                        .padding(.horizontal, 20)
                         .opacity(model.contentVisible ? 1 : 0)
                         .scaleEffect(model.contentVisible ? 1 : 0.88)
                 }
@@ -249,8 +249,8 @@ private struct NotchOverlayView: View {
         return UnevenRoundedRectangle(
             cornerRadii: .init(
                 topLeading: topRadius,
-                bottomLeading: 22,
-                bottomTrailing: 22,
+                bottomLeading: 16,
+                bottomTrailing: 16,
                 topTrailing: topRadius
             ),
             style: .continuous
@@ -262,8 +262,8 @@ private struct NotchOverlayView: View {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 26, height: 26)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .frame(width: 22, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             Spacer(minLength: 20)
             PhaseActivity(
                 phase: model.phase,
@@ -271,7 +271,7 @@ private struct NotchOverlayView: View {
                 intensity: settings.animationIntensity,
                 reduceMotion: reduceMotion
             )
-            .frame(width: 58, height: 28)
+            .frame(width: 44, height: 22)
         }
         .foregroundStyle(.white)
     }
@@ -318,7 +318,7 @@ private struct LevelBars: View {
 
     private func barHeight(multiplier: CGFloat) -> CGFloat {
         let response = max(0.08, min(1, CGFloat(level)))
-        let amplitude = 8 + response * 20 * max(0.15, CGFloat(intensity))
+        let amplitude = 6 + response * 14 * max(0.15, CGFloat(intensity))
         return max(4, amplitude * multiplier)
     }
 }

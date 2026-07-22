@@ -6,15 +6,54 @@ import Foundation
 public final class InsertionService {
     public enum Result: Sendable, Equatable { case inserted, pasted, copied }
 
+    private struct Target {
+        let element: AXUIElement?
+        let processIdentifier: pid_t?
+    }
+
+    private var target: Target?
+
     public init() {}
+
+    public func captureTarget() {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        let element: AXUIElement?
+        if AXUIElementCopyAttributeValue(
+            system,
+            kAXFocusedUIElementAttribute as CFString,
+            &focused
+        ) == .success,
+           let focused {
+            element = (focused as! AXUIElement)
+        } else {
+            element = nil
+        }
+
+        var elementPID: pid_t = 0
+        let hasElementPID = element.map { AXUIElementGetPid($0, &elementPID) == .success } ?? false
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        target = Target(
+            element: element,
+            processIdentifier: hasElementPID ? elementPID : frontmostPID
+        )
+    }
+
+    public func clearTarget() { target = nil }
 
     public func insert(_ rawText: String, trailingSpace: Bool, restoreClipboard: Bool) async throws -> Result {
         let text = Self.preparedText(rawText, trailingSpace: trailingSpace)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CurrentError.insertionFailed("The transcription was empty.")
         }
-        if insertWithAccessibility(text) { return .inserted }
-        return await paste(text, restoreClipboard: restoreClipboard)
+        if target == nil { captureTarget() }
+        defer { clearTarget() }
+        if insertWithAccessibility(text, element: target?.element) { return .inserted }
+        return await paste(
+            text,
+            into: target?.processIdentifier,
+            restoreClipboard: restoreClipboard
+        )
     }
 
     nonisolated public static func preparedText(_ rawText: String, trailingSpace: Bool) -> String {
@@ -23,19 +62,15 @@ public final class InsertionService {
         return trimmed + " "
     }
 
-    private func insertWithAccessibility(_ text: String) -> Bool {
-        let system = AXUIElementCreateSystemWide()
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let focused else { return false }
-        let element = focused as! AXUIElement
+    private func insertWithAccessibility(_ text: String, element: AXUIElement?) -> Bool {
+        guard let element else { return false }
         var settable = DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
               settable.boolValue else { return false }
         return AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
     }
 
-    private func paste(_ text: String, restoreClipboard: Bool) async -> Result {
+    private func paste(_ text: String, into processIdentifier: pid_t?, restoreClipboard: Bool) async -> Result {
         let pasteboard = NSPasteboard.general
         let previous = restoreClipboard ? pasteboard.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data]? in
             var values: [NSPasteboard.PasteboardType: Data] = [:]
@@ -45,13 +80,14 @@ public final class InsertionService {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         guard AXIsProcessTrusted(),
+              let processIdentifier,
               let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return .copied }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        down.postToPid(processIdentifier)
+        up.postToPid(processIdentifier)
         if let previous {
             try? await Task.sleep(for: .milliseconds(450))
             pasteboard.clearContents()

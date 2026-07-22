@@ -84,6 +84,7 @@ public final class DictationCoordinator {
         maximumDurationTask?.cancel()
         currentSession = nil
         audio.cancel()
+        insertion.clearTarget()
         setPhase(.cancelled)
         scheduleIdle()
     }
@@ -93,12 +94,16 @@ public final class DictationCoordinator {
         switch event {
         case .armed:
             guard phase == .idle else { return }
+            insertion.captureTarget()
             setPhase(.armed)
         case .pressed: beginRecording()
         case .released: stopAndTranscribe()
         case .cancelled:
             if currentSession != nil { cancel() }
-            else if phase == .armed { setPhase(.idle) }
+            else if phase == .armed {
+                insertion.clearTarget()
+                setPhase(.idle)
+            }
         }
     }
 
@@ -109,6 +114,7 @@ public final class DictationCoordinator {
         }
         do {
             let session = DictationSession()
+            if phase != .armed { insertion.captureTarget() }
             currentSession = session
             try audio.start()
             setPhase(.recording)
@@ -128,6 +134,7 @@ public final class DictationCoordinator {
         let minimumSamples = Int(settings.minimumRecordingDuration * 16_000)
         guard samples.count >= minimumSamples else {
             currentSession = nil
+            insertion.clearTarget()
             fail(CurrentError.recordingTooShort)
             return
         }
@@ -159,6 +166,7 @@ public final class DictationCoordinator {
     private func fail(_ error: Error) {
         audio.cancel()
         currentSession = nil
+        insertion.clearTarget()
         errorMessage = error.localizedDescription
         setPhase(.error)
         scheduleIdle(delay: .seconds(2.5))

@@ -24,7 +24,7 @@ public struct OverlayLayout: Sendable, Equatable {
             collapsedSize = CGSize(width: notchBounds.width, height: max(safeAreaTop, notchBounds.height))
             expandedSize = CGSize(
                 width: min(max(notchBounds.width + 160, 360), screenFrame.width * 0.5),
-                height: max(max(safeAreaTop, notchBounds.height) + 18, 50)
+                height: max(max(safeAreaTop, notchBounds.height) + 14, 46)
             )
             topPadding = 0
         } else {

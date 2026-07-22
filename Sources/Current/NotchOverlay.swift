@@ -110,8 +110,8 @@ final class NotchOverlayController {
     private func scheduleTerminalHide(for phase: DictationPhase) {
         let delay: Duration
         switch phase {
-        case .success, .cancelled: delay = .milliseconds(950)
-        case .error: delay = .milliseconds(1_500)
+        case .success, .cancelled: delay = .milliseconds(700)
+        case .error: delay = .milliseconds(1_100)
         default: return
         }
         autoHideTask = Task { @MainActor [weak self] in

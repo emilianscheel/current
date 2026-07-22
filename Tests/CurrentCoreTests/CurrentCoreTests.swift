@@ -114,7 +114,7 @@ import Testing
 
     #expect(layout.attachment == .notch)
     #expect(layout.collapsedSize == CGSize(width: 200, height: 32))
-    #expect(layout.expandedSize == CGSize(width: 360, height: 50))
+    #expect(layout.expandedSize == CGSize(width: 360, height: 46))
     #expect(layout.panelFrame.midX == screen.midX)
     #expect(layout.panelFrame.maxY == screen.maxY)
     #expect(layout.topPadding == 0)

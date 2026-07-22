@@ -1,0 +1,8 @@
+{
+  "name": "Parakeet Unified English 0.6B Core ML",
+  "repository": "FluidInference/parakeet-unified-en-0.6b-coreml",
+  "precision": "INT8 encoder",
+  "sampleRate": 16000,
+  "license": "CC-BY-4.0",
+  "integrity": "FluidAudio Hub snapshot metadata plus local SHA-256 verification"
+}

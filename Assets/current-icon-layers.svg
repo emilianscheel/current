@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="80" y1="70" x2="930" y2="970" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#292060"/><stop offset="0.52" stop-color="#151A3A"/><stop offset="1" stop-color="#071A26"/>
+    </linearGradient>
+    <linearGradient id="current" x1="190" y1="300" x2="840" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AFA5FF"/><stop offset="0.48" stop-color="#58D9FF"/><stop offset="1" stop-color="#60FFD0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="28"/></filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <path d="M170 535 C245 535 250 330 350 330 C452 330 456 696 558 696 C657 696 666 475 854 475" fill="none" stroke="#48DDFB" stroke-opacity=".28" stroke-width="92" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M170 535 C245 535 250 330 350 330 C452 330 456 696 558 696 C657 696 666 475 854 475" fill="none" stroke="url(#current)" stroke-width="68" stroke-linecap="round"/>
+  <path d="M178 665 C287 665 295 465 397 465 C500 465 505 590 611 590 C715 590 728 360 846 360" fill="none" stroke="#D8F7FF" stroke-opacity=".22" stroke-width="20" stroke-linecap="round"/>
+  <circle cx="170" cy="535" r="24" fill="#C9C2FF"/><circle cx="854" cy="475" r="24" fill="#79FFD9"/>
+</svg>

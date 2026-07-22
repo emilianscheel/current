@@ -55,6 +55,14 @@ import Testing
     #expect(InsertionService.preparedText("", trailingSpace: true) == "")
 }
 
+@Test func audioAccumulatorTransfersAndClearsSamples() {
+    let accumulator = AudioSampleAccumulator()
+    accumulator.append([0.1, 0.2])
+    accumulator.append([0.3])
+    #expect(accumulator.take() == [0.1, 0.2, 0.3])
+    #expect(accumulator.take().isEmpty)
+}
+
 @Test func permissionSnapshotFindsFirstMissing() {
     let snapshot = PermissionSnapshot(microphone: .granted, accessibility: .denied, inputMonitoring: .granted)
     #expect(snapshot.firstMissing == .accessibility)
@@ -97,6 +105,40 @@ import Testing
     try FileManager.default.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data("unfinished".utf8).write(to: partial)
     #expect(!ModelSnapshotValidator.isComplete(at: root))
+}
+
+@Test func overlayLayoutAttachesToPhysicalNotch() {
+    let screen = CGRect(x: 0, y: 0, width: 1_512, height: 982)
+    let notch = CGRect(x: 656, y: 950, width: 200, height: 32)
+    let layout = OverlayLayout(screenFrame: screen, safeAreaTop: 32, notchBounds: notch)
+
+    #expect(layout.attachment == .notch)
+    #expect(layout.collapsedSize == CGSize(width: 200, height: 32))
+    #expect(layout.expandedSize == CGSize(width: 540, height: 68))
+    #expect(layout.panelFrame.midX == screen.midX)
+    #expect(layout.panelFrame.maxY == screen.maxY)
+    #expect(layout.topPadding == 0)
+}
+
+@Test func overlayLayoutUsesDetachedIslandWithoutNotch() {
+    let screen = CGRect(x: 1_512, y: 0, width: 1_920, height: 1_080)
+    let layout = OverlayLayout(screenFrame: screen, safeAreaTop: 0, notchBounds: nil)
+
+    #expect(layout.attachment == .detached)
+    #expect(layout.expandedSize == CGSize(width: 260, height: 54))
+    #expect(layout.panelFrame.midX == screen.midX)
+    #expect(layout.panelFrame.maxY == screen.maxY)
+    #expect(layout.topPadding == 8)
+}
+
+@Test func overlayLayoutCapsExpansionOnNarrowDisplays() {
+    let screen = CGRect(x: 0, y: 0, width: 600, height: 800)
+    let notch = CGRect(x: 200, y: 768, width: 200, height: 32)
+    let layout = OverlayLayout(screenFrame: screen, safeAreaTop: 32, notchBounds: notch)
+
+    #expect(abs(layout.expandedSize.width - 408) < 0.001)
+    #expect(layout.panelFrame.minX >= screen.minX)
+    #expect(layout.panelFrame.maxX <= screen.maxX)
 }
 
 @Test func onboardingRepairsTheFirstMissingPermission() {

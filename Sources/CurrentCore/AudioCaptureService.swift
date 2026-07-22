@@ -2,6 +2,7 @@
 import AudioToolbox
 import CoreAudio
 import Foundation
+import Observation
 
 private final class ConverterInputBox: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
@@ -19,7 +20,28 @@ private final class ConverterInputBox: @unchecked Sendable {
     }
 }
 
+final class AudioSampleAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    func reset() {
+        lock.withLock { samples.removeAll(keepingCapacity: true) }
+    }
+
+    func append(_ chunk: [Float]) {
+        lock.withLock { samples.append(contentsOf: chunk) }
+    }
+
+    func take() -> [Float] {
+        lock.withLock {
+            defer { samples.removeAll(keepingCapacity: true) }
+            return samples
+        }
+    }
+}
+
 @MainActor
+@Observable
 public final class AudioCaptureService {
     public struct InputDevice: Identifiable, Hashable, Sendable {
         public let id: AudioDeviceID
@@ -29,10 +51,8 @@ public final class AudioCaptureService {
 
     public private(set) var level: Float = 0
     public var selectedDeviceID: AudioDeviceID = 0
-    private let engine = AVAudioEngine()
-    private let bufferLock = NSLock()
-    private var samples: [Float] = []
-    private var startedAt: ContinuousClock.Instant?
+    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let accumulator = AudioSampleAccumulator()
 
     public init() {}
 
@@ -88,10 +108,27 @@ public final class AudioCaptureService {
               let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
             throw CurrentError.noMicrophone
         }
-        samples.removeAll(keepingCapacity: true)
-        startedAt = .now
-        input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
+        accumulator.reset()
+        let tapHandler = Self.makeTapHandler(
+            inputFormat: inputFormat,
+            outputFormat: outputFormat,
+            converter: converter,
+            accumulator: accumulator,
+            service: self
+        )
+        input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat, block: tapHandler)
+        engine.prepare()
+        try engine.start()
+    }
+
+    private nonisolated static func makeTapHandler(
+        inputFormat: AVAudioFormat,
+        outputFormat: AVAudioFormat,
+        converter: AVAudioConverter,
+        accumulator: AudioSampleAccumulator,
+        service: AudioCaptureService
+    ) -> AVAudioNodeTapBlock {
+        { [weak service] buffer, _ in
             let ratio = outputFormat.sampleRate / inputFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
             guard let converted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else { return }
@@ -110,11 +147,9 @@ public final class AudioCaptureService {
             let count = Int(converted.frameLength)
             let chunk = Array(UnsafeBufferPointer(start: channel, count: count))
             let rms = sqrt(chunk.reduce(Float.zero) { $0 + $1 * $1 } / Float(max(1, count)))
-            self.bufferLock.withLock { self.samples.append(contentsOf: chunk) }
-            Task { @MainActor [weak self] in self?.level = min(1, rms * 8) }
+            accumulator.append(chunk)
+            Task { @MainActor [weak service] in service?.level = min(1, rms * 8) }
         }
-        engine.prepare()
-        try engine.start()
     }
 
     public func stop() -> [Float] {
@@ -123,11 +158,7 @@ public final class AudioCaptureService {
             engine.stop()
         }
         level = 0
-        startedAt = nil
-        return bufferLock.withLock {
-            defer { samples.removeAll(keepingCapacity: true) }
-            return samples
-        }
+        return accumulator.take()
     }
 
     public func cancel() {

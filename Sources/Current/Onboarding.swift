@@ -122,17 +122,15 @@ struct OnboardingView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color.indigo.opacity(0.28), Color.cyan.opacity(0.08), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
+            LinearGradient(
+                colors: [Color.accentColor.opacity(0.14), Color.accentColor.opacity(0.04), .clear],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
             VStack(spacing: 0) {
-                HStack {
-                    Label("Current", systemImage: "alternatingcurrent")
-                        .font(.headline)
-                    Spacer()
-                    Text(progressLabel).font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(24)
-                Divider().opacity(0.5)
                 Group { content }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(40)
@@ -145,7 +143,6 @@ struct OnboardingView: View {
                 .padding(24)
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder private var content: some View {
@@ -179,7 +176,12 @@ struct OnboardingView: View {
                 StepLayout(symbol: "text.cursor", title: "Try it here", text: "Click the field, hold fn, say a short sentence, and release.") {
                     TextEditor(text: $controller.practiceText)
                         .font(.title3).scrollContentBackground(.hidden).padding(12)
-                        .frame(height: 120).background(.black.opacity(0.25), in: .rect(cornerRadius: 14))
+                        .frame(height: 120)
+                        .background(Color(nsColor: .controlBackgroundColor), in: .rect(cornerRadius: 14))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        }
                 }
             case .preferences:
                 StepLayout(symbol: "checkmark.circle", title: "Ready when you are", text: "Choose two useful defaults. You can change these later in Settings.") {
@@ -220,10 +222,6 @@ struct OnboardingView: View {
         }
     }
 
-    private var progressLabel: String {
-        let index = OnboardingStep.allCases.firstIndex(of: controller.step) ?? 0
-        return "Step \(min(index + 1, 8)) of 8"
-    }
     private var modelSummary: String { runtime.model.state.isReady ? "Local model ready" : "Model download started automatically" }
     private var showNext: Bool {
         switch controller.step {

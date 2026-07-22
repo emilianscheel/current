@@ -29,7 +29,7 @@ final class AppRuntime {
     let model = ModelManager()
     @ObservationIgnored lazy var coordinator = DictationCoordinator(settings: settings, model: model)
     let hardware = HardwareChecker().current()
-    let overlay = NotchOverlayController()
+    @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
 
     init() {

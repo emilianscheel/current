@@ -12,7 +12,7 @@ It is a native menu-bar app. There is no account, cloud transcription, transcrip
 | Architecture | Apple silicon (`arm64`) only |
 | Chip | Apple M3, M4, M5, or newer |
 | Unified memory | 16 GiB or more |
-| Display | Notched MacBook displays receive the full notch treatment; other displays use a top-center pill |
+| Display | Notched MacBook displays receive the attached notch treatment; other displays use a top-center island |
 
 Current checks these requirements before starting its capture and model services. Unsupported systems receive an explanatory window.
 
@@ -20,7 +20,7 @@ Current checks these requirements before starting its capture and model services
 
 1. Focus any editable field.
 2. Hold `fn` for at least 180 ms. A quick tap is ignored.
-3. Speak while the notch/pill says **Listening…**.
+3. Speak while the notch island shows the live waveform.
 4. Release `fn` to transcribe and insert.
 5. Press Escape while recording to cancel.
 
@@ -162,7 +162,7 @@ Running the raw SwiftPM executable is not recommended for permission testing bec
 - Appearance: notch overlay and animation intensity
 - Privacy: local-processing summary and last-result clearing
 
-The overlay honors Reduce Motion and Reduce Transparency. It joins all Spaces, can appear beside full-screen applications, ignores mouse input, and falls back to a centered pill when a display has no notch safe area.
+The solid-black overlay follows Reduce Motion, joins all Spaces, can appear beside full-screen applications, ignores mouse input, and falls back to a centered island when a display has no notch safe area. All Current windows otherwise follow the active macOS light or dark appearance.
 
 ## Tests and acceptance checks
 

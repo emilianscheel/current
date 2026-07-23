@@ -1,4 +1,4 @@
-<img src="./app/icon.png" alt="current" width="100%">
+<img src="./app/icon.png" alt="current" width="48px">
 
 # current
 

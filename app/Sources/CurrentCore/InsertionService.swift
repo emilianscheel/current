@@ -36,6 +36,18 @@ public final class InsertionService {
     public init() {}
 
     public func captureTarget() {
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let frontmostPID {
+            let applicationElement = AXUIElementCreateApplication(frontmostPID)
+            // Chromium/Electron applications may not expose their complete
+            // accessibility tree until an assistive client enables it.
+            _ = AXUIElementSetAttributeValue(
+                applicationElement,
+                "AXManualAccessibility" as CFString,
+                kCFBooleanTrue
+            )
+        }
+
         let system = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         let element: AXUIElement?
@@ -46,13 +58,25 @@ public final class InsertionService {
         ) == .success,
            let focused {
             element = (focused as! AXUIElement)
+        } else if let frontmostPID {
+            let applicationElement = AXUIElementCreateApplication(frontmostPID)
+            var applicationFocused: CFTypeRef?
+            if AXUIElementCopyAttributeValue(
+                applicationElement,
+                kAXFocusedUIElementAttribute as CFString,
+                &applicationFocused
+            ) == .success,
+               let applicationFocused {
+                element = (applicationFocused as! AXUIElement)
+            } else {
+                element = nil
+            }
         } else {
             element = nil
         }
 
         var elementPID: pid_t = 0
         let hasElementPID = element.map { AXUIElementGetPid($0, &elementPID) == .success } ?? false
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let processIdentifier = Self.eventProcessIdentifier(
             frontmost: frontmostPID,
             accessibilityElement: hasElementPID ? elementPID : nil
@@ -102,12 +126,13 @@ public final class InsertionService {
         }
         if target == nil { captureTarget() }
         defer { clearTarget() }
-        if insertWithAccessibility(text, element: target?.element) { return .inserted }
-        return await paste(
+        let pasteResult = await paste(
             text,
             into: target,
             restoreClipboard: restoreClipboard
         )
+        guard pasteResult == .copied else { return pasteResult }
+        return insertWithAccessibility(text, element: target?.element) ? .inserted : .copied
     }
 
     nonisolated public static func preparedText(_ rawText: String, trailingSpace: Bool) -> String {
@@ -140,23 +165,25 @@ public final class InsertionService {
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return .copied }
 
-        if let element = target.element {
-            _ = AXUIElementSetAttributeValue(
-                element,
-                kAXFocusedAttribute as CFString,
-                kCFBooleanTrue
-            )
-        }
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else {
             return .copied
         }
         _ = application.activate(options: [])
         try? await Task.sleep(for: .milliseconds(80))
 
+        if let element = target.element {
+            _ = AXUIElementSetAttributeValue(
+                element,
+                kAXFocusedAttribute as CFString,
+                kCFBooleanTrue
+            )
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        down.postToPid(processIdentifier)
+        up.postToPid(processIdentifier)
         if let previous {
             try? await Task.sleep(for: .milliseconds(450))
             pasteboard.clearContents()

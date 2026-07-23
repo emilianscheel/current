@@ -23,7 +23,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         add(runtime.coordinator.phase.displayName, to: menu, enabled: false)
-        add(runtime.permissions.snapshot().allGranted ? "Permissions: Ready" : "Permissions: Action needed", to: menu, enabled: false)
+        if !runtime.settings.onboardingComplete {
+            add(runtime.permissions.snapshot().allGranted ? "Permissions: Ready" : "Permissions: Action needed", to: menu, enabled: false)
+        }
         menu.addItem(.separator())
         add(runtime.coordinator.phase == .recording ? "Stop and Transcribe" : "Start Dictation", to: menu, action: #selector(toggleCapture))
         add("Paste Last Transcription", to: menu, action: #selector(pasteLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
@@ -31,8 +33,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
         add(modelTitle, to: menu, enabled: false)
-        add("Settings…", to: menu, action: #selector(openSettings), key: ",")
-        add("Permissions & Onboarding…", to: menu, action: #selector(openOnboarding))
+        if !runtime.settings.onboardingComplete {
+            add("Permissions & Onboarding…", to: menu, action: #selector(openOnboarding))
+        }
         add("About Current", to: menu, action: #selector(openAbout))
         menu.addItem(.separator())
         add("Quit Current", to: menu, action: #selector(quit), key: "q")
@@ -59,10 +62,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func copyLast() { runtime.coordinator.copyLastTranscription() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
     @objc private func openOnboarding() { runtime.onboarding.show() }
-    @objc private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
     @objc private func openAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Current",

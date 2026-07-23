@@ -42,8 +42,8 @@ final class AppRuntime {
         }
     }
 
-    func applyDockPolicy() {
-        NSApp.setActivationPolicy(settings.showDockIcon ? .regular : .accessory)
+    func applyDockPolicy(onboardingVisible: Bool = false) {
+        NSApp.setActivationPolicy(onboardingVisible || settings.showDockIcon ? .regular : .accessory)
     }
 
     func applyLaunchAtLogin() {

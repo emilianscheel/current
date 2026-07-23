@@ -89,11 +89,14 @@ print "Building release binaries…"
 swift build --disable-sandbox -c release --arch arm64
 BIN_DIR="$(swift build --disable-sandbox -c release --arch arm64 --show-bin-path)"
 
-print "Generating the app icon…"
-swift scripts/generate-icon.swift >/dev/null
+print "Creating the app icon from icon.png…"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
-cp Assets/AppIcon.appiconset/icon_*.png "$ICONSET/"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" icon.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  retina_size=$((size * 2))
+  sips -z "$retina_size" "$retina_size" icon.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
 iconutil -c icns "$ICONSET" -o "$PROJECT_DIR/.build/AppIcon.icns"
 
 rm -rf "$STAGE_APP"

@@ -5,7 +5,7 @@ import SwiftUI
 
 @MainActor
 @Observable
-final class OnboardingController {
+final class OnboardingController: NSObject, NSWindowDelegate {
     private unowned let runtime: AppRuntime
     private var window: NSWindow?
     private var pollTask: Task<Void, Never>?
@@ -17,6 +17,7 @@ final class OnboardingController {
     init(runtime: AppRuntime) {
         self.runtime = runtime
         self.step = runtime.settings.onboardingStep
+        super.init()
         refreshPermissions()
     }
 
@@ -39,9 +40,10 @@ final class OnboardingController {
             window.setContentSize(NSSize(width: 720, height: 560))
             window.center()
             window.isReleasedWhenClosed = false
+            window.delegate = self
             self.window = window
         }
-        runtime.applyDockPolicy()
+        runtime.applyDockPolicy(onboardingVisible: true)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         startPolling()
@@ -54,7 +56,11 @@ final class OnboardingController {
 
     func close() {
         window?.orderOut(nil)
-        pollTask?.cancel()
+        onboardingDidHide()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onboardingDidHide()
     }
 
     func refreshPermissions() {
@@ -105,6 +111,12 @@ final class OnboardingController {
         }
     }
 
+    private func onboardingDidHide() {
+        pollTask?.cancel()
+        pollTask = nil
+        runtime.applyDockPolicy()
+    }
+
     private func autoAdvanceIfPossible() {
         if let destination = OnboardingFlow.automaticDestination(from: step, permissions: permissions) { setStep(destination) }
     }
@@ -125,7 +137,7 @@ struct OnboardingView: View {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
             LinearGradient(
-                colors: [Color.accentColor.opacity(0.14), Color.accentColor.opacity(0.04), .clear],
+                colors: [Color.gray.opacity(0.12), Color.gray.opacity(0.035), .clear],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -244,7 +256,10 @@ private struct StepLayout<Content: View>: View {
     }
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: symbol).font(.system(size: 52, weight: .medium)).symbolRenderingMode(.hierarchical).foregroundStyle(.cyan)
+            Image(systemName: symbol)
+                .font(.system(size: 52, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.gray)
             Text(title).font(.system(size: 30, weight: .semibold, design: .rounded))
             Text(text).font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
             content.padding(.top, 8)

@@ -125,6 +125,6 @@ if [[ -e "$PREVIOUS_APP" ]]; then rm -rf "$PREVIOUS_APP"; fi
 if [[ -e "$INSTALL_APP" ]]; then mv "$INSTALL_APP" "$PREVIOUS_APP"; fi
 mv "$STAGE_APP" "$INSTALL_APP"
 codesign --verify --deep --strict --verbose=2 "$INSTALL_APP"
-open "$INSTALL_APP"
+open -n "$INSTALL_APP"
 print "Installed and launched $INSTALL_APP"
 print "Permissions persist while the signing identity, bundle identifier, and install path remain unchanged."

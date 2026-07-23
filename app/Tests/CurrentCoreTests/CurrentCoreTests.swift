@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 import Testing
 @testable import CurrentCore
@@ -118,6 +119,30 @@ import Testing
     #expect(release > 0)
     envelope.reset()
     #expect(envelope.value == 0)
+}
+
+@Test func automaticInputAvoidsBluetoothCaptureWhenBuiltInMicExists() {
+    #expect(
+        AudioCaptureService.preferredAutomaticInputDeviceID(
+            defaultDeviceID: 100,
+            defaultTransport: kAudioDeviceTransportTypeBluetooth,
+            builtInDeviceIDs: [200]
+        ) == 200
+    )
+    #expect(
+        AudioCaptureService.preferredAutomaticInputDeviceID(
+            defaultDeviceID: 100,
+            defaultTransport: kAudioDeviceTransportTypeBuiltIn,
+            builtInDeviceIDs: [200]
+        ) == 100
+    )
+    #expect(
+        AudioCaptureService.preferredAutomaticInputDeviceID(
+            defaultDeviceID: 100,
+            defaultTransport: kAudioDeviceTransportTypeBluetooth,
+            builtInDeviceIDs: []
+        ) == 100
+    )
 }
 
 @Test func permissionSnapshotFindsFirstMissing() {

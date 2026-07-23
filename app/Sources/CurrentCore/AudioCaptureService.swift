@@ -110,23 +110,7 @@ public final class AudioCaptureService {
     public init() {}
 
     public func availableInputDevices() -> [InputDevice] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return [] }
-        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else { return [] }
-        return ids.compactMap { id in
-            var streamsAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyStreams,
-                mScope: kAudioDevicePropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var streamSize: UInt32 = 0
-            guard AudioObjectGetPropertyDataSize(id, &streamsAddress, 0, nil, &streamSize) == noErr, streamSize > 0 else { return nil }
+        inputDeviceIDs().map { id in
             var nameAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioObjectPropertyName,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -143,8 +127,9 @@ public final class AudioCaptureService {
     public func start() throws {
         guard !engine.isRunning else { return }
         let input = engine.inputNode
-        if selectedDeviceID != 0, let audioUnit = input.audioUnit {
-            var device = selectedDeviceID
+        let resolvedDeviceID = selectedDeviceID == 0 ? automaticInputDeviceID() : selectedDeviceID
+        if resolvedDeviceID != 0, let audioUnit = input.audioUnit {
+            var device = resolvedDeviceID
             let result = AudioUnitSetProperty(
                 audioUnit,
                 kAudioOutputUnitProperty_CurrentDevice,
@@ -175,6 +160,125 @@ public final class AudioCaptureService {
         input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat, block: tapHandler)
         engine.prepare()
         try engine.start()
+    }
+
+    nonisolated static func preferredAutomaticInputDeviceID(
+        defaultDeviceID: AudioDeviceID,
+        defaultTransport: UInt32?,
+        builtInDeviceIDs: [AudioDeviceID]
+    ) -> AudioDeviceID {
+        let bluetoothTransports: Set<UInt32> = [
+            kAudioDeviceTransportTypeBluetooth,
+            kAudioDeviceTransportTypeBluetoothLE,
+        ]
+        guard let defaultTransport,
+              bluetoothTransports.contains(defaultTransport),
+              let builtIn = builtInDeviceIDs.first else {
+            return defaultDeviceID
+        }
+        return builtIn
+    }
+
+    private func automaticInputDeviceID() -> AudioDeviceID {
+        let defaultDeviceID = defaultInputDeviceID()
+        let builtInDeviceIDs = inputDeviceIDs().filter {
+            transportType(for: $0) == kAudioDeviceTransportTypeBuiltIn
+        }
+        return Self.preferredAutomaticInputDeviceID(
+            defaultDeviceID: defaultDeviceID,
+            defaultTransport: transportType(for: defaultDeviceID),
+            builtInDeviceIDs: builtInDeviceIDs
+        )
+    }
+
+    private func inputDeviceIDs() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size
+        ) == noErr else {
+            return []
+        }
+        var ids = [AudioDeviceID](
+            repeating: 0,
+            count: Int(size) / MemoryLayout<AudioDeviceID>.size
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &ids
+        ) == noErr else {
+            return []
+        }
+        return ids.filter { id in
+            var streamsAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var streamSize: UInt32 = 0
+            return AudioObjectGetPropertyDataSize(
+                id,
+                &streamsAddress,
+                0,
+                nil,
+                &streamSize
+            ) == noErr && streamSize > 0
+        }
+    }
+
+    private func defaultInputDeviceID() -> AudioDeviceID {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &deviceID
+        ) == noErr else {
+            return 0
+        }
+        return deviceID
+    }
+
+    private func transportType(for deviceID: AudioDeviceID) -> UInt32? {
+        guard deviceID != 0 else { return nil }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &size,
+            &transport
+        ) == noErr else {
+            return nil
+        }
+        return transport
     }
 
     private nonisolated static func makeTapHandler(

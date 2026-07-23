@@ -57,7 +57,7 @@ struct SettingsView: View {
     @ViewBuilder private var audio: some View {
         Section("Input") {
             Picker("Microphone", selection: $runtime.settings.inputDeviceID) {
-                Text("System default").tag(UInt32(0))
+                Text("Automatic (preserve media playback)").tag(UInt32(0))
                 ForEach(runtime.coordinator.audio.availableInputDevices()) { device in Text(device.name).tag(device.id) }
             }
             LabeledContent("Current level") { ProgressView(value: Double(runtime.coordinator.audio.level)).frame(width: 220) }

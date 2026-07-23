@@ -1,4 +1,4 @@
-<img src="./app/icon.png" alt="current" width="48px">
+<a href="https://current.vercel.app"><img src="./app/icon.png" alt="current" width="48px"/></a>
 
 # current
 

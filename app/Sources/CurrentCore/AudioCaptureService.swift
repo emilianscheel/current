@@ -40,6 +40,58 @@ final class AudioSampleAccumulator: @unchecked Sendable {
     }
 }
 
+public struct AudioLevelEnvelope: Sendable, Equatable {
+    public private(set) var value: Float = 0
+
+    public init() {}
+
+    public static func normalizedLevel(
+        rms: Float,
+        floorDecibels: Float = -50,
+        ceilingDecibels: Float = -8
+    ) -> Float {
+        guard rms.isFinite, rms > 0, ceilingDecibels > floorDecibels else { return 0 }
+        let decibels = 20 * log10(rms)
+        return min(1, max(0, (decibels - floorDecibels) / (ceilingDecibels - floorDecibels)))
+    }
+
+    @discardableResult
+    public mutating func update(rms: Float) -> Float {
+        let target = Self.normalizedLevel(rms: rms)
+        let coefficient: Float = target > value ? 0.55 : 0.14
+        value += (target - value) * coefficient
+        if value < 0.002 { value = 0 }
+        return value
+    }
+
+    public mutating func reset() {
+        value = 0
+    }
+}
+
+private final class AudioLevelState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var envelope = AudioLevelEnvelope()
+    private var lastPublication: UInt64 = 0
+    private let publicationInterval: UInt64 = 16_666_667
+
+    func reset() {
+        lock.withLock {
+            envelope.reset()
+            lastPublication = 0
+        }
+    }
+
+    func consume(rms: Float, now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Float? {
+        lock.withLock {
+            let value = envelope.update(rms: rms)
+            guard lastPublication == 0 || now &- lastPublication >= publicationInterval else { return nil }
+            lastPublication = now
+            return value
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class AudioCaptureService {
@@ -53,6 +105,7 @@ public final class AudioCaptureService {
     public var selectedDeviceID: AudioDeviceID = 0
     @ObservationIgnored private let engine = AVAudioEngine()
     @ObservationIgnored private let accumulator = AudioSampleAccumulator()
+    @ObservationIgnored private let meterState = AudioLevelState()
 
     public init() {}
 
@@ -109,11 +162,14 @@ public final class AudioCaptureService {
             throw CurrentError.noMicrophone
         }
         accumulator.reset()
+        meterState.reset()
+        level = 0
         let tapHandler = Self.makeTapHandler(
             inputFormat: inputFormat,
             outputFormat: outputFormat,
             converter: converter,
             accumulator: accumulator,
+            meterState: meterState,
             service: self
         )
         input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat, block: tapHandler)
@@ -126,6 +182,7 @@ public final class AudioCaptureService {
         outputFormat: AVAudioFormat,
         converter: AVAudioConverter,
         accumulator: AudioSampleAccumulator,
+        meterState: AudioLevelState,
         service: AudioCaptureService
     ) -> AVAudioNodeTapBlock {
         { [weak service] buffer, _ in
@@ -148,7 +205,11 @@ public final class AudioCaptureService {
             let chunk = Array(UnsafeBufferPointer(start: channel, count: count))
             let rms = sqrt(chunk.reduce(Float.zero) { $0 + $1 * $1 } / Float(max(1, count)))
             accumulator.append(chunk)
-            Task { @MainActor [weak service] in service?.level = min(1, rms * 8) }
+            guard let level = meterState.consume(rms: rms) else { return }
+            Task { @MainActor [weak service] in
+                guard let service, service.engine.isRunning else { return }
+                service.level = level
+            }
         }
     }
 
@@ -157,6 +218,7 @@ public final class AudioCaptureService {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
+        meterState.reset()
         level = 0
         return accumulator.take()
     }

@@ -70,12 +70,54 @@ import Testing
     )
 }
 
+@MainActor
+@Test func insertionTargetPresentationResolvesAndClears() {
+    let missingIcon = InsertionService.TargetApplicationPresentation(
+        processIdentifier: 42,
+        bundleIdentifier: "example.target",
+        localizedName: "Target",
+        icon: nil
+    )
+    #expect(missingIcon.processIdentifier == 42)
+    #expect(missingIcon.localizedName == "Target")
+    #expect(missingIcon.icon == nil)
+    #expect(InsertionService.applicationPresentation(processIdentifier: nil) == nil)
+    #expect(InsertionService.applicationPresentation(processIdentifier: pid_t.max) == nil)
+
+    let insertion = InsertionService()
+    insertion.captureTarget()
+    insertion.clearTarget()
+    #expect(insertion.targetApplicationPresentation == nil)
+}
+
 @Test func audioAccumulatorTransfersAndClearsSamples() {
     let accumulator = AudioSampleAccumulator()
     accumulator.append([0.1, 0.2])
     accumulator.append([0.3])
     #expect(accumulator.take() == [0.1, 0.2, 0.3])
     #expect(accumulator.take().isEmpty)
+}
+
+@Test func audioLevelNormalizationUsesPerceptualDecibelRange() {
+    #expect(AudioLevelEnvelope.normalizedLevel(rms: 0) == 0)
+    #expect(AudioLevelEnvelope.normalizedLevel(rms: .infinity) == 0)
+    #expect(AudioLevelEnvelope.normalizedLevel(rms: pow(10, -50.0 / 20.0)) < 0.001)
+    #expect(abs(AudioLevelEnvelope.normalizedLevel(rms: pow(10, -29.0 / 20.0)) - 0.5) < 0.001)
+    #expect(AudioLevelEnvelope.normalizedLevel(rms: 1) == 1)
+}
+
+@Test func audioEnvelopeAttacksReleasesAndResetsSmoothly() {
+    var envelope = AudioLevelEnvelope()
+    let attack = envelope.update(rms: 1)
+    #expect(attack > 0.5)
+    for _ in 0..<8 { envelope.update(rms: 1) }
+    let peak = envelope.value
+    let release = envelope.update(rms: 0)
+    #expect(peak > 0.99)
+    #expect(release < peak)
+    #expect(release > 0)
+    envelope.reset()
+    #expect(envelope.value == 0)
 }
 
 @Test func permissionSnapshotFindsFirstMissing() {

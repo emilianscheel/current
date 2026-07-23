@@ -33,7 +33,13 @@ final class AppRuntime {
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
 
     init() {
-        coordinator.onPhaseChange = { [weak self] phase in self?.overlay.show(phase: phase) }
+        coordinator.onPhaseChange = { [weak self] phase in
+            guard let self else { return }
+            self.overlay.show(
+                phase: phase,
+                targetApplication: self.coordinator.insertion.targetApplicationPresentation
+            )
+        }
     }
 
     func applyDockPolicy() {

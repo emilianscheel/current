@@ -1,16 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="background" x1="80" y1="70" x2="930" y2="970" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#292060"/><stop offset="0.52" stop-color="#151A3A"/><stop offset="1" stop-color="#071A26"/>
+    <linearGradient id="face" x1="512" y1="72" x2="512" y2="952" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset=".48" stop-color="#FBFBFB"/>
+      <stop offset="1" stop-color="#E3E3E3"/>
     </linearGradient>
-    <linearGradient id="current" x1="190" y1="300" x2="840" y2="720" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#AFA5FF"/><stop offset="0.48" stop-color="#58D9FF"/><stop offset="1" stop-color="#60FFD0"/>
+    <linearGradient id="highlight" x1="512" y1="854" x2="512" y2="510" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="28"/></filter>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="145%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-opacity=".22"/>
+    </filter>
+    <clipPath id="faceClip">
+      <rect x="72" y="72" width="880" height="880" rx="205"/>
+    </clipPath>
   </defs>
-  <rect width="1024" height="1024" fill="url(#background)"/>
-  <path d="M170 535 C245 535 250 330 350 330 C452 330 456 696 558 696 C657 696 666 475 854 475" fill="none" stroke="#48DDFB" stroke-opacity=".28" stroke-width="92" stroke-linecap="round" filter="url(#glow)"/>
-  <path d="M170 535 C245 535 250 330 350 330 C452 330 456 696 558 696 C657 696 666 475 854 475" fill="none" stroke="url(#current)" stroke-width="68" stroke-linecap="round"/>
-  <path d="M178 665 C287 665 295 465 397 465 C500 465 505 590 611 590 C715 590 728 360 846 360" fill="none" stroke="#D8F7FF" stroke-opacity=".22" stroke-width="20" stroke-linecap="round"/>
-  <circle cx="170" cy="535" r="24" fill="#C9C2FF"/><circle cx="854" cy="475" r="24" fill="#79FFD9"/>
+  <rect x="72" y="72" width="880" height="880" rx="205" fill="url(#face)" filter="url(#shadow)"/>
+  <g clip-path="url(#faceClip)">
+    <ellipse cx="512" cy="480" rx="592" ry="345" fill="url(#highlight)"/>
+    <ellipse cx="512" cy="1030" rx="442" ry="245" fill="#000" opacity=".035"/>
+  </g>
+  <rect x="73.5" y="73.5" width="877" height="877" rx="203.5" fill="none" stroke="#000" stroke-opacity=".1" stroke-width="3"/>
+  <path d="M244 512c72 0 90-178 178-178s106 356 194 356 106-178 178-178" fill="none" stroke="#000" stroke-width="68" stroke-linecap="round"/>
+  <path d="M225 805c155 71 419 71 574 0" fill="none" stroke="#FFF" stroke-opacity=".44" stroke-width="8" stroke-linecap="round"/>
 </svg>

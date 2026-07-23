@@ -18,9 +18,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
-        runtime.coordinator.onPhaseChange = { [weak runtime] phase in
-            runtime?.overlay.show(phase: phase)
-        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

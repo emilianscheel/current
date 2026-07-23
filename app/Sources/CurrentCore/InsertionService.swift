@@ -6,12 +6,32 @@ import Foundation
 public final class InsertionService {
     public enum Result: Sendable, Equatable { case inserted, pasted, copied }
 
+    public struct TargetApplicationPresentation {
+        public let processIdentifier: pid_t
+        public let bundleIdentifier: String?
+        public let localizedName: String
+        public let icon: NSImage?
+
+        public init(
+            processIdentifier: pid_t,
+            bundleIdentifier: String?,
+            localizedName: String,
+            icon: NSImage?
+        ) {
+            self.processIdentifier = processIdentifier
+            self.bundleIdentifier = bundleIdentifier
+            self.localizedName = localizedName
+            self.icon = icon
+        }
+    }
+
     private struct Target {
         let element: AXUIElement?
         let processIdentifier: pid_t?
     }
 
     private var target: Target?
+    public private(set) var targetApplicationPresentation: TargetApplicationPresentation?
 
     public init() {}
 
@@ -33,16 +53,23 @@ public final class InsertionService {
         var elementPID: pid_t = 0
         let hasElementPID = element.map { AXUIElementGetPid($0, &elementPID) == .success } ?? false
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let processIdentifier = Self.eventProcessIdentifier(
+            frontmost: frontmostPID,
+            accessibilityElement: hasElementPID ? elementPID : nil
+        )
         target = Target(
             element: element,
-            processIdentifier: Self.eventProcessIdentifier(
-                frontmost: frontmostPID,
-                accessibilityElement: hasElementPID ? elementPID : nil
-            )
+            processIdentifier: processIdentifier
+        )
+        targetApplicationPresentation = Self.applicationPresentation(
+            processIdentifier: processIdentifier
         )
     }
 
-    public func clearTarget() { target = nil }
+    public func clearTarget() {
+        target = nil
+        targetApplicationPresentation = nil
+    }
 
     nonisolated static func eventProcessIdentifier(
         frontmost: pid_t?,
@@ -51,6 +78,21 @@ public final class InsertionService {
         // Safari exposes website controls from a WebKit content process, but
         // keyboard events must be delivered to the frontmost browser process.
         frontmost ?? accessibilityElement
+    }
+
+    static func applicationPresentation(
+        processIdentifier: pid_t?
+    ) -> TargetApplicationPresentation? {
+        guard let processIdentifier,
+              let application = NSRunningApplication(processIdentifier: processIdentifier) else {
+            return nil
+        }
+        return TargetApplicationPresentation(
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier,
+            localizedName: application.localizedName ?? "Application",
+            icon: application.icon?.copy() as? NSImage
+        )
     }
 
     public func insert(_ rawText: String, trailingSpace: Bool, restoreClipboard: Bool) async throws -> Result {

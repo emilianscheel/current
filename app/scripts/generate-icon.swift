@@ -6,47 +6,111 @@ let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let output = root.appendingPathComponent("Assets/AppIcon.appiconset", isDirectory: true)
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
-func masterImage() -> NSImage {
-    let size = NSSize(width: 1024, height: 1024)
-    let image = NSImage(size: size)
+private let canvas = NSSize(width: 1024, height: 1024)
+private let faceRect = NSRect(x: 72, y: 72, width: 880, height: 880)
+
+func masterImage() throws -> NSImage {
+    let image = NSImage(size: canvas)
     image.lockFocus()
-    let rect = NSRect(origin: .zero, size: size)
-    NSGradient(colors: [NSColor(calibratedRed: 0.16, green: 0.12, blue: 0.38, alpha: 1), NSColor(calibratedRed: 0.06, green: 0.10, blue: 0.22, alpha: 1), NSColor(calibratedRed: 0.03, green: 0.12, blue: 0.16, alpha: 1)])!.draw(in: rect, angle: -52)
+    defer { image.unlockFocus() }
 
-    let main = NSBezierPath()
-    main.move(to: NSPoint(x: 170, y: 489))
-    main.curve(to: NSPoint(x: 350, y: 694), controlPoint1: NSPoint(x: 245, y: 489), controlPoint2: NSPoint(x: 250, y: 694))
-    main.curve(to: NSPoint(x: 558, y: 328), controlPoint1: NSPoint(x: 452, y: 694), controlPoint2: NSPoint(x: 456, y: 328))
-    main.curve(to: NSPoint(x: 854, y: 549), controlPoint1: NSPoint(x: 657, y: 328), controlPoint2: NSPoint(x: 666, y: 549))
-    main.lineCapStyle = .round
-    main.lineWidth = 112
-    NSColor(calibratedRed: 0.20, green: 0.78, blue: 1, alpha: 0.12).setStroke(); main.stroke()
-    main.lineWidth = 68
-    NSGradient(colors: [NSColor(calibratedRed: 0.69, green: 0.65, blue: 1, alpha: 1), NSColor(calibratedRed: 0.35, green: 0.85, blue: 1, alpha: 1), NSColor(calibratedRed: 0.38, green: 1, blue: 0.82, alpha: 1)])!.draw(in: main, angle: -20)
+    NSGraphicsContext.current?.imageInterpolation = .high
+    NSColor.clear.setFill()
+    NSRect(origin: .zero, size: canvas).fill()
 
-    let secondary = NSBezierPath()
-    secondary.move(to: NSPoint(x: 178, y: 359))
-    secondary.curve(to: NSPoint(x: 397, y: 559), controlPoint1: NSPoint(x: 287, y: 359), controlPoint2: NSPoint(x: 295, y: 559))
-    secondary.curve(to: NSPoint(x: 611, y: 434), controlPoint1: NSPoint(x: 500, y: 559), controlPoint2: NSPoint(x: 505, y: 434))
-    secondary.curve(to: NSPoint(x: 846, y: 664), controlPoint1: NSPoint(x: 715, y: 434), controlPoint2: NSPoint(x: 728, y: 664))
-    secondary.lineCapStyle = .round; secondary.lineWidth = 20
-    NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke(); secondary.stroke()
-    image.unlockFocus()
+    let face = NSBezierPath(roundedRect: faceRect, xRadius: 205, yRadius: 205)
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
+    shadow.shadowBlurRadius = 34
+    shadow.shadowOffset = NSSize(width: 0, height: -18)
+    shadow.set()
+    NSColor(calibratedWhite: 0.94, alpha: 1).setFill()
+    face.fill()
+    NSGraphicsContext.restoreGraphicsState()
+
+    NSGraphicsContext.saveGraphicsState()
+    face.addClip()
+    NSGradient(colorsAndLocations:
+        (NSColor(calibratedWhite: 1.0, alpha: 1), 0),
+        (NSColor(calibratedWhite: 0.985, alpha: 1), 0.48),
+        (NSColor(calibratedWhite: 0.89, alpha: 1), 1)
+    )!.draw(in: faceRect, angle: -90)
+
+    let upperHighlight = NSBezierPath(ovalIn: NSRect(x: -80, y: 485, width: 1184, height: 690))
+    NSGradient(colorsAndLocations:
+        (NSColor.white.withAlphaComponent(0.48), 0),
+        (NSColor.white.withAlphaComponent(0.12), 0.58),
+        (NSColor.white.withAlphaComponent(0), 1)
+    )!.draw(in: upperHighlight, relativeCenterPosition: .zero)
+
+    let lowerShade = NSBezierPath(ovalIn: NSRect(x: 70, y: -225, width: 884, height: 490))
+    NSColor.black.withAlphaComponent(0.035).setFill()
+    lowerShade.fill()
+    NSGraphicsContext.restoreGraphicsState()
+
+    NSColor.black.withAlphaComponent(0.1).setStroke()
+    face.lineWidth = 3
+    face.stroke()
+
+    guard let symbol = NSImage(systemSymbolName: "alternatingcurrent", accessibilityDescription: nil)?
+        .withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 440, weight: .medium)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.black]))
+        ) else {
+        throw CocoaError(.featureUnsupported)
+    }
+    let symbolBounds = NSRect(x: 237, y: 307, width: 550, height: 410)
+    symbol.draw(in: symbolBounds, from: .zero, operation: .sourceOver, fraction: 1)
+
+    let gloss = NSBezierPath()
+    gloss.move(to: NSPoint(x: 225, y: 805))
+    gloss.curve(
+        to: NSPoint(x: 799, y: 805),
+        controlPoint1: NSPoint(x: 380, y: 876),
+        controlPoint2: NSPoint(x: 644, y: 876)
+    )
+    gloss.lineCapStyle = .round
+    gloss.lineWidth = 8
+    NSColor.white.withAlphaComponent(0.44).setStroke()
+    gloss.stroke()
+
     return image
 }
 
 func png(_ image: NSImage, pixels: Int, name: String) throws {
-    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { throw CocoaError(.fileWriteUnknown) }
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: pixels,
+        pixelsHigh: pixels,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
     bitmap.size = NSSize(width: pixels, height: pixels)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
-    image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels), from: NSRect(x: 0, y: 0, width: 1024, height: 1024), operation: .copy, fraction: 1)
+    NSGraphicsContext.current?.imageInterpolation = .high
+    image.draw(
+        in: NSRect(x: 0, y: 0, width: pixels, height: pixels),
+        from: NSRect(origin: .zero, size: canvas),
+        operation: .copy,
+        fraction: 1
+    )
     NSGraphicsContext.restoreGraphicsState()
-    guard let data = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+    guard let data = bitmap.representation(using: .png, properties: [:]) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
     try data.write(to: output.appendingPathComponent(name))
 }
 
-let image = masterImage()
+let image = try masterImage()
 for size in [16, 32, 128, 256, 512] {
     try png(image, pixels: size, name: "icon_\(size)x\(size).png")
     try png(image, pixels: size * 2, name: "icon_\(size)x\(size)@2x.png")

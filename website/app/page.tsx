@@ -31,7 +31,7 @@ export default function Home() {
         <div className="mt-8 flex items-center justify-center gap-3 sm:mt-9">
           <button
             type="button"
-            className="inline-flex h-11 min-w-28 cursor-pointer items-center justify-center rounded-full border-2 border-black bg-black px-5 text-base font-normal text-white sm:h-12 sm:min-w-31 sm:px-6"
+            className="inline-flex h-9 cursor-pointer items-center justify-center rounded-full border-2 border-black bg-black px-3 text-base font-normal text-white sm:h-10 sm:px-4"
             aria-disabled="true"
             disabled
           >
@@ -39,7 +39,7 @@ export default function Home() {
           </button>
 
           <a
-            className="inline-flex h-11 min-w-28 cursor-pointer items-center justify-center rounded-full border-2 border-black bg-white px-5 text-base font-normal text-black transition-colors duration-200 hover:bg-black/[0.06] active:bg-black/[0.11] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-black sm:h-12 sm:min-w-31 sm:px-6 motion-reduce:transition-none"
+            className="inline-flex h-9 cursor-pointer items-center justify-center rounded-full border border-black bg-white px-3 text-base font-normal text-black transition-colors duration-200 hover:bg-black/[0.06] active:bg-black/[0.11] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-black sm:h-10 sm:px-4 motion-reduce:transition-none"
             href="https://github.com/emilianscheel/current"
             target="_blank"
             rel="noopener noreferrer"

@@ -345,39 +345,28 @@ private struct ContextManagementView: View {
     }
 
     private var sidebar: some View {
-        VStack(spacing: 0) {
-            if !model.filteredDocuments.isEmpty {
-                List(
-                    selection: Binding(
-                        get: { model.selectedDocumentID },
-                        set: { if let documentID = $0 { model.select(documentID) } }
-                    )
-                ) {
-                    ForEach(model.filteredDocuments) { document in
-                        contextRow(document)
-                            .tag(document.id)
-                            .listRowInsets(
-                                EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
-                            )
-                    }
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-                .searchable(
-                    text: $model.searchText,
-                    placement: .sidebar,
-                    prompt: "Search context"
-                )
-                .tint(Color.gray.opacity(0.18))
-            } else {
-                Spacer()
-                    .searchable(
-                        text: $model.searchText,
-                        placement: .sidebar,
-                        prompt: "Search context"
+        List(
+            selection: Binding(
+                get: { model.selectedDocumentID },
+                set: { if let documentID = $0 { model.select(documentID) } }
+            )
+        ) {
+            ForEach(model.filteredDocuments) { document in
+                contextRow(document)
+                    .tag(document.id)
+                    .listRowInsets(
+                        EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
                     )
             }
         }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .searchable(
+            text: $model.searchText,
+            placement: .toolbar,
+            prompt: "Search context"
+        )
+        .tint(Color.gray.opacity(0.18))
     }
 
     private func contextRow(_ document: ContextDocument) -> some View {
@@ -404,8 +393,8 @@ private struct ContextManagementView: View {
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-        }
     }
+}
 
     @ViewBuilder private var detail: some View {
         if model.selectedDocument != nil {

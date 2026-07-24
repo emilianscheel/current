@@ -129,9 +129,15 @@ To validate compilation and bundle assembly without changing Keychain, installin
 ./app/build-install-restart.sh --assemble-only
 ```
 
+Release automation can also inject a numeric semantic version into the assembled bundle without changing the tracked `Info.plist`:
+
+```sh
+./app/build-install-restart.sh --assemble-only --version 0.2.0
+```
+
 The script:
 
-1. Validates arm64, macOS 26+, Swift, and code-signing tools.
+1. Validates arm64, macOS 26+, Swift, and code-signing tools. Local installation additionally requires M3-or-newer hardware and 16 GiB of memory; assembly mode leaves runtime hardware validation to the packaged app.
 2. Runs the test suite.
 3. Builds optimized arm64 executables.
 4. Deterministically renders the app icon and assembles `Current.app`.
@@ -214,6 +220,26 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 - Voice commands and automation
 - Intel, Windows, Linux, or pre-M3 support
 
-## Distribution
+## Download and releases
 
-The current workflow is for direct local development. A public build should use a stable Developer ID Application certificate, include the same narrow entitlements, archive third-party license text, and be notarized. Switching from the local certificate to Developer ID is an intentional one-time signing-identity change and therefore requires permissions to be granted again.
+The latest release is always available as [`Current.dmg`](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg). The DMG contains `Current.app` and an Applications shortcut.
+
+Current is ad-hoc signed because the project does not have an Apple Developer Program membership, so Apple cannot notarize it. On first launch, macOS blocks the app because it cannot verify the developer:
+
+1. Attempt to open Current once.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll to the security notice for Current and choose **Open Anyway**.
+4. Confirm **Open** in the warning dialog.
+
+Only install a non-notarized build when it came from this repository and you trust its contents.
+
+To publish a release, create and push an annotated semantic-version tag:
+
+```sh
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+The tag-triggered GitHub Actions workflow validates the `vX.Y.Z` format, injects that version into the assembled app, runs the Swift tests, creates and verifies the ad-hoc-signed `Current.dmg`, and publishes it as the latest GitHub Release with generated notes. No Apple credentials or repository secrets are required. Invalid tags, failed tests, invalid signatures, or malformed disk images stop before publication.
+
+Every release uses the asset name `Current.dmg`, so the website and README can use GitHub's permanent latest-release URL without changing on each version.

@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Validate version tag
+        id: version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vX.Y.Z numeric format." >&2
+            exit 64
+          fi
+          echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Test and assemble app
+        run: ./app/build-install-restart.sh --assemble-only --version "${{ steps.version.outputs.number }}"
+
+      - name: Create and verify DMG
+        shell: bash
+        run: |
+          rm -rf dist
+          mkdir -p dist/dmg-root
+          cp -R app/.build/Current.app-staging dist/dmg-root/Current.app
+          ln -s /Applications dist/dmg-root/Applications
+
+          codesign --verify --deep --strict --verbose=2 dist/dmg-root/Current.app
+          hdiutil create \
+            -volname Current \
+            -srcfolder dist/dmg-root \
+            -format UDZO \
+            -ov \
+            dist/Current.dmg
+          hdiutil verify dist/Current.dmg
+
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach dist/Current.dmg -nobrowse -readonly -mountpoint "$mount_dir"
+          test -d "$mount_dir/Current.app"
+          test "$(readlink "$mount_dir/Applications")" = "/Applications"
+          hdiutil detach "$mount_dir"
+          rmdir "$mount_dir"
+          trap - EXIT
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          installation_notes=$'> [!IMPORTANT]\n> Current is ad-hoc signed and is not notarized by Apple. After the first blocked launch, open System Settings → Privacy & Security and choose **Open Anyway**.\n\nRequires macOS 26 or newer, an Apple M3 or newer chip, and at least 16 GiB of unified memory.'
+          gh release create "$GITHUB_REF_NAME" dist/Current.dmg \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "$installation_notes" \
+            --latest

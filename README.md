@@ -4,4 +4,4 @@
 
 private, local-first dictation utility for mac. hold fn, speak, and release. it works everywhere.
 
-[Website](https://current-mac.vercel.app) | [Download](https://current-mac.vercel.app/download)
+[Website](https://current-mac.vercel.app) | [Download](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg)

@@ -4,8 +4,32 @@ set -euo pipefail
 PROJECT_DIR="${0:A:h}"
 cd "$PROJECT_DIR"
 ASSEMBLE_ONLY=false
-if [[ "${1:-}" == "--assemble-only" ]]; then ASSEMBLE_ONLY=true; shift; fi
-if (( $# > 0 )); then print -u2 "Usage: $0 [--assemble-only]"; exit 64; fi
+APP_VERSION=""
+while (( $# > 0 )); do
+  case "$1" in
+    --assemble-only)
+      ASSEMBLE_ONLY=true
+      shift
+      ;;
+    --version)
+      (( $# >= 2 )) || { print -u2 "Missing value for --version."; exit 64; }
+      APP_VERSION="$2"
+      shift 2
+      ;;
+    *)
+      print -u2 "Usage: $0 [--assemble-only [--version X.Y.Z]]"
+      exit 64
+      ;;
+  esac
+done
+if [[ -n "$APP_VERSION" && "$ASSEMBLE_ONLY" != true ]]; then
+  print -u2 "--version is only supported with --assemble-only."
+  exit 64
+fi
+if [[ -n "$APP_VERSION" && ! "$APP_VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+  print -u2 "Version must use X.Y.Z numeric format."
+  exit 64
+fi
 
 if [[ "$(uname -m)" != "arm64" ]]; then
   print -u2 "Current requires Apple silicon (arm64)."
@@ -21,26 +45,22 @@ fi
 command -v swift >/dev/null || { print -u2 "Swift is required."; exit 1; }
 command -v codesign >/dev/null || { print -u2 "codesign is required."; exit 1; }
 
-CHIP_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip:/{print $2; exit}')"
-if [[ ! "$CHIP_NAME" =~ 'Apple M([0-9]+)' ]] || (( match[1] < 3 )); then
-  print -u2 "Current requires an Apple M3 or newer chip (found: ${CHIP_NAME:-unknown})."
-  exit 1
-fi
-MEMORY_BYTES="$(sysctl -n hw.memsize)"
-if (( MEMORY_BYTES < 17179869184 )); then
-  print -u2 "Current requires at least 16 GiB of unified memory."
-  exit 1
+if ! $ASSEMBLE_ONLY; then
+  CHIP_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip:/{print $2; exit}')"
+  if [[ ! "$CHIP_NAME" =~ 'Apple M([0-9]+)' ]] || (( match[1] < 3 )); then
+    print -u2 "Current requires an Apple M3 or newer chip (found: ${CHIP_NAME:-unknown})."
+    exit 1
+  fi
+  MEMORY_BYTES="$(sysctl -n hw.memsize)"
+  if (( MEMORY_BYTES < 17179869184 )); then
+    print -u2 "Current requires at least 16 GiB of unified memory."
+    exit 1
+  fi
 fi
 
-USER_NAME="$(id -un)"
-USER_HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"
-[[ -n "$USER_HOME_DIR" && "$USER_HOME_DIR" == /* ]] || { print -u2 "Could not resolve the user home directory."; exit 1; }
-INSTALL_DIR="$USER_HOME_DIR/Applications"
-INSTALL_APP="$INSTALL_DIR/Current.app"
-PREVIOUS_APP="$INSTALL_DIR/Current.previous.app"
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
 ICONSET="$PROJECT_DIR/.build/AppIcon.iconset"
-KEYCHAIN_PATH="$(security default-keychain -d user | tr -d '"')"
+typeset -a CODESIGN_KEYCHAIN_ARGS
 export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache"
 
@@ -73,7 +93,16 @@ create_local_identity() {
 
 if $ASSEMBLE_ONLY; then
   SIGNING_IDENTITY="-"
+  CODESIGN_KEYCHAIN_ARGS=()
 else
+  USER_NAME="$(id -un)"
+  USER_HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"
+  [[ -n "$USER_HOME_DIR" && "$USER_HOME_DIR" == /* ]] || { print -u2 "Could not resolve the user home directory."; exit 1; }
+  INSTALL_DIR="$USER_HOME_DIR/Applications"
+  INSTALL_APP="$INSTALL_DIR/Current.app"
+  PREVIOUS_APP="$INSTALL_DIR/Current.previous.app"
+  KEYCHAIN_PATH="$(security default-keychain -d user | tr -d '"')"
+  CODESIGN_KEYCHAIN_ARGS=(--keychain "$KEYCHAIN_PATH")
   SIGNING_IDENTITY="$(find_identity)"
   if [[ -z "$SIGNING_IDENTITY" ]]; then
     create_local_identity
@@ -102,14 +131,18 @@ iconutil -c icns "$ICONSET" -o "$PROJECT_DIR/.build/AppIcon.icns"
 rm -rf "$STAGE_APP"
 mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Helpers" "$STAGE_APP/Contents/Resources"
 cp Packaging/Info.plist "$STAGE_APP/Contents/Info.plist"
+if [[ -n "$APP_VERSION" ]]; then
+  plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
+  plutil -replace CFBundleVersion -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
+fi
 cp "$BIN_DIR/Current" "$STAGE_APP/Contents/MacOS/Current"
 cp "$BIN_DIR/CurrentRelauncher" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
 cp "$PROJECT_DIR/.build/AppIcon.icns" "$STAGE_APP/Contents/Resources/AppIcon.icns"
 cp Sources/Current/Resources/model-manifest.json Sources/Current/Resources/Privacy.md Licenses/NOTICE.md "$STAGE_APP/Contents/Resources/"
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do cp -R "$resource_bundle" "$STAGE_APP/Contents/Resources/"; done
 
-codesign --force --options runtime --timestamp=none --keychain "$KEYCHAIN_PATH" --sign "$SIGNING_IDENTITY" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
-codesign --force --options runtime --timestamp=none --keychain "$KEYCHAIN_PATH" --entitlements Packaging/Current.entitlements --sign "$SIGNING_IDENTITY" "$STAGE_APP"
+codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --sign "$SIGNING_IDENTITY" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
+codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements Packaging/Current.entitlements --sign "$SIGNING_IDENTITY" "$STAGE_APP"
 codesign --verify --deep --strict --verbose=2 "$STAGE_APP"
 
 if $ASSEMBLE_ONLY; then

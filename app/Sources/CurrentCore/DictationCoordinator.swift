@@ -8,6 +8,7 @@ public final class DictationCoordinator {
     public private(set) var phase: DictationPhase = .idle
     public private(set) var currentSession: DictationSession?
     public private(set) var lastTranscription = ""
+    public private(set) var partialTranscription = ""
     public private(set) var errorMessage: String?
 
     public let settings: SettingsStore
@@ -15,7 +16,9 @@ public final class DictationCoordinator {
     public let audio: AudioCaptureService
     public let insertion: InsertionService
     public let shortcut: ShortcutMonitor
+    public let vocabulary: LearnedVocabularyStore
     public var onPhaseChange: ((DictationPhase) -> Void)?
+    public var onPartialTranscriptionChange: ((String) -> Void)?
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
 
@@ -24,13 +27,15 @@ public final class DictationCoordinator {
         model: ModelManager = ModelManager(),
         audio: AudioCaptureService = AudioCaptureService(),
         insertion: InsertionService = InsertionService(),
-        shortcut: ShortcutMonitor = ShortcutMonitor()
+        shortcut: ShortcutMonitor = ShortcutMonitor(),
+        vocabulary: LearnedVocabularyStore = LearnedVocabularyStore()
     ) {
         self.settings = settings
         self.model = model
         self.audio = audio
         self.insertion = insertion
         self.shortcut = shortcut
+        self.vocabulary = vocabulary
         self.audio.selectedDeviceID = settings.inputDeviceID
         shortcut.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in self?.handleShortcut(event) }
@@ -74,17 +79,33 @@ public final class DictationCoordinator {
     public func pasteLastTranscription() {
         guard !lastTranscription.isEmpty else { return }
         Task {
-            _ = try? await insertion.insert(lastTranscription, trailingSpace: settings.trailingSpace, restoreClipboard: settings.restoreClipboard)
+            insertion.captureTarget()
+            _ = try? await insertion.insert(
+                lastTranscription,
+                context: insertion.currentContext,
+                restoreClipboard: true
+            )
         }
     }
 
     public func clearLastTranscription() { lastTranscription = "" }
+
+    public func undoLastInsertion() {
+        Task { _ = await insertion.undoLastInsertion() }
+    }
+
+    public func forgetLearnedWords() {
+        vocabulary.forgetAll()
+    }
 
     public func cancel() {
         guard currentSession != nil else { return }
         maximumDurationTask?.cancel()
         currentSession = nil
         audio.cancel()
+        partialTranscription = ""
+        onPartialTranscriptionChange?("")
+        Task { await model.transcription.stopPartialTranscription() }
         insertion.clearTarget()
         setPhase(.cancelled)
         scheduleIdle()
@@ -118,6 +139,20 @@ public final class DictationCoordinator {
             if phase != .armed { insertion.captureTarget() }
             currentSession = session
             try audio.start()
+            let transcription = model.transcription
+            audio.setSampleHandler { samples in
+                Task { await transcription.consumePartialSamples(samples) }
+            }
+            Task { [weak self] in
+                await transcription.prewarmRefinement()
+                await transcription.startPartialTranscription { [weak self] preview in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.currentSession?.id == session.id else { return }
+                        self.partialTranscription = preview
+                        self.onPartialTranscriptionChange?(preview)
+                    }
+                }
+            }
             setPhase(.recording)
             maximumDurationTask?.cancel()
             maximumDurationTask = Task { [weak self] in
@@ -140,19 +175,57 @@ public final class DictationCoordinator {
             return
         }
         setPhase(.transcribing)
+        let context = insertion.currentContext
+        let vocabularyEntries = vocabulary.entries
         Task { [weak self, transcription = model.transcription] in
             do {
-                let text = try await transcription.transcribe(samples)
+                await transcription.stopPartialTranscription()
+                let candidate = try await transcription.transcribe(
+                    DictationRequest(
+                        samples: samples,
+                        context: context,
+                        vocabulary: vocabularyEntries
+                    )
+                )
                 guard let self, self.currentSession?.id == session.id else { return }
+                let text: String
+                if context.isEditingSelection, let selection = context.selectedText {
+                    if let edit = await transcription.editSelection(
+                        selection,
+                        instruction: candidate.rawText,
+                        context: context
+                    ) {
+                        text = edit.text
+                    } else if Self.looksLikeUnsupportedEditInstruction(candidate.rawText) {
+                        throw CurrentError.transcriptionFailed(
+                            "That edit requires Apple Intelligence. Try dictating the replacement directly."
+                        )
+                    } else {
+                        text = candidate.refinedText
+                    }
+                    if let learned = Self.learnedCorrection(
+                        from: selection,
+                        to: text
+                    ) {
+                        self.vocabulary.learn(
+                            spokenForm: learned.spoken,
+                            writtenForm: learned.written
+                        )
+                    }
+                } else {
+                    text = candidate.refinedText
+                }
                 self.setPhase(.inserting)
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
                 let result = try await self.insertion.insert(
                     text,
-                    trailingSpace: self.settings.trailingSpace,
-                    restoreClipboard: self.settings.restoreClipboard
+                    context: context,
+                    restoreClipboard: true
                 )
                 guard self.currentSession?.id == session.id else { return }
                 self.lastTranscription = text
+                self.partialTranscription = ""
+                self.onPartialTranscriptionChange?("")
                 if Self.shouldRecordContext(
                     targetProcessIdentifier: targetProcessIdentifier,
                     currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
@@ -173,6 +246,9 @@ public final class DictationCoordinator {
 
     private func fail(_ error: Error) {
         audio.cancel()
+        partialTranscription = ""
+        onPartialTranscriptionChange?("")
+        Task { await model.transcription.stopPartialTranscription() }
         currentSession = nil
         insertion.clearTarget()
         errorMessage = error.localizedDescription
@@ -185,6 +261,65 @@ public final class DictationCoordinator {
         currentProcessIdentifier: pid_t
     ) -> Bool {
         targetProcessIdentifier != currentProcessIdentifier
+    }
+
+    nonisolated public static func learnedCorrection(
+        from original: String,
+        to corrected: String
+    ) -> (spoken: String, written: String)? {
+        let originalWords = original.split(whereSeparator: \.isWhitespace).map(String.init)
+        let correctedWords = corrected.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard originalWords.count == correctedWords.count else { return nil }
+        let changes = zip(originalWords, correctedWords).filter {
+            $0.0.compare(
+                $0.1,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) != .orderedSame
+        }
+        guard changes.count == 1, let change = changes.first else { return nil }
+        let allowed = CharacterSet.letters.union(
+            CharacterSet(charactersIn: "'’-")
+        )
+        guard change.0.unicodeScalars.allSatisfy(allowed.contains),
+              change.1.unicodeScalars.allSatisfy(allowed.contains),
+              spellingDistance(change.0.lowercased(), change.1.lowercased())
+                  <= max(2, min(change.0.count, change.1.count) / 3) else {
+            return nil
+        }
+        return (change.0, change.1)
+    }
+
+    nonisolated private static func spellingDistance(
+        _ lhs: String,
+        _ rhs: String
+    ) -> Int {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        var previous = Array(0...right.count)
+        for (leftIndex, leftCharacter) in left.enumerated() {
+            var current = [leftIndex + 1]
+            for (rightIndex, rightCharacter) in right.enumerated() {
+                current.append(
+                    min(
+                        current[rightIndex] + 1,
+                        previous[rightIndex + 1] + 1,
+                        previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
+                    )
+                )
+            }
+            previous = current
+        }
+        return previous.last ?? 0
+    }
+
+    nonisolated public static func looksLikeUnsupportedEditInstruction(
+        _ text: String
+    ) -> Bool {
+        let normalized = text.lowercased()
+        return [
+            "fix grammar", "make it shorter", "shorten", "rewrite", "translate",
+            "make professional", "make casual", "abbreviate", "summarize",
+        ].contains { normalized.contains($0) }
     }
 
     private func setPhase(_ phase: DictationPhase) {

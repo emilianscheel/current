@@ -30,8 +30,15 @@ public final class InsertionService {
         let processIdentifier: pid_t?
     }
 
+    private struct UndoSnapshot {
+        let processIdentifier: pid_t
+        let createdAt: Date
+    }
+
     private var target: Target?
+    private var undoSnapshot: UndoSnapshot?
     public private(set) var targetApplicationPresentation: TargetApplicationPresentation?
+    public private(set) var currentContext: DictationContext = .empty
 
     public init() {}
 
@@ -88,11 +95,22 @@ public final class InsertionService {
         targetApplicationPresentation = Self.applicationPresentation(
             processIdentifier: processIdentifier
         )
+        currentContext = Self.contextSnapshot(
+            element: element,
+            processIdentifier: processIdentifier,
+            application: targetApplicationPresentation
+        )
     }
 
     public func clearTarget() {
         target = nil
         targetApplicationPresentation = nil
+        currentContext = .empty
+    }
+
+    public var canUndoLastInsertion: Bool {
+        guard let undoSnapshot else { return false }
+        return Date().timeIntervalSince(undoSnapshot.createdAt) < 5 * 60
     }
 
     nonisolated static func eventProcessIdentifier(
@@ -119,20 +137,46 @@ public final class InsertionService {
         )
     }
 
-    public func insert(_ rawText: String, trailingSpace: Bool, restoreClipboard: Bool) async throws -> Result {
-        let text = Self.preparedText(rawText, trailingSpace: trailingSpace)
+    public func insert(
+        _ rawText: String,
+        context: DictationContext? = nil,
+        trailingSpace: Bool? = nil,
+        restoreClipboard: Bool = true
+    ) async throws -> Result {
+        let insertionContext = context ?? currentContext
+        let text: String
+        if let trailingSpace {
+            text = Self.preparedText(rawText, trailingSpace: trailingSpace)
+        } else {
+            text = Self.preparedText(rawText, context: insertionContext)
+        }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if insertionContext.isEditingSelection, rawText.isEmpty {
+                return try await deleteSelection(context: insertionContext)
+            }
             throw CurrentError.insertionFailed("The transcription was empty.")
         }
         if target == nil { captureTarget() }
+        let insertionTarget = target
         defer { clearTarget() }
         let pasteResult = await paste(
             text,
             into: target,
             restoreClipboard: restoreClipboard
         )
-        guard pasteResult == .copied else { return pasteResult }
-        return insertWithAccessibility(text, element: target?.element) ? .inserted : .copied
+        let result: Result
+        if pasteResult == .copied {
+            result = insertWithAccessibility(text, element: target?.element) ? .inserted : .copied
+        } else {
+            result = pasteResult
+        }
+        if result != .copied, let processIdentifier = insertionTarget?.processIdentifier {
+            undoSnapshot = UndoSnapshot(
+                processIdentifier: processIdentifier,
+                createdAt: Date()
+            )
+        }
+        return result
     }
 
     nonisolated public static func preparedText(_ rawText: String, trailingSpace: Bool) -> String {
@@ -141,12 +185,96 @@ public final class InsertionService {
         return trimmed + " "
     }
 
+    nonisolated public static func preparedText(
+        _ rawText: String,
+        context: DictationContext
+    ) -> String {
+        var text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+        guard !context.isEditingSelection else { return text }
+
+        if let before = context.textBeforeCursor.last,
+           !before.isWhitespace,
+           !before.isNewline,
+           let first = text.first,
+           !first.isWhitespace,
+           !",.;:!?)]}".contains(first) {
+            text.insert(" ", at: text.startIndex)
+        }
+
+        if let after = context.textAfterCursor.first {
+            if !after.isWhitespace,
+               !after.isNewline,
+               let last = text.last,
+               !last.isWhitespace,
+               !"([{\n".contains(last) {
+                text.append(" ")
+            }
+        } else if context.destination != .message,
+                  context.destination != .search,
+                  context.destination != .codeOrTerminal,
+                  let last = text.last,
+                  last.isLetter || last.isNumber {
+            text.append(" ")
+        }
+        return text
+    }
+
+    public func undoLastInsertion() async -> Bool {
+        guard canUndoLastInsertion,
+              let snapshot = undoSnapshot,
+              let application = NSRunningApplication(
+                  processIdentifier: snapshot.processIdentifier
+              ),
+              let source = CGEventSource(stateID: .combinedSessionState),
+              let down = CGEvent(
+                  keyboardEventSource: source,
+                  virtualKey: 6,
+                  keyDown: true
+              ),
+              let up = CGEvent(
+                  keyboardEventSource: source,
+                  virtualKey: 6,
+                  keyDown: false
+              ) else {
+            undoSnapshot = nil
+            return false
+        }
+        _ = application.activate(options: [])
+        try? await Task.sleep(for: .milliseconds(60))
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.postToPid(snapshot.processIdentifier)
+        up.postToPid(snapshot.processIdentifier)
+        undoSnapshot = nil
+        return true
+    }
+
     private func insertWithAccessibility(_ text: String, element: AXUIElement?) -> Bool {
         guard let element else { return false }
         var settable = DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
               settable.boolValue else { return false }
         return AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
+    }
+
+    private func deleteSelection(context: DictationContext) async throws -> Result {
+        guard context.isEditingSelection else {
+            throw CurrentError.insertionFailed("The transcription was empty.")
+        }
+        if target == nil { captureTarget() }
+        let insertionTarget = target
+        defer { clearTarget() }
+        if insertWithAccessibility("", element: target?.element) {
+            if let processIdentifier = insertionTarget?.processIdentifier {
+                undoSnapshot = UndoSnapshot(
+                    processIdentifier: processIdentifier,
+                    createdAt: Date()
+                )
+            }
+            return .inserted
+        }
+        throw CurrentError.insertionFailed("The selected text could not be deleted.")
     }
 
     private func paste(_ text: String, into target: Target?, restoreClipboard: Bool) async -> Result {
@@ -195,5 +323,229 @@ public final class InsertionService {
             pasteboard.writeObjects(restored)
         }
         return .pasted
+    }
+
+    private nonisolated static func contextSnapshot(
+        element: AXUIElement?,
+        processIdentifier: pid_t?,
+        application: TargetApplicationPresentation?
+    ) -> DictationContext {
+        guard let element else {
+            return DictationContext(
+                bundleIdentifier: application?.bundleIdentifier,
+                applicationName: application?.localizedName,
+                destination: destination(
+                    bundleIdentifier: application?.bundleIdentifier,
+                    applicationName: application?.localizedName,
+                    role: nil,
+                    subrole: nil,
+                    description: nil
+                )
+            )
+        }
+
+        let role = stringAttribute(kAXRoleAttribute, from: element)
+        let subrole = stringAttribute(kAXSubroleAttribute, from: element)
+        let description = stringAttribute(kAXDescriptionAttribute, from: element)
+            ?? stringAttribute(kAXHelpAttribute, from: element)
+        let isSecure = isSecureField(
+            role: role,
+            subrole: subrole,
+            description: description
+        )
+
+        let windowTitle = focusedWindowTitle(processIdentifier: processIdentifier)
+        let destination = destination(
+            bundleIdentifier: application?.bundleIdentifier,
+            applicationName: application?.localizedName,
+            role: role,
+            subrole: subrole,
+            description: description
+        )
+        guard !isSecure else {
+            return DictationContext(
+                bundleIdentifier: application?.bundleIdentifier,
+                applicationName: application?.localizedName,
+                windowTitle: windowTitle,
+                focusedRole: role,
+                focusedSubrole: subrole,
+                destination: destination,
+                isSecure: true
+            )
+        }
+
+        let selectedText = stringAttribute(kAXSelectedTextAttribute, from: element)
+        let value = stringAttribute(kAXValueAttribute, from: element) ?? ""
+        let selectedRange = rangeAttribute(kAXSelectedTextRangeAttribute, from: element)
+        let nearby = surroundingText(value: value, selectedRange: selectedRange)
+        let isSearch = destination == .search
+        let hasEditableSelection = !isSearch
+            && (selectedText?.count ?? 0) <= DictationContext.maximumSelectionCharacters
+            && !(selectedText?.isEmpty ?? true)
+        let identifiers = extractedIdentifiers(
+            from: [nearby.before, nearby.after, windowTitle ?? ""].joined(separator: " ")
+        )
+
+        return DictationContext(
+            bundleIdentifier: application?.bundleIdentifier,
+            applicationName: application?.localizedName,
+            windowTitle: windowTitle,
+            focusedRole: role,
+            focusedSubrole: subrole,
+            selectedText: hasEditableSelection ? selectedText : nil,
+            textBeforeCursor: nearby.before,
+            textAfterCursor: nearby.after,
+            visibleIdentifiers: identifiers,
+            destination: destination,
+            isSecure: false,
+            supportsSelectionEditing: hasEditableSelection
+        )
+    }
+
+    nonisolated static func destination(
+        bundleIdentifier: String?,
+        applicationName: String?,
+        role: String?,
+        subrole: String?,
+        description: String?
+    ) -> DictationDestination {
+        let identity = [
+            bundleIdentifier,
+            applicationName,
+            role,
+            subrole,
+            description,
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        if identity.contains("search")
+            || identity.contains("address field")
+            || identity.contains("location field") {
+            return .search
+        }
+        if [
+            "terminal", "iterm", "warp", "xcode", "cursor", "windsurf",
+            "visual studio code", "zed",
+        ].contains(where: identity.contains) {
+            return .codeOrTerminal
+        }
+        if [
+            "messages", "slack", "discord", "whatsapp", "telegram", "signal",
+            "teams", "wechat", "lark",
+        ].contains(where: identity.contains) {
+            return .message
+        }
+        if [
+            "mail", "outlook", "gmail", "pages", "word", "notes", "notion",
+            "google docs",
+        ].contains(where: identity.contains) {
+            return .emailOrDocument
+        }
+        return .generic
+    }
+
+    nonisolated static func isSecureField(
+        role: String?,
+        subrole: String?,
+        description: String?
+    ) -> Bool {
+        role == "AXSecureTextField"
+            || subrole?.localizedCaseInsensitiveContains("secure") == true
+            || description?.localizedCaseInsensitiveContains("password") == true
+    }
+
+    private nonisolated static func stringAttribute(
+        _ name: String,
+        from element: AXUIElement
+    ) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            name as CFString,
+            &value
+        ) == .success else { return nil }
+        return value as? String
+    }
+
+    private nonisolated static func rangeAttribute(
+        _ name: String,
+        from element: AXUIElement
+    ) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            name as CFString,
+            &value
+        ) == .success,
+              let value,
+              CFGetTypeID(value) == AXValueGetTypeID(),
+              AXValueGetType(value as! AXValue) == .cfRange else {
+            return nil
+        }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range) else {
+            return nil
+        }
+        return range
+    }
+
+    private nonisolated static func surroundingText(
+        value: String,
+        selectedRange: CFRange?
+    ) -> (before: String, after: String) {
+        guard let selectedRange,
+              selectedRange.location >= 0,
+              selectedRange.length >= 0 else {
+            return ("", "")
+        }
+        let utf16 = value.utf16
+        let location = min(selectedRange.location, utf16.count)
+        let end = min(location + selectedRange.length, utf16.count)
+        let startIndex = String.Index(utf16Offset: location, in: value)
+        let endIndex = String.Index(utf16Offset: end, in: value)
+        return (
+            String(value[..<startIndex].suffix(DictationContext.maximumNearbyCharacters / 2)),
+            String(value[endIndex...].prefix(DictationContext.maximumNearbyCharacters / 2))
+        )
+    }
+
+    private nonisolated static func focusedWindowTitle(
+        processIdentifier: pid_t?
+    ) -> String? {
+        guard let processIdentifier else { return nil }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedWindowAttribute as CFString,
+            &windowValue
+        ) == .success,
+              let windowValue else { return nil }
+        return stringAttribute(
+            kAXTitleAttribute,
+            from: windowValue as! AXUIElement
+        )
+    }
+
+    private nonisolated static func extractedIdentifiers(from text: String) -> [String] {
+        let patterns = [
+            #"\b[A-Za-z][A-Za-z0-9_-]*\.(?:swift|ts|tsx|js|jsx|py|go|rs|json|md|ya?ml)\b"#,
+            #"\b[A-Z]{2,8}\b"#,
+            #"\b[a-z]+(?:[A-Z][A-Za-z0-9]*)+\b"#,
+        ]
+        var values: [String] = []
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            for match in expression.matches(in: text, range: range) {
+                guard let range = Range(match.range, in: text) else { continue }
+                let value = String(text[range])
+                if !values.contains(value) { values.append(value) }
+            }
+        }
+        return Array(values.prefix(80))
     }
 }

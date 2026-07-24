@@ -38,18 +38,15 @@ struct SettingsView: View {
             Toggle("Current enabled", isOn: $runtime.settings.isEnabled)
             Toggle("Launch at login", isOn: $runtime.settings.launchAtLogin)
             Toggle("Show Dock icon", isOn: $runtime.settings.showDockIcon)
-            LabeledContent("Hold fn threshold") {
-                HStack { Slider(value: $runtime.settings.holdThresholdMilliseconds, in: 100...500, step: 10); Text("\(Int(runtime.settings.holdThresholdMilliseconds)) ms").monospacedDigit() }.frame(width: 280)
-            }
             Picker("Fallback shortcut", selection: $runtime.settings.fallbackShortcut) {
                 Text("Control–Option–Space").tag("control-option-space")
                 Text("Command–Shift–Space").tag("command-shift-space")
                 Text("Disabled").tag("disabled")
             }
         }
-        Section("Insertion") {
-            Toggle("Add a trailing space", isOn: $runtime.settings.trailingSpace)
-            Toggle("Restore previous clipboard", isOn: $runtime.settings.restoreClipboard)
+        Section("Automatic by design") {
+            Label("Spacing, punctuation, formatting, and language detection adapt automatically", systemImage: "wand.and.sparkles")
+                .foregroundStyle(.secondary)
         }
         Section { Button("Review onboarding and permissions") { runtime.onboarding.show() } }
     }
@@ -62,10 +59,6 @@ struct SettingsView: View {
             }
             LabeledContent("Current level") { ProgressView(value: Double(runtime.coordinator.audio.level)).frame(width: 220) }
             Toggle("Start and stop sounds", isOn: $runtime.settings.soundsEnabled)
-        }
-        Section("Recording limits") {
-            LabeledContent("Minimum") { TextField("Seconds", value: $runtime.settings.minimumRecordingDuration, format: .number).frame(width: 80) }
-            LabeledContent("Maximum") { TextField("Seconds", value: $runtime.settings.maximumRecordingDuration, format: .number).frame(width: 80) }
         }
     }
 
@@ -88,7 +81,6 @@ struct SettingsView: View {
     @ViewBuilder private var appearance: some View {
         Section("Notch overlay") {
             Toggle("Show recording overlay", isOn: $runtime.settings.overlayEnabled)
-            LabeledContent("Animation intensity") { Slider(value: $runtime.settings.animationIntensity, in: 0...1).frame(width: 240) }
             Text("Current follows Reduce Motion and Reduce Transparency automatically.").foregroundStyle(.secondary)
         }
     }
@@ -99,12 +91,18 @@ struct SettingsView: View {
             Label("No network requests occur during dictation", systemImage: "network.slash")
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
+            Label("Nearby text is ephemeral and secure fields are never read", systemImage: "text.viewfinder")
             Button("Open Context Library…") { runtime.context.show() }
         }
         Section("Recovery") {
             LabeledContent("Last transcription", value: runtime.coordinator.lastTranscription.isEmpty ? "None" : runtime.coordinator.lastTranscription)
             Button("Clear last transcription", role: .destructive) { runtime.coordinator.clearLastTranscription() }
                 .disabled(runtime.coordinator.lastTranscription.isEmpty)
+            LabeledContent("Learned corrections", value: "\(runtime.coordinator.vocabulary.entries.count)")
+            Button("Forget learned words", role: .destructive) {
+                runtime.coordinator.forgetLearnedWords()
+            }
+            .disabled(runtime.coordinator.vocabulary.entries.isEmpty)
         }
     }
 

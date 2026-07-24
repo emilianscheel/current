@@ -56,6 +56,220 @@ import Testing
     #expect(InsertionService.preparedText("", trailingSpace: true) == "")
 }
 
+@Test func contextAwareInsertionSpacingUsesSurroundingText() {
+    let middle = DictationContext(
+        textBeforeCursor: "Hello",
+        textAfterCursor: "world",
+        destination: .emailOrDocument
+    )
+    #expect(InsertionService.preparedText("beautiful", context: middle) == " beautiful ")
+
+    let messageEnd = DictationContext(destination: .message)
+    #expect(InsertionService.preparedText("sounds good", context: messageEnd) == "sounds good")
+
+    let selected = DictationContext(
+        selectedText: "old",
+        destination: .generic,
+        supportsSelectionEditing: true
+    )
+    #expect(InsertionService.preparedText("new", context: selected) == "new")
+}
+
+@Test func dictationContextBoundsEphemeralTextAndSelectionState() {
+    let context = DictationContext(
+        selectedText: "two selected words",
+        textBeforeCursor: String(repeating: "a", count: 2_000),
+        textAfterCursor: String(repeating: "b", count: 2_000),
+        supportsSelectionEditing: true
+    )
+    #expect(context.textBeforeCursor.count == DictationContext.maximumNearbyCharacters / 2)
+    #expect(context.textAfterCursor.count == DictationContext.maximumNearbyCharacters / 2)
+    #expect(context.isEditingSelection)
+    #expect(context.selectedWordCount == 3)
+}
+
+@Test func deterministicRefinementCleansSpeechWithoutChangingIntent() {
+    let context = DictationContext(destination: .message)
+    let result = DeterministicRefiner.refine(
+        "Um hello hello there comma see you Tuesday actually Wednesday period",
+        context: context
+    )
+    #expect(result.text == "Hello there, see you Wednesday")
+    #expect(result.transformations.contains(.fillerRemoval))
+    #expect(result.transformations.contains(.repetitionRemoval))
+    #expect(result.transformations.contains(.spokenPunctuation))
+    #expect(result.transformations.contains(.backtrack))
+    #expect(result.transformations.contains(.contextualPunctuation))
+}
+
+@Test func deterministicRefinementPreservesNonCorrectionActually() {
+    let result = DeterministicRefiner.refine(
+        "I actually enjoyed the movie",
+        context: .empty
+    )
+    #expect(result.text == "I actually enjoyed the movie")
+    #expect(!result.transformations.contains(.backtrack))
+}
+
+@Test func deterministicRefinementFormatsUnmistakableLists() {
+    let result = DeterministicRefiner.refine(
+        "My goals are one finish the report two send the email three take a break",
+        context: DictationContext(destination: .emailOrDocument)
+    )
+    #expect(
+        result.text
+            == "My goals are:\n1. Finish the report\n2. Send the email\n3. Take a break"
+    )
+    #expect(result.transformations.contains(.listFormatting))
+}
+
+@Test func contextualVocabularyRestoresVisibleTechnicalIdentifiers() {
+    let context = DictationContext(
+        visibleIdentifiers: ["CurrentCore.swift", "FluidAudio"],
+        destination: .codeOrTerminal
+    )
+    let result = DeterministicRefiner.refine(
+        "open current core dot swift with fluid audio",
+        context: context
+    )
+    #expect(result.text == "Open CurrentCore.swift with FluidAudio")
+    #expect(result.transformations.contains(.contextualVocabulary))
+}
+
+@Test func learnedReplacementAppliesAsAWholePhrase() {
+    let entries = [
+        LearnedVocabularyEntry(spokenForm: "whisper flow", writtenForm: "Wispr Flow"),
+    ]
+    let result = DeterministicRefiner.refine(
+        "compare whisper flow today",
+        context: .empty,
+        vocabulary: entries
+    )
+    #expect(result.text == "Compare Wispr Flow today")
+    #expect(result.transformations.contains(.learnedReplacement))
+}
+
+@Test func semanticSafetyGatePreservesCriticalAnchors() {
+    let source = "Do not send $25 to https://example.com from main.swift."
+    #expect(
+        SemanticSafetyGate.accepts(
+            candidate: "Do not send $25 to https://example.com from main.swift.",
+            preserving: source
+        )
+    )
+    #expect(
+        !SemanticSafetyGate.accepts(
+            candidate: "Send $50 to https://example.com from main.swift.",
+            preserving: source
+        )
+    )
+    #expect(
+        !SemanticSafetyGate.accepts(
+            candidate: "Do not send $25 to https://other.example from main.swift.",
+            preserving: source
+        )
+    )
+}
+
+@MainActor
+@Test func learnedVocabularyPersistsAndCanBeForgotten() {
+    let suiteName = "CurrentVocabularyTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let first = LearnedVocabularyStore(defaults: defaults)
+    first.learn(spokenForm: "whisper flow", writtenForm: "Wispr Flow")
+    first.learn(spokenForm: "same", writtenForm: "same")
+    #expect(first.entries.count == 1)
+
+    let restored = LearnedVocabularyStore(defaults: defaults)
+    #expect(restored.entries.first?.writtenForm == "Wispr Flow")
+    restored.forgetAll()
+    #expect(restored.entries.isEmpty)
+}
+
+@Test func correctionLearningAcceptsOnlyOneChangedTerm() {
+    let correction = DictationCoordinator.learnedCorrection(
+        from: "Ask Tony tomorrow",
+        to: "Ask Toni tomorrow"
+    )
+    #expect(correction?.spoken == "Tony")
+    #expect(correction?.written == "Toni")
+    #expect(
+        DictationCoordinator.learnedCorrection(
+            from: "Ask Tony tomorrow",
+            to: "Please ask Toni today"
+        ) == nil
+    )
+    #expect(
+        DictationCoordinator.learnedCorrection(
+            from: "Meet at 5pm",
+            to: "Meet at 6pm"
+        ) == nil
+    )
+}
+
+private struct DictationEvaluationFixture: Decodable {
+    struct Case: Decodable {
+        let name: String
+        let raw: String
+        let destination: DictationDestination
+        let before: String?
+        let after: String?
+        let identifiers: [String]?
+        let expected: String
+    }
+
+    let version: Int
+    let cases: [Case]
+}
+
+@Test func versionedDictationEvaluationCorpusPassesDeterministicFallback() throws {
+    let url = try #require(
+        Bundle.module.url(
+            forResource: "dictation-evaluation-v1",
+            withExtension: "json"
+        )
+    )
+    let fixture = try JSONDecoder().decode(
+        DictationEvaluationFixture.self,
+        from: Data(contentsOf: url)
+    )
+    #expect(fixture.version == 1)
+    #expect(fixture.cases.count >= 8)
+    for evaluation in fixture.cases {
+        let result = DeterministicRefiner.refine(
+            evaluation.raw,
+            context: DictationContext(
+                textBeforeCursor: evaluation.before ?? "",
+                textAfterCursor: evaluation.after ?? "",
+                visibleIdentifiers: evaluation.identifiers ?? [],
+                destination: evaluation.destination
+            )
+        )
+        #expect(
+            result.text == evaluation.expected,
+            "Evaluation failed: \(evaluation.name)"
+        )
+    }
+}
+
+@Test func directSelectionEditsWorkWithoutFoundationModel() async {
+    let service = ContextualRefinementService()
+    let spelling = await service.edit(
+        selection: "Tony",
+        instruction: "It's T-O-N-I",
+        context: .empty
+    )
+    #expect(spelling?.text == "Toni")
+
+    let changed = await service.edit(
+        selection: "The meeting is at 5pm Thursday.",
+        instruction: "Change 5pm to 6pm",
+        context: .empty
+    )
+    #expect(changed?.text == "The meeting is at 6pm Thursday.")
+}
+
 @Test func pasteTargetsFrontmostAppInsteadOfWebContentProcess() {
     #expect(
         InsertionService.eventProcessIdentifier(
@@ -68,6 +282,60 @@ import Testing
             frontmost: nil,
             accessibilityElement: 202
         ) == 202
+    )
+}
+
+@Test func destinationClassificationUsesAppAndFieldSemantics() {
+    #expect(
+        InsertionService.destination(
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            applicationName: "Slack",
+            role: "AXTextArea",
+            subrole: nil,
+            description: nil
+        ) == .message
+    )
+    #expect(
+        InsertionService.destination(
+            bundleIdentifier: "com.apple.Terminal",
+            applicationName: "Terminal",
+            role: "AXTextArea",
+            subrole: nil,
+            description: nil
+        ) == .codeOrTerminal
+    )
+    #expect(
+        InsertionService.destination(
+            bundleIdentifier: "com.apple.Safari",
+            applicationName: "Safari",
+            role: "AXTextField",
+            subrole: "AXSearchField",
+            description: "Address and Search"
+        ) == .search
+    )
+}
+
+@Test func secureFieldDetectionNeverDependsOnReadableValue() {
+    #expect(
+        InsertionService.isSecureField(
+            role: "AXSecureTextField",
+            subrole: nil,
+            description: nil
+        )
+    )
+    #expect(
+        InsertionService.isSecureField(
+            role: "AXTextField",
+            subrole: "AXSecureInput",
+            description: nil
+        )
+    )
+    #expect(
+        !InsertionService.isSecureField(
+            role: "AXTextField",
+            subrole: nil,
+            description: "Email address"
+        )
     )
 }
 

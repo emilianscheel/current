@@ -40,7 +40,18 @@ final class AppRuntime {
             guard let self else { return }
             self.overlay.show(
                 phase: phase,
-                targetApplication: self.coordinator.insertion.targetApplicationPresentation
+                targetApplication: self.coordinator.insertion.targetApplicationPresentation,
+                editingWordCount: self.coordinator.insertion.currentContext.selectedWordCount,
+                partialTranscript: self.coordinator.partialTranscription
+            )
+        }
+        coordinator.onPartialTranscriptionChange = { [weak self] partial in
+            guard let self else { return }
+            self.overlay.show(
+                phase: self.coordinator.phase,
+                targetApplication: self.coordinator.insertion.targetApplicationPresentation,
+                editingWordCount: self.coordinator.insertion.currentContext.selectedWordCount,
+                partialTranscript: partial
             )
         }
         coordinator.onSuccessfulTranscription = { [weak self] text, date in

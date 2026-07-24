@@ -40,6 +40,20 @@ final class AudioSampleAccumulator: @unchecked Sendable {
     }
 }
 
+private final class AudioSampleRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable ([Float]) -> Void)?
+
+    func setHandler(_ handler: (@Sendable ([Float]) -> Void)?) {
+        lock.withLock { self.handler = handler }
+    }
+
+    func yield(_ samples: [Float]) {
+        let current = lock.withLock { handler }
+        current?(samples)
+    }
+}
+
 public struct AudioLevelEnvelope: Sendable, Equatable {
     public private(set) var value: Float = 0
 
@@ -106,8 +120,15 @@ public final class AudioCaptureService {
     @ObservationIgnored private let engine = AVAudioEngine()
     @ObservationIgnored private let accumulator = AudioSampleAccumulator()
     @ObservationIgnored private let meterState = AudioLevelState()
+    @ObservationIgnored private let sampleRelay = AudioSampleRelay()
 
     public init() {}
+
+    public func setSampleHandler(
+        _ handler: (@Sendable ([Float]) -> Void)?
+    ) {
+        sampleRelay.setHandler(handler)
+    }
 
     public func availableInputDevices() -> [InputDevice] {
         inputDeviceIDs().map { id in
@@ -155,6 +176,7 @@ public final class AudioCaptureService {
             converter: converter,
             accumulator: accumulator,
             meterState: meterState,
+            sampleRelay: sampleRelay,
             service: self
         )
         input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat, block: tapHandler)
@@ -287,6 +309,7 @@ public final class AudioCaptureService {
         converter: AVAudioConverter,
         accumulator: AudioSampleAccumulator,
         meterState: AudioLevelState,
+        sampleRelay: AudioSampleRelay,
         service: AudioCaptureService
     ) -> AVAudioNodeTapBlock {
         { [weak service] buffer, _ in
@@ -309,6 +332,7 @@ public final class AudioCaptureService {
             let chunk = Array(UnsafeBufferPointer(start: channel, count: count))
             let rms = sqrt(chunk.reduce(Float.zero) { $0 + $1 * $1 } / Float(max(1, count)))
             accumulator.append(chunk)
+            sampleRelay.yield(chunk)
             guard let level = meterState.consume(rms: rms) else { return }
             Task { @MainActor [weak service] in
                 guard let service, service.engine.isRunning else { return }
@@ -318,6 +342,7 @@ public final class AudioCaptureService {
     }
 
     public func stop() -> [Float] {
+        sampleRelay.setHandler(nil)
         if engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()

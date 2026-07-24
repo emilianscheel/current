@@ -346,11 +346,6 @@ private struct ContextManagementView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            TextField("Search context", text: $model.searchText)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.large)
-            .padding(12)
-
             if !model.filteredDocuments.isEmpty {
                 List(
                     selection: Binding(
@@ -361,12 +356,31 @@ private struct ContextManagementView: View {
                     ForEach(model.filteredDocuments) { document in
                         contextRow(document)
                             .tag(document.id)
+                            .listRowInsets(
+                                EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
+                            )
+                            .listRowBackground(
+                                document.id == model.selectedDocumentID
+                                    ? Color.gray.opacity(0.08)
+                                    : Color.clear
+                            )
                     }
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+                .searchable(
+                    text: $model.searchText,
+                    placement: .sidebar,
+                    prompt: "Search context"
+                )
+                .tint(Color.gray.opacity(0.18))
             } else {
                 Spacer()
+                    .searchable(
+                        text: $model.searchText,
+                        placement: .sidebar,
+                        prompt: "Search context"
+                    )
             }
         }
     }

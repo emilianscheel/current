@@ -23,6 +23,10 @@ let package = Package(
             resources: [.process("Resources")]
         ),
         .executableTarget(name: "CurrentRelauncher"),
-        .testTarget(name: "CurrentCoreTests", dependencies: ["CurrentCore"]),
+        .testTarget(
+            name: "CurrentCoreTests",
+            dependencies: ["CurrentCore"],
+            resources: [.process("Fixtures")]
+        ),
     ]
 )

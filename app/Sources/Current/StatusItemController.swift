@@ -30,6 +30,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add(runtime.coordinator.phase == .recording ? "Stop and Transcribe" : "Start Dictation", to: menu, action: #selector(toggleCapture))
         add("Paste Last Transcription", to: menu, action: #selector(pasteLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
         add("Copy Last Transcription", to: menu, action: #selector(copyLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
+        add("Undo Last Insertion", to: menu, action: #selector(undoLast), enabled: runtime.coordinator.insertion.canUndoLastInsertion)
         add("Context…", to: menu, action: #selector(openContext))
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
@@ -61,6 +62,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleCapture() { runtime.coordinator.beginFromMenu() }
     @objc private func pasteLast() { runtime.coordinator.pasteLastTranscription() }
     @objc private func copyLast() { runtime.coordinator.copyLastTranscription() }
+    @objc private func undoLast() { runtime.coordinator.undoLastInsertion() }
     @objc private func openContext() { runtime.context.show() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
     @objc private func openOnboarding() { runtime.onboarding.show() }

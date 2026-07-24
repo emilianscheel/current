@@ -10,6 +10,8 @@ final class OverlayModel {
     var phase: DictationPhase = .idle
     var presentationProgress: CGFloat = 0
     var targetApplication: InsertionService.TargetApplicationPresentation?
+    var editingWordCount = 0
+    var partialTranscript = ""
     var layout = OverlayLayout(
         screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
         safeAreaTop: 0,
@@ -43,7 +45,9 @@ final class NotchOverlayController {
 
     func show(
         phase: DictationPhase,
-        targetApplication: InsertionService.TargetApplicationPresentation?
+        targetApplication: InsertionService.TargetApplicationPresentation?,
+        editingWordCount: Int = 0,
+        partialTranscript: String = ""
     ) {
         guard settings.overlayEnabled else { collapse(); return }
         autoHideTask?.cancel()
@@ -54,9 +58,11 @@ final class NotchOverlayController {
         default:
             let wasVisible = panel?.isVisible == true
             model.phase = phase
+            model.partialTranscript = partialTranscript
             if phase == .armed || phase == .recording {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     model.targetApplication = targetApplication
+                    model.editingWordCount = editingWordCount
                 }
             }
             ensurePanel()
@@ -153,6 +159,8 @@ final class NotchOverlayController {
         guard panel?.isVisible == true else {
             sessionDisplayID = nil
             model.targetApplication = nil
+            model.editingWordCount = 0
+            model.partialTranscript = ""
             return
         }
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -167,6 +175,8 @@ final class NotchOverlayController {
             self.panel?.orderOut(nil)
             self.sessionDisplayID = nil
             self.model.targetApplication = nil
+            self.model.editingWordCount = 0
+            self.model.partialTranscript = ""
         }
     }
 
@@ -290,6 +300,20 @@ private struct NotchOverlayView: View {
     private var content: some View {
         HStack(spacing: 16) {
             targetApplicationIcon
+            if model.editingWordCount > 0 {
+                Text("Editing \(model.editingWordCount) \(model.editingWordCount == 1 ? "word" : "words")")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+            } else if !model.partialTranscript.isEmpty {
+                Text(model.partialTranscript)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .transition(.opacity)
+            }
             Spacer(minLength: 20)
             PhaseActivity(
                 phase: model.phase,

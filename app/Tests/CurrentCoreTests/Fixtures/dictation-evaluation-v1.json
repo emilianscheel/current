@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "spontaneous filler, repetition, correction, and chat punctuation",
+      "raw": "Um hello hello there comma see you Tuesday actually Wednesday period",
+      "destination": "message",
+      "expected": "Hello there, see you Wednesday"
+    },
+    {
+      "name": "unmistakable three-item list",
+      "raw": "My goals are one finish the report two send the email three take a break",
+      "destination": "emailOrDocument",
+      "expected": "My goals are:\n1. Finish the report\n2. Send the email\n3. Take a break"
+    },
+    {
+      "name": "technical identifier from visible context",
+      "raw": "open current core dot swift with fluid audio",
+      "destination": "codeOrTerminal",
+      "identifiers": ["CurrentCore.swift", "FluidAudio"],
+      "expected": "Open CurrentCore.swift with FluidAudio"
+    },
+    {
+      "name": "mid-sentence continuation",
+      "raw": "Meet tomorrow",
+      "destination": "emailOrDocument",
+      "before": "We should ",
+      "expected": "meet tomorrow"
+    },
+    {
+      "name": "multilingual capitalization",
+      "raw": "bonjour tout le monde",
+      "destination": "generic",
+      "expected": "Bonjour tout le monde"
+    },
+    {
+      "name": "explicit punctuation and line break",
+      "raw": "first line new line second line question mark",
+      "destination": "emailOrDocument",
+      "expected": "First line\nsecond line?"
+    },
+    {
+      "name": "ordinary actually is not a correction",
+      "raw": "I actually enjoyed the movie",
+      "destination": "generic",
+      "expected": "I actually enjoyed the movie"
+    },
+    {
+      "name": "negation and protected values remain literal",
+      "raw": "Do not send 25 dollars to Toni",
+      "destination": "emailOrDocument",
+      "identifiers": ["Toni"],
+      "expected": "Do not send 25 dollars to Toni"
+    }
+  ]
+}

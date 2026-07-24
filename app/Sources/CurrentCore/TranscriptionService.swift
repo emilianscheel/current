@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import CryptoKit
 import FluidAudio
 import Foundation
@@ -5,8 +6,14 @@ import Observation
 
 public actor TranscriptionService {
     private var manager: AsrManager?
+    private var loadedModels: AsrModels?
+    private var partialManager: SlidingWindowAsrManager?
+    private var partialUpdateTask: Task<Void, Never>?
+    private let refinement: ContextualRefinementService
 
-    public init() {}
+    public init(refinement: ContextualRefinementService = ContextualRefinementService()) {
+        self.refinement = refinement
+    }
 
     public func prepare(progress: (@Sendable (Double) -> Void)? = nil) async throws {
         guard manager == nil else { return }
@@ -39,6 +46,7 @@ public actor TranscriptionService {
             encoderPrecision: .int8
         )
         let manager = AsrManager(models: models)
+        loadedModels = models
         self.manager = manager
     }
 
@@ -51,7 +59,99 @@ public actor TranscriptionService {
         return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    public func unload() { manager = nil }
+    public func transcribe(_ request: DictationRequest) async throws -> TranscriptionCandidate {
+        let rawText = try await transcribe(request.samples)
+        let deterministic = DeterministicRefiner.refine(
+            rawText,
+            context: request.context,
+            vocabulary: request.vocabulary
+        )
+        let refined = await refinement.refine(
+            deterministic: deterministic,
+            rawText: rawText,
+            context: request.context
+        )
+        return TranscriptionCandidate(rawText: rawText, refinement: refined)
+    }
+
+    public func prewarmRefinement() async {
+        await refinement.prewarm()
+    }
+
+    public func editSelection(
+        _ selection: String,
+        instruction: String,
+        context: DictationContext
+    ) async -> RefinementResult? {
+        await refinement.edit(
+            selection: selection,
+            instruction: instruction,
+            context: context
+        )
+    }
+
+    public func startPartialTranscription(
+        onUpdate: @escaping @Sendable (String) -> Void
+    ) async {
+        await stopPartialTranscription()
+        guard let loadedModels else { return }
+        do {
+            let partialManager = SlidingWindowAsrManager()
+            try await partialManager.loadModels(loadedModels)
+            try await partialManager.startStreaming(source: .microphone)
+            self.partialManager = partialManager
+            partialUpdateTask = Task {
+                let updates = await partialManager.transcriptionUpdates
+                for await update in updates {
+                    guard !Task.isCancelled else { return }
+                    let confirmed = await partialManager.confirmedTranscript
+                    let preview = [confirmed, update.text]
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " ")
+                    onUpdate(preview)
+                }
+            }
+        } catch {
+            partialManager = nil
+            partialUpdateTask = nil
+        }
+    }
+
+    public func consumePartialSamples(_ samples: [Float]) async {
+        guard let partialManager,
+              !samples.isEmpty,
+              let format = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: 16_000,
+                  channels: 1,
+                  interleaved: false
+              ),
+              let buffer = AVAudioPCMBuffer(
+                  pcmFormat: format,
+                  frameCapacity: AVAudioFrameCount(samples.count)
+              ),
+              let channel = buffer.floatChannelData?.pointee else {
+            return
+        }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        channel.update(from: samples, count: samples.count)
+        await partialManager.streamAudio(buffer)
+    }
+
+    public func stopPartialTranscription() async {
+        partialUpdateTask?.cancel()
+        partialUpdateTask = nil
+        if let partialManager {
+            await partialManager.cancel()
+        }
+        partialManager = nil
+    }
+
+    public func unload() async {
+        await stopPartialTranscription()
+        manager = nil
+        loadedModels = nil
+    }
 
     public nonisolated func verifyInstalledModel() throws {
         let locations = ModelSnapshotLocations.current

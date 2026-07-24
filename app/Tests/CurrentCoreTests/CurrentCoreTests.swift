@@ -165,28 +165,86 @@ import Testing
     #expect(throws: CurrentError.self) { try ModelIntegrity.verifyOrCreateManifest(for: model, manifestURL: manifest) }
 }
 
-@Test func partialModelSnapshotIsNotReady() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-model-\(UUID().uuidString)")
-    defer { try? FileManager.default.removeItem(at: root) }
-
-    let required = [
-        "parakeet_unified_encoder_int8.mlmodelc/coremldata.bin",
-        "parakeet_unified_decoder.mlmodelc/coremldata.bin",
-        "parakeet_unified_joint_decision_single_step.mlmodelc/coremldata.bin",
-        "vocab.json",
-        "metadata.json",
-    ]
-    for relativePath in required {
+private func createCompleteModelSnapshot(at root: URL) throws {
+    for relativePath in ModelSnapshotValidator.requiredFiles {
         let file = root.appendingPathComponent(relativePath)
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("complete".utf8).write(to: file)
     }
+}
+
+@Test func modelSnapshotRequiresEveryNonemptyV3Artifact() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-model-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try createCompleteModelSnapshot(at: root)
     #expect(ModelSnapshotValidator.isComplete(at: root))
 
-    let partial = root.appendingPathComponent("parakeet_unified_encoder_int8.mlmodelc/weights/weight.bin.partial")
+    let missing = root.appendingPathComponent(ModelSnapshotValidator.requiredFiles[0])
+    try FileManager.default.removeItem(at: missing)
+    #expect(!ModelSnapshotValidator.isComplete(at: root))
+
+    try Data("restored".utf8).write(to: missing)
+    let empty = root.appendingPathComponent(ModelSnapshotValidator.requiredFiles[1])
+    try Data().write(to: empty)
+    #expect(!ModelSnapshotValidator.isComplete(at: root))
+}
+
+@Test func partialV3ModelSnapshotIsNotReady() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-model-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try createCompleteModelSnapshot(at: root)
+    let partial = root.appendingPathComponent("Encoder.mlmodelc/weights/weight.bin.partial")
     try FileManager.default.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data("unfinished".utf8).write(to: partial)
     #expect(!ModelSnapshotValidator.isComplete(at: root))
+}
+
+@Test func legacyModelCleanupRunsOnlyAfterReplacementIsReady() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-migration-\(UUID().uuidString)")
+    let models = root.appendingPathComponent("Models", isDirectory: true)
+    let snapshot = models.appendingPathComponent("legacy", isDirectory: true)
+    let manifest = models.appendingPathComponent("legacy-integrity.json")
+    let locations = ModelSnapshotLocations(models: models, snapshot: snapshot, integrityManifest: manifest)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data("legacy".utf8).write(to: snapshot.appendingPathComponent("weight.bin"))
+    try Data("manifest".utf8).write(to: manifest)
+
+    LegacyModelCleanup.removeIfReplacementReady(false, locations: locations)
+    #expect(FileManager.default.fileExists(atPath: snapshot.path))
+    #expect(FileManager.default.fileExists(atPath: manifest.path))
+
+    LegacyModelCleanup.removeIfReplacementReady(true, locations: locations)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+    #expect(!FileManager.default.fileExists(atPath: manifest.path))
+}
+
+private final class FailingRemovalFileManager: FileManager, @unchecked Sendable {
+    override func removeItem(at URL: URL) throws {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+}
+
+@Test func legacyCleanupFailureDoesNotRemoveOrFailReplacement() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-migration-\(UUID().uuidString)")
+    let snapshot = root.appendingPathComponent("legacy", isDirectory: true)
+    let manifest = root.appendingPathComponent("legacy-integrity.json")
+    let locations = ModelSnapshotLocations(models: root, snapshot: snapshot, integrityManifest: manifest)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data("legacy".utf8).write(to: manifest)
+    LegacyModelCleanup.removeIfReplacementReady(
+        true,
+        locations: locations,
+        fileManager: FailingRemovalFileManager()
+    )
+
+    #expect(FileManager.default.fileExists(atPath: snapshot.path))
+    #expect(FileManager.default.fileExists(atPath: manifest.path))
 }
 
 @Test func overlayLayoutAttachesToPhysicalNotch() {

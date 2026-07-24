@@ -28,16 +28,16 @@ The event tap never suppresses `fn` events and abandons a pending recording if a
 
 ## On-device model
 
-Current uses **Parakeet Unified English 0.6B Core ML** with the INT8 encoder through [FluidAudio](https://github.com/FluidInference/FluidAudio). The model is English-only and includes punctuation and capitalization.
+Current uses **Parakeet TDT 0.6B v3 Multilingual Core ML** with the INT8 encoder through [FluidAudio](https://github.com/FluidInference/FluidAudio). It automatically detects German, French, Italian, Spanish, or English for each dictation and includes punctuation and capitalization. The underlying model supports 25 European languages; these five are Current's supported product languages.
 
-Published LibriSpeech `test-clean` results for the pinned model family report approximately 2.16% average WER and 144× overall real-time throughput in batch mode. See the [model card](https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml) for methodology. Real app latency depends on utterance length, model warmth, chip, and memory pressure.
+The upstream model reports FLEURS WER of 5.04% German, 5.15% French, 3.00% Italian, 3.45% Spanish, and 4.85% English. FluidAudio's Core ML benchmark reports approximately 210× overall real-time throughput on an M4 Pro across the complete 25-language FLEURS evaluation. See the [NVIDIA model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) and [FluidAudio benchmarks](https://github.com/FluidInference/FluidAudio/blob/main/Documentation/Benchmarks.md) for methodology. Real app latency depends on utterance length, model warmth, chip, and memory pressure.
 
 The model downloads automatically during onboarding and is cached by FluidAudio. Current verifies local model files before use and keeps the loaded model warm while enabled. Dictation itself never requires the network.
 
 Licensing:
 
 - FluidAudio: Apache License 2.0
-- Parakeet Unified English Core ML: CC BY 4.0
+- Parakeet TDT 0.6B v3 Multilingual Core ML: CC BY 4.0
 
 Attributions are included in `app/Licenses/NOTICE.md` and the app’s About panel.
 
@@ -185,6 +185,8 @@ Before release, manually test:
 - first request, denial, later approval, revocation, and Input Monitoring restart
 - two consecutive runs of `app/build-install-restart.sh` with permissions and settings preserved
 - offline dictation after model setup
+- automatic detection and transcription of German, French, Italian, Spanish, and English
+- consecutive dictations in different supported languages
 - M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 
 Targets are feedback within 100 ms after the hold threshold, no sustained idle work beyond the event tap, and warm release-to-result below 1.5 seconds for a typical short phrase on the reference M3 Pro MacBook.
@@ -197,7 +199,7 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 
 ## Out of scope for v1
 
-- Non-English or multilingual models
+- Mid-utterance code switching guarantees
 - Cloud transcription or accounts
 - Transcript history UI or synchronization
 - Meeting transcription and speaker diarization

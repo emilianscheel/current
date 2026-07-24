@@ -169,7 +169,7 @@ struct OnboardingView: View {
                 StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.", text: "Hold fn, speak naturally, then release to type into the app you were using.") {
                     VStack(alignment: .leading, spacing: 12) {
                         FeatureRow(symbol: "lock.shield", text: "Audio and transcription stay on this Mac")
-                        FeatureRow(symbol: "waveform", text: "Parakeet Unified runs on the Neural Engine")
+                        FeatureRow(symbol: "waveform", text: "Multilingual Parakeet runs on the Neural Engine")
                         FeatureRow(symbol: "arrow.down.circle", text: modelSummary)
                     }
                 }
@@ -181,7 +181,7 @@ struct OnboardingView: View {
                     Button("Restart Current") { controller.restart() }.buttonStyle(.borderedProminent).controlSize(.large)
                 }
             case .model:
-                StepLayout(symbol: "cpu", title: "Preparing on-device speech", text: "Current is downloading and compiling the English Parakeet model for this Mac.") {
+                StepLayout(symbol: "cpu", title: "Preparing on-device speech", text: "Current is downloading and compiling the multilingual Parakeet model for this Mac. German, French, Italian, Spanish, and English are detected automatically.") {
                     modelProgress
                 }
             case .practice:

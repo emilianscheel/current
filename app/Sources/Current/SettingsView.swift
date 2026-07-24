@@ -71,7 +71,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var transcription: some View {
         Section("Local model") {
-            LabeledContent("Model", value: "Parakeet Unified English 0.6B INT8")
+            LabeledContent("Model", value: "Parakeet TDT 0.6B v3 Multilingual INT8")
             LabeledContent("Engine", value: "FluidAudio / Core ML / Apple Neural Engine")
             LabeledContent("State", value: modelState)
             if case .failed(let reason) = runtime.model.state { Text(reason).foregroundStyle(.red); Button("Retry") { runtime.model.retry() } }
@@ -79,7 +79,10 @@ struct SettingsView: View {
                 Task { try? await runtime.model.removeDownloadedModel() }
             }.disabled(!runtime.model.hasInstalledSnapshot)
         }
-        Section { Text("English, punctuation, and capitalization are processed entirely on this Mac.").foregroundStyle(.secondary) }
+        Section {
+            Text("German, French, Italian, Spanish, and English are detected automatically. Punctuation and capitalization are processed entirely on this Mac.")
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder private var appearance: some View {

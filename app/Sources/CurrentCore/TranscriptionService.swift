@@ -4,7 +4,7 @@ import Foundation
 import Observation
 
 public actor TranscriptionService {
-    private var manager: UnifiedAsrManager?
+    private var manager: AsrManager?
 
     public init() {}
 
@@ -12,18 +12,19 @@ public actor TranscriptionService {
         guard manager == nil else { return }
         let locations = ModelSnapshotLocations.current
 
-        // FluidAudio's convenience loader considers an encoder directory to be
-        // cached as soon as the directory exists. Interrupted downloads leave
-        // that directory behind with a resumable `weight.bin.partial`, so make
-        // the stronger completeness check here and explicitly resume first.
+        // FluidAudio's convenience loader checks for the expected model bundles,
+        // while Current also rejects empty files and interrupted-download markers.
+        // Force a clean retry when that stronger validation fails.
         if !ModelSnapshotValidator.isComplete(at: locations.snapshot) {
-            try await ModelHub.download(
-                .parakeetUnified,
-                to: locations.models,
-                variant: "offline"
-            ) { update in
-                progress?(update.fractionCompleted)
-            }
+            _ = try await AsrModels.download(
+                to: locations.snapshot,
+                force: true,
+                version: .v3,
+                encoderPrecision: .int8,
+                progressHandler: { update in
+                    progress?(update.fractionCompleted)
+                }
+            )
         }
 
         guard ModelSnapshotValidator.isComplete(at: locations.snapshot) else {
@@ -32,8 +33,12 @@ public actor TranscriptionService {
             )
         }
 
-        let manager = UnifiedAsrManager(encoderPrecision: .int8)
-        try await manager.loadModels(from: locations.snapshot)
+        let models = try await AsrModels.load(
+            from: locations.snapshot,
+            version: .v3,
+            encoderPrecision: .int8
+        )
+        let manager = AsrManager(models: models)
         self.manager = manager
     }
 
@@ -41,8 +46,9 @@ public actor TranscriptionService {
         guard !samples.isEmpty else { throw CurrentError.recordingTooShort }
         if manager == nil { try await prepare() }
         guard let manager else { throw CurrentError.modelUnavailable("The model did not load.") }
-        let result = try await manager.transcribe(samples)
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        var decoderState = try TdtDecoderState()
+        let result = try await manager.transcribe(samples, decoderState: &decoderState)
+        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func unload() { manager = nil }
@@ -55,6 +61,13 @@ public actor TranscriptionService {
         try ModelIntegrity.verifyOrCreateManifest(
             for: locations.snapshot,
             manifestURL: locations.integrityManifest
+        )
+    }
+
+    public nonisolated func removeLegacyModelIfReplacementReady() {
+        LegacyModelCleanup.removeIfReplacementReady(
+            true,
+            locations: ModelSnapshotLocations.legacy
         )
     }
 }
@@ -73,19 +86,28 @@ public struct ModelSnapshotLocations: Sendable {
         let models = support.appendingPathComponent("FluidAudio/Models", isDirectory: true)
         return ModelSnapshotLocations(
             models: models,
-            snapshot: models.appendingPathComponent(Repo.parakeetUnified.folderName, isDirectory: true),
-            integrityManifest: models.appendingPathComponent("parakeet-unified-integrity.json")
+            snapshot: models.appendingPathComponent(Repo.parakeetV3.folderName, isDirectory: true),
+            integrityManifest: models.appendingPathComponent("parakeet-tdt-v3-integrity.json")
+        )
+    }
+
+    public static var legacy: ModelSnapshotLocations {
+        let current = current
+        return ModelSnapshotLocations(
+            models: current.models,
+            snapshot: current.models.appendingPathComponent(Repo.parakeetUnified.folderName, isDirectory: true),
+            integrityManifest: current.models.appendingPathComponent("parakeet-unified-integrity.json")
         )
     }
 }
 
 public enum ModelSnapshotValidator {
-    private static let requiredFiles = [
-        "parakeet_unified_encoder_int8.mlmodelc/coremldata.bin",
-        "parakeet_unified_decoder.mlmodelc/coremldata.bin",
-        "parakeet_unified_joint_decision_single_step.mlmodelc/coremldata.bin",
-        "vocab.json",
-        "metadata.json",
+    public static let requiredFiles = [
+        "Preprocessor.mlmodelc/coremldata.bin",
+        "Encoder.mlmodelc/coremldata.bin",
+        "Decoder.mlmodelc/coremldata.bin",
+        "JointDecisionv3.mlmodelc/coremldata.bin",
+        "parakeet_vocab.json",
     ]
 
     public static func isComplete(at snapshot: URL) -> Bool {
@@ -106,6 +128,20 @@ public enum ModelSnapshotValidator {
         return !enumerator.contains { item in
             guard let url = item as? URL else { return false }
             return url.pathExtension == "partial" || url.lastPathComponent.hasSuffix(".partial.etag")
+        }
+    }
+}
+
+public enum LegacyModelCleanup {
+    public static func removeIfReplacementReady(
+        _ replacementReady: Bool,
+        locations: ModelSnapshotLocations,
+        fileManager: FileManager = .default
+    ) {
+        guard replacementReady else { return }
+        for url in [locations.snapshot, locations.integrityManifest]
+        where fileManager.fileExists(atPath: url.path) {
+            try? fileManager.removeItem(at: url)
         }
     }
 }
@@ -140,6 +176,7 @@ public final class ModelManager {
                 guard !Task.isCancelled else { return }
                 state = .verifying
                 try transcription.verifyInstalledModel()
+                transcription.removeLegacyModelIfReplacementReady()
                 lastLoadDuration = start.duration(to: clock.now)
                 state = .ready
             } catch {

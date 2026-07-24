@@ -43,7 +43,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private var modelTitle: String {
         switch runtime.model.state {
-        case .ready: "Model: Parakeet Unified English"
+        case .ready: "Model: Parakeet TDT v3 Multilingual"
         case .downloading: "Model: Downloading…"
         case .failed: "Model: Action needed"
         default: "Model: Preparing…"
@@ -66,7 +66,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Current",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Private, on-device dictation.\nFluidAudio — Apache 2.0\nParakeet Unified English — CC BY 4.0")
+            .credits: NSAttributedString(string: "Private, on-device multilingual dictation.\nFluidAudio — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0")
         ])
         NSApp.activate(ignoringOtherApps: true)
     }

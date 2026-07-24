@@ -308,3 +308,299 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     let restored = SettingsStore(defaults: defaults)
     #expect(restored.onboardingStep == .inputMonitoring)
 }
+
+private func contextTestCalendar(timeZoneID: String) -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: timeZoneID)!
+    return calendar
+}
+
+private func contextTestDate(
+    _ year: Int,
+    _ month: Int,
+    _ day: Int,
+    _ hour: Int,
+    _ minute: Int,
+    calendar: Calendar
+) -> Date {
+    calendar.date(
+        from: DateComponents(
+            timeZone: calendar.timeZone,
+            year: year,
+            month: month,
+            day: day,
+            hour: hour,
+            minute: minute
+        )
+    )!
+}
+
+@MainActor
+@Test func contextStoreGroupsDictationsByLocalDayAndSearchesContent() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-context-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_US"),
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    let morning = contextTestDate(2026, 7, 24, 9, 5, calendar: calendar)
+    let afternoon = contextTestDate(2026, 7, 24, 15, 30, calendar: calendar)
+    let tomorrow = contextTestDate(2026, 7, 25, 8, 0, calendar: calendar)
+
+    try store.append("Use *literal* Markdown.", at: morning)
+    try store.append("Second conversation", at: afternoon)
+    try store.append("Tomorrow's context", at: tomorrow)
+
+    #expect(store.documents.map(\.id) == ["2026-07-25", "2026-07-24"])
+    let firstDay = try #require(store.document(id: "2026-07-24"))
+    #expect(firstDay.markdown.contains("09:05 h"))
+    #expect(firstDay.markdown.contains("15:30 h"))
+    #expect(firstDay.markdown.contains("\\*literal\\*"))
+    #expect(firstDay.markdown.contains("**Second conversation**"))
+    #expect(store.filteredDocuments(matching: "Second").map(\.id) == ["2026-07-24"])
+    #expect(store.filteredDocuments(matching: "July 25").map(\.id) == ["2026-07-25"])
+}
+
+@MainActor
+@Test func contextStoreUsesExactCapturedEntryFormat() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-context-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_DE")
+    )
+    let first = contextTestDate(2026, 7, 24, 13, 36, calendar: calendar)
+    let second = contextTestDate(2026, 7, 24, 14, 7, calendar: calendar)
+
+    try store.append("Hallo", at: first)
+    try store.append("Use *literal* Markdown.", at: second)
+
+    let document = try #require(store.document(id: "2026-07-24"))
+    #expect(
+        document.markdown
+            == """
+            Friday, 24. July 2026 13:36 h **Hallo**
+
+            Friday, 24. July 2026 14:07 h **Use \\*literal\\* Markdown.**
+
+            """
+    )
+}
+
+@MainActor
+@Test func contextStoreSafelyMigratesOnlyGeneratedLegacyDocuments() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-context-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_DE")
+    )
+    let generatedURL = root.appendingPathComponent("2026-07-24.md")
+    let customURL = root.appendingPathComponent("2026-07-25.md")
+    let generated = """
+    # Friday, 24. July 2026
+
+    ## 09:05
+
+    First
+
+    ## 15:30
+
+    Use \\*literal\\* Markdown.
+    """
+    let custom = "# Personal notes\n\n## Keep this structure\n\nUnchanged.\n"
+    try Data(generated.utf8).write(to: generatedURL)
+    try Data(custom.utf8).write(to: customURL)
+
+    store.reload()
+
+    #expect(
+        try String(contentsOf: generatedURL, encoding: .utf8)
+            == """
+            Friday, 24. July 2026 09:05 h **First**
+
+            Friday, 24. July 2026 15:30 h **Use \\*literal\\* Markdown.**
+
+            """
+    )
+    #expect(try String(contentsOf: customURL, encoding: .utf8) == custom)
+}
+
+@MainActor
+@Test func contextStoreUsesConfiguredTimezoneForDateBoundaries() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-context-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let berlin = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let instant = Date(timeIntervalSince1970: 1_774_651_400) // 2026-03-27 23:10 UTC
+    let store = ContextStore(directory: root, calendar: berlin, locale: Locale(identifier: "en_US"))
+
+    try store.append("After midnight locally", at: instant)
+
+    let expected = berlin.dateComponents([.year, .month, .day], from: instant)
+    let expectedID = String(format: "%04d-%02d-%02d", expected.year!, expected.month!, expected.day!)
+    #expect(store.documents.first?.id == expectedID)
+}
+
+@MainActor
+@Test func contextStoreSavesTrashesAndRecreatesDailyDocument() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("current-context-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_US"),
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    let date = contextTestDate(2026, 7, 24, 12, 0, calendar: calendar)
+    let document = try store.append("Original", at: date)
+
+    try store.save(documentID: document.id, markdown: "# Edited\n\nSaved atomically.\n")
+    #expect(store.document(id: document.id)?.markdown.contains("Saved atomically") == true)
+
+    try store.moveToTrash(documentID: document.id)
+    #expect(store.documents.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: document.url.path))
+
+    try store.append("Recreated", at: date)
+    #expect(store.document(id: document.id)?.markdown.contains("Recreated") == true)
+}
+
+@Test func markdownRichTextCodecRoundTripsSupportedFormatting() {
+    let markdown = """
+    # Heading
+
+    A **bold**, *italic*, `code`, and [link](https://example.com).
+
+    - One
+    - Two
+
+    1. First
+
+    > Quote
+    """
+    let richText = MarkdownRichTextCodec.attributedString(from: markdown)
+    let output = MarkdownRichTextCodec.markdown(from: richText)
+
+    #expect(output.contains("# Heading"))
+    #expect(output.contains("**bold**"))
+    #expect(output.contains("*italic*"))
+    #expect(output.contains("`code`"))
+    #expect(output.contains("[link](https://example.com)"))
+    #expect(output.contains("- One"))
+    #expect(output.contains("1. First"))
+    #expect(output.contains("> Quote"))
+}
+
+@Test func markdownRichTextCodecPreservesVisibleBlockSeparators() {
+    let markdown = """
+    # Heading
+
+    First paragraph.
+
+    - One
+    - Two
+    """
+
+    let richText = MarkdownRichTextCodec.attributedString(from: markdown)
+    let visible = String(richText.characters)
+
+    #expect(visible == "Heading\n\nFirst paragraph.\n\nOne\nTwo")
+    #expect(MarkdownRichTextCodec.markdown(from: richText).contains("- One\n- Two"))
+}
+
+@Test func richTextListFormatterFormatsParagraphsAndTogglesOff() {
+    var richText = MarkdownRichTextCodec.attributedString(
+        from: "**One**\n\nTwo\n\nThree"
+    )
+    let twoRange = String(richText.characters).range(of: "Two")!
+    let insertionOffset = String(richText.characters).distance(
+        from: String(richText.characters).startIndex,
+        to: twoRange.lowerBound
+    )
+    let insertion = richText.characters.index(
+        richText.startIndex,
+        offsetBy: insertionOffset
+    )
+
+    RichTextListFormatter.toggle(
+        .bulleted,
+        in: &richText,
+        selection: .insertionPoint(insertion),
+        identity: 100
+    )
+    var markdown = MarkdownRichTextCodec.markdown(from: richText)
+    #expect(markdown.contains("**One**"))
+    #expect(markdown.contains("- Two"))
+    #expect(!markdown.contains("- Three"))
+
+    RichTextListFormatter.toggle(
+        .bulleted,
+        in: &richText,
+        selection: .insertionPoint(insertion),
+        identity: 200
+    )
+    markdown = MarkdownRichTextCodec.markdown(from: richText)
+    #expect(!markdown.contains("- Two"))
+}
+
+@Test func richTextListFormatterNumbersEverySelectedParagraph() {
+    var richText = MarkdownRichTextCodec.attributedString(
+        from: "**One**\n\nTwo\n\nThree"
+    )
+
+    RichTextListFormatter.toggle(
+        .numbered,
+        in: &richText,
+        selection: .ranges([richText.startIndex..<richText.endIndex]),
+        identity: 300
+    )
+
+    let markdown = MarkdownRichTextCodec.markdown(from: richText)
+    #expect(markdown.contains("1. **One**"))
+    #expect(markdown.contains("2. Two"))
+    #expect(markdown.contains("3. Three"))
+}
+
+@Test func markdownRichTextCodecNormalizesUnsupportedMarkdownWithoutCrashing() {
+    let markdown = """
+    | Name | Value |
+    | --- | --- |
+    | Current | Context |
+    """
+    let richText = MarkdownRichTextCodec.attributedString(from: markdown)
+    let output = MarkdownRichTextCodec.markdown(from: richText)
+
+    #expect(output.contains("Name"))
+    #expect(output.contains("Current"))
+    #expect(output.contains("Context"))
+}
+
+@Test func contextRecordingSkipsCurrentsOwnEditor() {
+    #expect(
+        !DictationCoordinator.shouldRecordContext(
+            targetProcessIdentifier: 42,
+            currentProcessIdentifier: 42
+        )
+    )
+    #expect(
+        DictationCoordinator.shouldRecordContext(
+            targetProcessIdentifier: 7,
+            currentProcessIdentifier: 42
+        )
+    )
+    #expect(
+        DictationCoordinator.shouldRecordContext(
+            targetProcessIdentifier: nil,
+            currentProcessIdentifier: 42
+        )
+    )
+}

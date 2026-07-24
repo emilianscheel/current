@@ -97,7 +97,9 @@ struct SettingsView: View {
         Section("Local by design") {
             Label("Audio is held in memory only", systemImage: "memorychip")
             Label("No network requests occur during dictation", systemImage: "network.slash")
-            Label("No analytics or transcript logging", systemImage: "eye.slash")
+            Label("Successful dictations are saved as local daily context", systemImage: "text.page")
+            Label("No analytics or context synchronization", systemImage: "eye.slash")
+            Button("Open Context Library…") { runtime.context.show() }
         }
         Section("Recovery") {
             LabeledContent("Last transcription", value: runtime.coordinator.lastTranscription.isEmpty ? "None" : runtime.coordinator.lastTranscription)

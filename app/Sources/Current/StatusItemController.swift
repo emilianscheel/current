@@ -30,6 +30,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add(runtime.coordinator.phase == .recording ? "Stop and Transcribe" : "Start Dictation", to: menu, action: #selector(toggleCapture))
         add("Paste Last Transcription", to: menu, action: #selector(pasteLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
         add("Copy Last Transcription", to: menu, action: #selector(copyLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
+        add("Context…", to: menu, action: #selector(openContext))
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
         add(modelTitle, to: menu, enabled: false)
@@ -60,13 +61,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleCapture() { runtime.coordinator.beginFromMenu() }
     @objc private func pasteLast() { runtime.coordinator.pasteLastTranscription() }
     @objc private func copyLast() { runtime.coordinator.copyLastTranscription() }
+    @objc private func openContext() { runtime.context.show() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Current",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Private, on-device multilingual dictation.\nFluidAudio — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0")
+            .credits: NSAttributedString(string: "Private, on-device multilingual dictation with local daily context.\nFluidAudio — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0")
         ])
         NSApp.activate(ignoringOtherApps: true)
     }

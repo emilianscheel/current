@@ -27,10 +27,13 @@ final class AppRuntime {
     var settings = SettingsStore.shared
     let permissions = PermissionManager()
     let model = ModelManager()
+    let contextStore = ContextStore()
     @ObservationIgnored lazy var coordinator = DictationCoordinator(settings: settings, model: model)
     let hardware = HardwareChecker().current()
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
+    @ObservationIgnored lazy var context = ContextWindowController(runtime: self, store: contextStore)
+    @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
 
     init() {
         coordinator.onPhaseChange = { [weak self] phase in
@@ -40,10 +43,19 @@ final class AppRuntime {
                 targetApplication: self.coordinator.insertion.targetApplicationPresentation
             )
         }
+        coordinator.onSuccessfulTranscription = { [weak self] text, date in
+            self?.context.append(text, at: date)
+        }
     }
 
-    func applyDockPolicy(onboardingVisible: Bool = false) {
-        NSApp.setActivationPolicy(onboardingVisible || settings.showDockIcon ? .regular : .accessory)
+    func setAuxiliaryWindow(_ id: UUID, visible: Bool) {
+        if visible { auxiliaryWindowIDs.insert(id) }
+        else { auxiliaryWindowIDs.remove(id) }
+        applyDockPolicy()
+    }
+
+    func applyDockPolicy() {
+        NSApp.setActivationPolicy(!auxiliaryWindowIDs.isEmpty || settings.showDockIcon ? .regular : .accessory)
     }
 
     func applyLaunchAtLogin() {
@@ -94,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        runtime?.context.flush()
         runtime?.coordinator.stopMonitoring()
     }
 }

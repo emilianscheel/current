@@ -2,7 +2,7 @@
 
 Current is a private, local-first dictation utility for recent Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, and inserts the result into the field you were using.
 
-It is a native menu-bar app. There is no account, cloud transcription, transcript history, or analytics service.
+It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful dictations are retained locally as one editable Markdown context document per day.
 
 ## Supported Macs
 
@@ -25,6 +25,8 @@ Current checks these requirements before starting its capture and model services
 5. Press Escape while recording to cancel.
 
 The event tap never suppresses `fn` events and abandons a pending recording if another key is pressed, preserving normal combinations such as `fn` + arrow keys. It suppresses only the configured fallback shortcut’s Space event. The menu bar also provides mouse-driven Start/Stop actions and recovery actions for the last result.
+
+Choose **Context…** from the menu bar to search, edit, format, copy, or remove daily context documents. The rich editor supports headings, bold, italic, lists, quotes, inline code, and links.
 
 ## On-device model
 
@@ -69,7 +71,8 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 ## Privacy
 
 - Audio is buffered as 16 kHz mono Float32 in memory and discarded after transcription or cancellation.
-- Audio and transcripts are not logged.
+- Successful external-app dictations are appended to `~/Library/Application Support/Current/Context/YYYY-MM-DD.md`, including dictation into sensitive or secure fields.
+- Context files stay local until edited or moved to Trash. Dictation into Current itself is not duplicated in the daily log.
 - No analytics, crash upload, account, update check, or cloud inference is included.
 - The last successful result is held in memory for recovery and can be cleared from Settings.
 - Accessibility insertion is attempted first. If the target rejects it, Current uses a temporary pasteboard and Command-V; when configured, it restores the previous pasteboard after a short delay.
@@ -79,6 +82,7 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 
 - Swift 6.2 and Swift Package Manager
 - SwiftUI and Observation for onboarding/settings
+- Native attributed-string rich editing with local Markdown serialization
 - AppKit for menu-bar lifecycle, nonactivating panels, and focus behavior
 - CoreGraphics `CGEventTap` for global `fn` events
 - AVFoundation / `AVAudioEngine` / `AVAudioConverter` for capture and resampling
@@ -162,7 +166,8 @@ Running the raw SwiftPM executable is not recommended for permission testing bec
 - Audio: input-device selection, live microphone level, sounds, recording limits
 - Transcription: model and engine status
 - Appearance: notch overlay and animation intensity
-- Privacy: local-processing summary and last-result clearing
+- Privacy: local-processing and context-retention summary plus last-result clearing
+- Context: searchable daily Markdown history with rich editing and recoverable deletion
 
 The solid-black overlay follows Reduce Motion, joins all Spaces, can appear beside full-screen applications, ignores mouse input, and falls back to a centered island when a display has no notch safe area. All Current windows otherwise follow the active macOS light or dark appearance.
 
@@ -175,6 +180,7 @@ Automated tests cover:
 - permission snapshots and missing-permission ordering
 - deterministic text trimming and trailing-space behavior
 - session-safe coordinator boundaries and model-file SHA-256 support
+- daily context grouping, local-time boundaries, search, deletion/recreation, and Markdown round-tripping
 
 Before release, manually test:
 
@@ -187,6 +193,7 @@ Before release, manually test:
 - offline dictation after model setup
 - automatic detection and transcription of German, French, Italian, Spanish, and English
 - consecutive dictations in different supported languages
+- context search, rich formatting, autosave, copy, Trash confirmation, and reopen behavior
 - M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 
 Targets are feedback within 100 ms after the hold threshold, no sustained idle work beyond the event tap, and warm release-to-result below 1.5 seconds for a typical short phrase on the reference M3 Pro MacBook.
@@ -201,7 +208,7 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 
 - Mid-utterance code switching guarantees
 - Cloud transcription or accounts
-- Transcript history UI or synchronization
+- Context synchronization
 - Meeting transcription and speaker diarization
 - Local LLM rewriting or filler-word removal
 - Voice commands and automation

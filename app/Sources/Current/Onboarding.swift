@@ -7,6 +7,7 @@ import SwiftUI
 @Observable
 final class OnboardingController: NSObject, NSWindowDelegate {
     private unowned let runtime: AppRuntime
+    private let auxiliaryWindowID = UUID()
     private var window: NSWindow?
     private var pollTask: Task<Void, Never>?
     var step: OnboardingStep
@@ -43,7 +44,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             window.delegate = self
             self.window = window
         }
-        runtime.applyDockPolicy(onboardingVisible: true)
+        runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: true)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         startPolling()
@@ -114,7 +115,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     private func onboardingDidHide() {
         pollTask?.cancel()
         pollTask = nil
-        runtime.applyDockPolicy()
+        runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
     }
 
     private func autoAdvanceIfPossible() {
@@ -133,15 +134,7 @@ struct OnboardingView: View {
     @Bindable var runtime: AppRuntime
 
     var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-                .ignoresSafeArea()
-            LinearGradient(
-                colors: [Color.gray.opacity(0.12), Color.gray.opacity(0.035), .clear],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+        CurrentWindowBackground {
             VStack(spacing: 0) {
                 Group { content }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

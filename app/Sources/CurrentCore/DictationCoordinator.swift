@@ -16,6 +16,7 @@ public final class DictationCoordinator {
     public let insertion: InsertionService
     public let shortcut: ShortcutMonitor
     public var onPhaseChange: ((DictationPhase) -> Void)?
+    public var onSuccessfulTranscription: ((String, Date) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
 
     public init(
@@ -144,6 +145,7 @@ public final class DictationCoordinator {
                 let text = try await transcription.transcribe(samples)
                 guard let self, self.currentSession?.id == session.id else { return }
                 self.setPhase(.inserting)
+                let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
                 let result = try await self.insertion.insert(
                     text,
                     trailingSpace: self.settings.trailingSpace,
@@ -151,6 +153,12 @@ public final class DictationCoordinator {
                 )
                 guard self.currentSession?.id == session.id else { return }
                 self.lastTranscription = text
+                if Self.shouldRecordContext(
+                    targetProcessIdentifier: targetProcessIdentifier,
+                    currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+                ) {
+                    self.onSuccessfulTranscription?(text, session.startedAt)
+                }
                 self.currentSession = nil
                 if result == .copied { self.errorMessage = "Copied — paste manually." }
                 self.setPhase(result == .copied ? .error : .success)
@@ -170,6 +178,13 @@ public final class DictationCoordinator {
         errorMessage = error.localizedDescription
         setPhase(.error)
         scheduleIdle(delay: .seconds(2.5))
+    }
+
+    nonisolated public static func shouldRecordContext(
+        targetProcessIdentifier: pid_t?,
+        currentProcessIdentifier: pid_t
+    ) -> Bool {
+        targetProcessIdentifier != currentProcessIdentifier
     }
 
     private func setPhase(_ phase: DictationPhase) {

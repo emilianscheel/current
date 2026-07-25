@@ -226,6 +226,54 @@ public struct ContextCaptureTarget: Sendable, Equatable, Hashable {
     }
 }
 
+public struct ContextCoverageKey: Codable, Sendable, Equatable, Hashable {
+    public let processIdentifier: pid_t
+    public let windowIdentifier: UInt32?
+    public let windowTitle: String?
+
+    public init(
+        processIdentifier: pid_t,
+        windowIdentifier: UInt32? = nil,
+        windowTitle: String? = nil
+    ) {
+        self.processIdentifier = processIdentifier
+        self.windowIdentifier = windowIdentifier
+        self.windowTitle = windowTitle
+    }
+}
+
+public struct AccessibilityCoverage: Codable, Sendable, Equatable {
+    public let key: ContextCoverageKey
+    public let lastAttempt: Date
+    public let lastUsefulObservation: Date?
+    public let blockCount: Int
+    public let normalizedCharacterCount: Int
+
+    public init(
+        key: ContextCoverageKey,
+        lastAttempt: Date,
+        lastUsefulObservation: Date?,
+        blockCount: Int,
+        normalizedCharacterCount: Int
+    ) {
+        self.key = key
+        self.lastAttempt = lastAttempt
+        self.lastUsefulObservation = lastUsefulObservation
+        self.blockCount = blockCount
+        self.normalizedCharacterCount = normalizedCharacterCount
+    }
+
+    public var isUseful: Bool {
+        blockCount >= 3 || normalizedCharacterCount >= 40
+    }
+}
+
+public enum ContextCaptureDecision: Sendable, Equatable {
+    case accessibility(ContextObservation)
+    case screenshotFallback(ContextCoverageKey)
+    case unavailable
+}
+
 public struct LiveAppContext: Codable, Sendable, Equatable, Identifiable {
     public var id: AppSessionID { session.sessionID }
     public var session: AppSessionMetadata
@@ -358,10 +406,24 @@ public protocol ScreenContextProviding: Sendable {
 
 public protocol AccessibilityContextProviding: Sendable {
     func snapshotVisibleApplications() async -> [ContextObservation]
+    func refreshVisibleCoverage() async -> [AccessibilityCoverage]
+    func refreshCoverage(
+        for target: ContextCaptureTarget
+    ) async -> ContextCaptureDecision
+    func coverage(
+        for target: ContextCaptureTarget
+    ) async -> AccessibilityCoverage?
 }
 
 public protocol OCRProviding: Sendable {
     func recognizeText(in image: CGImage) async throws -> [ContextTextBlock]
+}
+
+public protocol ContextStructuringProviding: Sendable {
+    func updateContextDocument(
+        currentState: String,
+        observations: [ContextObservation]
+    ) async throws -> ContextDocumentUpdate
 }
 
 public protocol LocalIntelligenceProviding: Sendable {
@@ -370,10 +432,6 @@ public protocol LocalIntelligenceProviding: Sendable {
         _ deterministic: RefinementResult,
         context: DictationContext
     ) async -> RefinementResult
-    func updateContextDocument(
-        currentState: String,
-        observations: [ContextObservation]
-    ) async throws -> ContextDocumentUpdate
     func generatePromptResponse(_ envelope: PromptContextEnvelope) async throws -> PromptResponse
 }
 
@@ -449,7 +507,10 @@ public actor ModelRequestScheduler {
     }
 }
 
-public actor AppleFoundationModelProvider: LocalIntelligenceProviding {
+public actor AppleFoundationModelProvider:
+    LocalIntelligenceProviding,
+    ContextStructuringProviding
+{
     public let scheduler: ModelRequestScheduler
 
     public init(scheduler: ModelRequestScheduler = ModelRequestScheduler()) {

@@ -27,11 +27,12 @@ final class AppRuntime {
     var settings = SettingsStore.shared
     let permissions = PermissionManager()
     let model = ModelManager()
+    let contextModel = GemmaContextModelManager()
     let contextStore = ContextStore()
     let intelligence = AppleFoundationModelProvider()
     @ObservationIgnored lazy var contextRepository = ContextRepository(
         store: contextStore,
-        intelligence: intelligence
+        structurer: contextModel
     )
     @ObservationIgnored lazy var screenContext = ScreenContextCoordinator(
         repository: contextRepository,
@@ -56,6 +57,15 @@ final class AppRuntime {
         try? contextStore.closeAppSessions(at: Date())
         coordinator.onPhaseChange = { [weak self] phase in
             guard let self else { return }
+            self.contextModel.setVoiceInteractionActive(
+                [
+                    DictationPhase.recording,
+                    .transcribing,
+                    .classifying,
+                    .generating,
+                    .inserting,
+                ].contains(phase)
+            )
             self.overlay.show(
                 phase: phase,
                 targetApplication: self.coordinator.insertion.targetApplicationPresentation,
@@ -103,9 +113,12 @@ final class AppRuntime {
                 if active,
                    self.settings.continuousContextEnabled,
                    self.permissions.snapshot().screenRecording.isGranted {
+                    self.contextModel.prepareIfNeeded()
                     try? await self.screenContext.start()
+                    await self.contextRepository.migrateLegacyDocuments()
                 } else {
                     await self.screenContext.stop()
+                    await self.contextModel.unload()
                 }
             }
         }
@@ -154,10 +167,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runtime.applyDockPolicy()
         statusController = StatusItemController(runtime: runtime)
         runtime.model.prepareIfNeeded()
+        runtime.contextModel.prepareIfNeeded()
+        Task { [weak runtime] in
+            while let runtime,
+                  !runtime.contextModel.state.isReady {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+            }
+            guard let runtime else { return }
+            if runtime.settings.continuousContextEnabled {
+                await runtime.contextRepository.migrateLegacyDocuments()
+            }
+        }
 
         if runtime.hardware.isSupported {
             if runtime.permissions.snapshot().inputMonitoring.isGranted { runtime.coordinator.startMonitoring() }
-            if !runtime.settings.onboardingComplete || !runtime.permissions.snapshot().allGranted || !runtime.model.hasInstalledSnapshot {
+            if !runtime.settings.onboardingComplete
+                || !runtime.permissions.snapshot().allGranted
+                || !runtime.model.hasInstalledSnapshot
+                || !runtime.contextModel.hasInstalledSnapshot {
                 runtime.onboarding.show()
             }
         } else {

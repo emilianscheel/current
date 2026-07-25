@@ -13,6 +13,7 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
     public var markdown: String
     public let modifiedAt: Date
     public let kind: ContextDocumentKind
+    public let customDisplayName: String?
 
     public init(
         id: String,
@@ -20,7 +21,8 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
         url: URL,
         markdown: String,
         modifiedAt: Date,
-        kind: ContextDocumentKind = .dailyDictation
+        kind: ContextDocumentKind = .dailyDictation,
+        customDisplayName: String? = nil
     ) {
         self.id = id
         self.date = date
@@ -28,6 +30,7 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
         self.markdown = markdown
         self.modifiedAt = modifiedAt
         self.kind = kind
+        self.customDisplayName = customDisplayName
     }
 
     public var wordCount: Int {
@@ -38,6 +41,11 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
 @MainActor
 @Observable
 public final class ContextStore {
+    private struct DocumentMetadataFile: Codable {
+        var version = 1
+        var aliases: [String: String] = [:]
+    }
+
     public private(set) var documents: [ContextDocument] = []
     public private(set) var lastError: String?
 
@@ -52,6 +60,10 @@ public final class ContextStore {
     private let locale: Locale
     private let fileManager: FileManager
     private let trashHandler: ((URL) throws -> Void)?
+    private var aliases: [String: String] = [:]
+    private var metadataURL: URL {
+        directory.appendingPathComponent("Document Metadata.json")
+    }
 
     public init(
         directory: URL? = nil,
@@ -81,6 +93,7 @@ public final class ContextStore {
     public func reload() {
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            aliases = loadAliases()
             let rootURLs = try fileManager.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -175,8 +188,25 @@ public final class ContextStore {
         return documents.filter { document in
             displayTitle(for: document.date).localizedStandardContains(needle)
                 || document.id.localizedStandardContains(needle)
+                || document.customDisplayName?
+                    .localizedStandardContains(needle) == true
                 || document.markdown.localizedStandardContains(needle)
         }
+    }
+
+    public func rename(documentID: String, displayName: String) throws {
+        guard documents.contains(where: { $0.id == documentID }) else {
+            throw ContextStoreError.documentUnavailable
+        }
+        let normalized = displayName
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized.count <= 120 else {
+            throw ContextStoreError.invalidDisplayName
+        }
+        aliases[documentID] = normalized
+        try persistAliases()
+        reload()
     }
 
     public func moveToTrash(documentID: String) throws {
@@ -187,6 +217,9 @@ public final class ContextStore {
             try trashHandler(document.url)
         } else {
             _ = try fileManager.trashItem(at: document.url, resultingItemURL: nil)
+        }
+        if aliases.removeValue(forKey: documentID) != nil {
+            try persistAliases()
         }
         reload()
     }
@@ -214,6 +247,37 @@ public final class ContextStore {
         }
     }
 
+    public func appSessionDocumentsRequiringMigration()
+        -> [ContextDocument] {
+        appSessionDocuments().filter {
+            Self.tableValue("Format Version", in: $0.markdown) != "2"
+        }
+    }
+
+    public func migrateAppSessionDocument(
+        documentID: String,
+        currentState: String,
+        activity: String
+    ) throws {
+        guard let document = document(id: documentID),
+              case .appSession(let metadata) = document.kind else {
+            throw ContextStoreError.documentUnavailable
+        }
+        try write(
+            appSessionMarkdown(
+                metadata: metadata,
+                currentState: currentState,
+                activity: activity,
+                unprocessed: Self.section(
+                    named: "Unprocessed observations",
+                    in: document.markdown
+                )
+            ),
+            to: document.url
+        )
+        reload()
+    }
+
     @discardableResult
     public func applyAppSessionUpdate(
         metadata: AppSessionMetadata,
@@ -229,18 +293,24 @@ public final class ContextStore {
         let existingMarkdown = existing?.markdown
             ?? (try? String(contentsOf: url, encoding: .utf8))
             ?? ""
-        let currentState = update.currentStateMarkdown.trimmingCharacters(
-            in: .whitespacesAndNewlines
+        let currentState = ContextBulletNormalizer.bullets(
+            update.currentStateMarkdown.components(separatedBy: .newlines),
+            maximumCount: 24
         )
+        .joined(separator: "\n")
         var activity = Self.section(
             named: "Activity",
             in: existingMarkdown
         )
-        if let entry = update.activityEntryMarkdown?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !entry.isEmpty {
-            if !activity.isEmpty { activity += "\n\n" }
-            activity += "### \(timeWithSeconds(for: date))\n\n\(entry)"
+        if let entryMarkdown = update.activityEntryMarkdown {
+            let entry = ContextBulletNormalizer.bullets(
+                entryMarkdown.components(separatedBy: .newlines),
+                maximumCount: 12
+            ).joined(separator: "\n")
+            if !entry.isEmpty {
+                if !activity.isEmpty { activity += "\n\n" }
+                activity += "### \(timeWithSeconds(for: date))\n\n\(entry)"
+            }
         }
         let unprocessed = Self.section(
             named: "Unprocessed observations",
@@ -400,6 +470,7 @@ public final class ContextStore {
 
         | Metadata | Value |
         | --- | --- |
+        | Format Version | 2 |
         | App | \(Self.tableEscaped(metadata.applicationName)) |
         | Bundle ID | \(Self.tableEscaped(bundleIdentifier)) |
         | Session ID | \(metadata.sessionID.rawValue) |
@@ -468,7 +539,8 @@ public final class ContextStore {
             url: url,
             markdown: markdown,
             modifiedAt: values.contentModificationDate ?? .distantPast,
-            kind: .appSession(metadata)
+            kind: .appSession(metadata),
+            customDisplayName: aliases["app:\(sessionID)"]
         )
     }
 
@@ -558,8 +630,31 @@ public final class ContextStore {
             url: url,
             markdown: try String(contentsOf: url, encoding: .utf8),
             modifiedAt: values.contentModificationDate ?? .distantPast,
-            kind: .dailyDictation
+            kind: .dailyDictation,
+            customDisplayName: aliases[
+                url.deletingPathExtension().lastPathComponent
+            ]
         )
+    }
+
+    private func loadAliases() -> [String: String] {
+        guard fileManager.fileExists(atPath: metadataURL.path),
+              let data = try? Data(contentsOf: metadataURL),
+              let file = try? JSONDecoder().decode(
+                  DocumentMetadataFile.self,
+                  from: data
+              ) else {
+            return [:]
+        }
+        return file.aliases
+    }
+
+    private func persistAliases() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(
+            DocumentMetadataFile(aliases: aliases)
+        ).write(to: metadataURL, options: .atomic)
     }
 
     private func migrateLegacyDocumentIfNeeded(at url: URL) throws {
@@ -666,11 +761,14 @@ public final class ContextStore {
 public enum ContextStoreError: LocalizedError, Sendable, Equatable {
     case emptyTranscription
     case documentUnavailable
+    case invalidDisplayName
 
     public var errorDescription: String? {
         switch self {
         case .emptyTranscription: "The transcription was empty."
         case .documentUnavailable: "The context document is no longer available."
+        case .invalidDisplayName:
+            "Choose a name between 1 and 120 characters."
         }
     }
 }

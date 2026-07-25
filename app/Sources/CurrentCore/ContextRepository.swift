@@ -8,17 +8,23 @@ public actor ContextRepository {
     }
 
     private let store: ContextStore
-    private let intelligence: any LocalIntelligenceProviding
+    private let structurer: any ContextStructuringProviding
     private let excludedBundleIdentifiers: Set<String>
     private let excludedProcessIdentifiers: Set<pid_t>
     private var calendar: Calendar
     private var liveContexts: [SessionKey: LiveAppContext] = [:]
     private var processingSessions: Set<SessionKey> = []
+    private var processingTasks: [SessionKey: Task<Void, Never>] = [:]
+    private var firstPendingAt: [SessionKey: Date] = [:]
+    private var failureCounts: [SessionKey: Int] = [:]
+    private var unprocessedFailureBatches: [SessionKey: Set<String>] = [:]
+    private var suppressedSessions: Set<SessionKey> = []
     private var closingSessions: Set<AppSessionID> = []
+    private var isMigratingDocuments = false
 
     public init(
         store: ContextStore,
-        intelligence: any LocalIntelligenceProviding,
+        structurer: any ContextStructuringProviding,
         calendar: Calendar = .autoupdatingCurrent,
         excludedBundleIdentifiers: Set<String> = ["local.Current"],
         excludedProcessIdentifiers: Set<pid_t> = [
@@ -26,7 +32,7 @@ public actor ContextRepository {
         ]
     ) {
         self.store = store
-        self.intelligence = intelligence
+        self.structurer = structurer
         self.calendar = calendar
         self.excludedBundleIdentifiers = excludedBundleIdentifiers
         self.excludedProcessIdentifiers = excludedProcessIdentifiers
@@ -54,6 +60,7 @@ public actor ContextRepository {
             processIdentifier: observation.processIdentifier,
             dayIdentifier: dayIdentifier
         )
+        guard !suppressedSessions.contains(key) else { return false }
         var context: LiveAppContext
         if let existing = liveContexts[key] {
             context = existing
@@ -167,6 +174,11 @@ public actor ContextRepository {
             }
             await flush(key: key, unprocessedOnFailure: true)
             liveContexts.removeValue(forKey: key)
+            failureCounts.removeValue(forKey: key)
+            unprocessedFailureBatches.removeValue(forKey: key)
+        }
+        suppressedSessions = suppressedSessions.filter {
+            $0.processIdentifier != processIdentifier
         }
         try? await store.closeAppSessions(
             processIdentifier: processIdentifier,
@@ -175,6 +187,10 @@ public actor ContextRepository {
     }
 
     public func stop(at date: Date = Date()) async {
+        for task in processingTasks.values {
+            task.cancel()
+        }
+        processingTasks.removeAll()
         for key in Array(liveContexts.keys) {
             if let context = liveContexts[key] {
                 closingSessions.insert(context.session.sessionID)
@@ -185,55 +201,253 @@ public actor ContextRepository {
         processingSessions.removeAll()
     }
 
+    public func discardSession(documentID: String) {
+        guard documentID.hasPrefix("app:") else { return }
+        let rawID = String(documentID.dropFirst(4))
+        guard let key = liveContexts.first(where: {
+            $0.value.session.sessionID.rawValue == rawID
+        })?.key else {
+            return
+        }
+        suppressedSessions.insert(key)
+        processingTasks.removeValue(forKey: key)?.cancel()
+        processingSessions.remove(key)
+        firstPendingAt.removeValue(forKey: key)
+        failureCounts.removeValue(forKey: key)
+        unprocessedFailureBatches.removeValue(forKey: key)
+        liveContexts.removeValue(forKey: key)
+    }
+
+    public func migrateLegacyDocuments() async {
+        guard !isMigratingDocuments else { return }
+        isMigratingDocuments = true
+        defer { isMigratingDocuments = false }
+        let documents = await store.appSessionDocumentsRequiringMigration()
+        for document in documents {
+            guard case .appSession(let metadata) = document.kind,
+                  !isExcluded(
+                      processIdentifier: metadata.processIdentifier,
+                      bundleIdentifier: metadata.bundleIdentifier
+                  ) else {
+                continue
+            }
+            do {
+                let currentState = ContextStore.section(
+                    named: "Current state",
+                    in: document.markdown
+                )
+                let structuredCurrent = try await structureLegacyText(
+                    currentState,
+                    metadata: metadata,
+                    preferActivity: false
+                )
+                let activity = ContextStore.section(
+                    named: "Activity",
+                    in: document.markdown
+                )
+                var migratedEntries: [String] = []
+                for entry in Self.activityEntries(activity) {
+                    let structured = try await structureLegacyText(
+                        entry.body,
+                        metadata: metadata,
+                        preferActivity: true
+                    )
+                    migratedEntries.append(
+                        "\(entry.heading)\n\n\(structured)"
+                    )
+                }
+                try await store.migrateAppSessionDocument(
+                    documentID: document.id,
+                    currentState: structuredCurrent,
+                    activity: migratedEntries.joined(separator: "\n\n")
+                )
+            } catch {
+                continue
+            }
+        }
+    }
+
     private func scheduleProcessing(for key: SessionKey) {
         guard !processingSessions.contains(key) else { return }
-        processingSessions.insert(key)
-        Task { [weak self] in
+        let now = Date()
+        let first = firstPendingAt[key] ?? now
+        firstPendingAt[key] = first
+        let elapsed = now.timeIntervalSince(first)
+        let delay = max(0, min(5, 30 - elapsed))
+        processingTasks.removeValue(forKey: key)?.cancel()
+        processingTasks[key] = Task { [weak self] in
+            try? await Task.sleep(
+                for: .milliseconds(Int64(delay * 1_000))
+            )
+            guard !Task.isCancelled else { return }
             await self?.processPending(for: key)
         }
     }
 
+    private func structureLegacyText(
+        _ text: String,
+        metadata: AppSessionMetadata,
+        preferActivity: Bool
+    ) async throws -> String {
+        guard !text.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            return ""
+        }
+        var outputLines: [String] = []
+        for chunk in Self.textChunks(text, maximumCharacters: 10_000) {
+            let observation = ContextObservation(
+                capturedAt: metadata.startedAt,
+                processIdentifier: metadata.processIdentifier,
+                bundleIdentifier: metadata.bundleIdentifier,
+                applicationName: metadata.applicationName,
+                blocks: [
+                    ContextTextBlock(
+                        text: chunk,
+                        source: .accessibility
+                    ),
+                ]
+            )
+            let update = try await structurer.updateContextDocument(
+                currentState: "",
+                observations: [observation]
+            )
+            if preferActivity,
+               let activity = update.activityEntryMarkdown,
+               !activity.isEmpty {
+                outputLines.append(
+                    contentsOf: activity.components(separatedBy: .newlines)
+                )
+            } else {
+                outputLines.append(
+                    contentsOf: update.currentStateMarkdown.components(
+                        separatedBy: .newlines
+                    )
+                )
+            }
+        }
+        return ContextBulletNormalizer.bullets(
+            outputLines,
+            maximumCount: preferActivity ? 12 : 24
+        ).joined(separator: "\n")
+    }
+
+    private static func textChunks(
+        _ text: String,
+        maximumCharacters: Int
+    ) -> [String] {
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(
+                start,
+                offsetBy: maximumCharacters,
+                limitedBy: text.endIndex
+            ) ?? text.endIndex
+            chunks.append(String(text[start ..< end]))
+            start = end
+        }
+        return chunks
+    }
+
+    private static func activityEntries(
+        _ activity: String
+    ) -> [(heading: String, body: String)] {
+        var entries: [(String, String)] = []
+        var heading: String?
+        var body: [String] = []
+        func appendCurrent() {
+            guard let heading else { return }
+            entries.append(
+                (
+                    heading,
+                    body.joined(separator: "\n")
+                        .trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        )
+                )
+            )
+        }
+        for line in activity.components(separatedBy: .newlines) {
+            if line.hasPrefix("### ") {
+                appendCurrent()
+                heading = line
+                body = []
+            } else if heading != nil {
+                body.append(line)
+            }
+        }
+        appendCurrent()
+        return entries
+    }
+
     private func processPending(for key: SessionKey) async {
-        defer { processingSessions.remove(key) }
-        while var context = liveContexts[key],
-              !context.pendingObservations.isEmpty {
-            let pending = context.pendingObservations
-            context.pendingObservations = []
-            liveContexts[key] = context
-            do {
-                let document = await store.appSessionDocument(
-                    sessionID: context.session.sessionID
+        processingTasks.removeValue(forKey: key)
+        guard !suppressedSessions.contains(key) else { return }
+        processingSessions.insert(key)
+        defer {
+            processingSessions.remove(key)
+            if liveContexts[key]?.pendingObservations.isEmpty == false {
+                scheduleProcessing(for: key)
+            }
+        }
+        guard var context = liveContexts[key],
+              !context.pendingObservations.isEmpty else {
+            return
+        }
+        let pending = context.pendingObservations
+        context.pendingObservations = []
+        liveContexts[key] = context
+        firstPendingAt.removeValue(forKey: key)
+        do {
+            let document = await store.appSessionDocument(
+                sessionID: context.session.sessionID
+            )
+            let currentState = document.map {
+                ContextStore.section(
+                    named: "Current state",
+                    in: $0.markdown
                 )
-                let currentState = document.map {
-                    ContextStore.section(
-                        named: "Current state",
-                        in: $0.markdown
-                    )
-                } ?? ""
-                let update = try await intelligence.updateContextDocument(
-                    currentState: currentState,
-                    observations: pending
+            } ?? ""
+            let update = try await structurer.updateContextDocument(
+                currentState: currentState,
+                observations: pending
+            )
+            guard !suppressedSessions.contains(key) else { return }
+            if update.changed {
+                _ = try await store.applyAppSessionUpdate(
+                    metadata: context.session,
+                    update: update,
+                    at: pending.last?.capturedAt ?? Date()
                 )
-                if update.changed {
-                    _ = try await store.applyAppSessionUpdate(
+            }
+            failureCounts.removeValue(forKey: key)
+            if closingSessions.contains(context.session.sessionID) {
+                try? await store.closeAppSession(
+                    sessionID: context.session.sessionID,
+                    at: pending.last?.capturedAt ?? Date()
+                )
+            }
+        } catch {
+            if var latest = liveContexts[key] {
+                latest.pendingObservations.insert(contentsOf: pending, at: 0)
+                liveContexts[key] = latest
+            }
+            let count = (failureCounts[key] ?? 0) + 1
+            failureCounts[key] = count
+            if count >= 3, let context = liveContexts[key] {
+                let fingerprint = pending.map {
+                    "\($0.capturedAt.timeIntervalSinceReferenceDate):\($0.normalizedText)"
+                }.joined(separator: "|")
+                if unprocessedFailureBatches[key, default: []]
+                    .insert(fingerprint).inserted {
+                    _ = try? await store.appendUnprocessedObservations(
+                        pending,
                         metadata: context.session,
-                        update: update,
                         at: pending.last?.capturedAt ?? Date()
                     )
                 }
-                if closingSessions.contains(context.session.sessionID) {
-                    try? await store.closeAppSession(
-                        sessionID: context.session.sessionID,
-                        at: pending.last?.capturedAt ?? Date()
-                    )
-                }
-            } catch {
-                if var latest = liveContexts[key] {
-                    latest.pendingObservations.insert(contentsOf: pending, at: 0)
-                    liveContexts[key] = latest
-                }
-                await flush(key: key, unprocessedOnFailure: true)
-                return
+                failureCounts[key] = 0
             }
         }
     }
@@ -256,7 +470,7 @@ public actor ContextRepository {
             let currentState = document.map {
                 ContextStore.section(named: "Current state", in: $0.markdown)
             } ?? ""
-            let update = try await intelligence.updateContextDocument(
+            let update = try await structurer.updateContextDocument(
                 currentState: currentState,
                 observations: pending
             )

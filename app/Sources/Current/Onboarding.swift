@@ -29,6 +29,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             completed: runtime.settings.onboardingComplete,
             permissions: permissions,
             modelInstalled: runtime.model.hasInstalledSnapshot
+                && runtime.contextModel.hasInstalledSnapshot
         )
         runtime.settings.onboardingStep = step
         if window == nil {
@@ -165,6 +166,10 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         FeatureRow(symbol: "lock.shield", text: "Audio and transcription stay on this Mac")
                         FeatureRow(symbol: "waveform", text: "Multilingual Parakeet runs on the Neural Engine")
+                        FeatureRow(
+                            symbol: "memorychip",
+                            text: "Gemma 4 structures app context locally with MLX and Metal"
+                        )
                         FeatureRow(symbol: "arrow.down.circle", text: modelSummary)
                     }
                 }
@@ -177,8 +182,16 @@ struct OnboardingView: View {
                     Button("Restart Current") { controller.restart() }.buttonStyle(.borderedProminent).controlSize(.large)
                 }
             case .model:
-                StepLayout(symbol: "cpu", title: "Preparing on-device speech", text: "Current is downloading and compiling the multilingual Parakeet model for this Mac. German, French, Italian, Spanish, and English are detected automatically.") {
-                    modelProgress
+                StepLayout(symbol: "cpu", title: "Preparing on-device models", text: "Current downloads speech recognition and context structuring concurrently. Downloads use the network during setup; both models run locally afterward.") {
+                    VStack(spacing: 16) {
+                        modelProgress
+                        Text(
+                            "MLX Swift is Apache 2.0 licensed. Gemma is provided under Google’s Gemma Terms of Use."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    }
                 }
             case .practice:
                 StepLayout(symbol: "text.cursor", title: "Try it here", text: "Click the field, hold fn, say a short sentence, and release.") {
@@ -223,21 +236,60 @@ struct OnboardingView: View {
     }
 
     @ViewBuilder private var modelProgress: some View {
-        switch runtime.model.state {
-        case .ready: Label("Model ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .failed(let error):
-            VStack { Text(error).foregroundStyle(.red); Button("Retry") { runtime.model.retry() } }
-        case .downloading(let progress):
-            ProgressView(value: progress) { Text("Downloading…") }.frame(maxWidth: 340)
-        default: ProgressView("Preparing…")
+        VStack(alignment: .leading, spacing: 18) {
+            modelRow(
+                title: "Speech recognition — Parakeet TDT 0.6B",
+                state: runtime.model.state,
+                retry: runtime.model.retry
+            )
+            modelRow(
+                title: "Context structuring — Gemma 4 E2B 4-bit",
+                state: runtime.contextModel.state,
+                retry: runtime.contextModel.retry
+            )
+        }
+        .frame(maxWidth: 440)
+    }
+
+    @ViewBuilder private func modelRow(
+        title: String,
+        state: ModelState,
+        retry: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline)
+            switch state {
+            case .ready:
+                Label("Ready", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .failed(let error):
+                Text(error).font(.caption).foregroundStyle(.red)
+                Button("Retry", action: retry)
+            case .downloading(let progress):
+                ProgressView(value: progress) {
+                    Text("Downloading…")
+                }
+            case .verifying:
+                ProgressView("Verifying…")
+            case .loading:
+                ProgressView("Loading…")
+            case .notInstalled:
+                ProgressView("Preparing…")
+            }
         }
     }
 
-    private var modelSummary: String { runtime.model.state.isReady ? "Local model ready" : "Model download started automatically" }
+    private var modelSummary: String {
+        runtime.model.state.isReady && runtime.contextModel.state.isReady
+            ? "Both local models are ready"
+            : "Both model downloads start automatically"
+    }
     private var showNext: Bool {
         switch controller.step {
         case .microphone, .accessibility, .screenRecording, .inputMonitoring, .restart: false
-        case .model: runtime.model.state.isReady
+        case .model:
+            runtime.model.state.isReady
+                && runtime.contextModel.state.isReady
         default: true
         }
     }

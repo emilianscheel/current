@@ -274,6 +274,12 @@ public final class ModelManager {
         ModelSnapshotValidator.isComplete(at: ModelSnapshotLocations.current.snapshot)
     }
 
+    public var downloadedSizeBytes: Int64 {
+        ModelIntegrity.directorySize(
+            at: ModelSnapshotLocations.current.snapshot
+        )
+    }
+
     public func prepareIfNeeded() {
         guard preparationTask == nil, !state.isReady else { return }
         state = .downloading(progress: 0.01)
@@ -325,6 +331,23 @@ public final class ModelManager {
 }
 
 public enum ModelIntegrity {
+    public static func directorySize(at directory: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            total += Int64(
+                (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                    ?? 0
+            )
+        }
+        return total
+    }
+
     public static func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }

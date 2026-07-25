@@ -189,22 +189,26 @@ public enum PerceptualImageHasher {
 
 @MainActor
 public final class AccessibilityContextSource: AccessibilityContextProviding {
+    private struct SnapshotResult {
+        let observation: ContextObservation?
+        let coverage: AccessibilityCoverage
+    }
+
     private static let currentBundleIdentifier = "local.Current"
 
     private let repository: ContextRepository
-    private let recoveryInterval: Duration
     private let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
     private var observers: [pid_t: AXObserver] = [:]
     private var debounceTasks: [pid_t: Task<Void, Never>] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
-    private var recoveryTask: Task<Void, Never>?
+    private var coverageByKey: [ContextCoverageKey: AccessibilityCoverage] = [:]
 
     public init(
         repository: ContextRepository,
         recoveryInterval: Duration = .seconds(30)
     ) {
         self.repository = repository
-        self.recoveryInterval = recoveryInterval
+        _ = recoveryInterval
     }
 
     public func start() {
@@ -278,20 +282,12 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
                 }
             }
         )
-        recoveryTask = Task { [weak self] in
-            guard let self else { return }
-            await self.captureVisibleApplications()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: self.recoveryInterval)
-                guard !Task.isCancelled else { return }
-                await self.captureVisibleApplications()
-            }
+        Task { @MainActor [weak self] in
+            _ = await self?.refreshVisibleCoverage()
         }
     }
 
     public func stop() {
-        recoveryTask?.cancel()
-        recoveryTask = nil
         for task in debounceTasks.values {
             task.cancel()
         }
@@ -311,16 +307,75 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
     }
 
     public func snapshotVisibleApplications() async -> [ContextObservation] {
-        visibleApplications().flatMap(Self.snapshot)
+        visibleApplications()
+            .flatMap(Self.snapshotResults)
+            .compactMap { result in
+                result.coverage.isUseful ? result.observation : nil
+            }
     }
 
-    private func captureVisibleApplications() async {
+    public func refreshVisibleCoverage() async -> [AccessibilityCoverage] {
+        var refreshed: [AccessibilityCoverage] = []
         for application in visibleApplications() {
             installObserver(for: application)
-            for observation in Self.snapshot(application) {
-                await repository.accept(observation)
+            for result in Self.snapshotResults(application) {
+                coverageByKey[result.coverage.key] = result.coverage
+                refreshed.append(result.coverage)
+                if result.coverage.isUseful,
+                   let observation = result.observation {
+                    await repository.accept(observation)
+                }
             }
         }
+        return refreshed
+    }
+
+    public func refreshCoverage(
+        for target: ContextCaptureTarget
+    ) async -> ContextCaptureDecision {
+        guard let application = NSRunningApplication(
+            processIdentifier: target.processIdentifier
+        ), !isExcluded(application) else {
+            return .unavailable
+        }
+        installObserver(for: application)
+        let results = Self.snapshotResults(application)
+        let result = Self.matchingResult(results, target: target)
+        guard let result else {
+            return .screenshotFallback(
+                ContextCoverageKey(
+                    processIdentifier: target.processIdentifier,
+                    windowIdentifier: target.windowIdentifier,
+                    windowTitle: target.windowTitle
+                )
+            )
+        }
+        coverageByKey[result.coverage.key] = result.coverage
+        guard result.coverage.isUseful,
+              let observation = result.observation else {
+            return .screenshotFallback(result.coverage.key)
+        }
+        await repository.accept(observation)
+        return .accessibility(observation)
+    }
+
+    public func coverage(
+        for target: ContextCaptureTarget
+    ) async -> AccessibilityCoverage? {
+        if let title = target.windowTitle {
+            let exact = ContextCoverageKey(
+                processIdentifier: target.processIdentifier,
+                windowIdentifier: nil,
+                windowTitle: title
+            )
+            if let value = coverageByKey[exact] {
+                return value
+            }
+        }
+        let matches = coverageByKey.values.filter {
+            $0.key.processIdentifier == target.processIdentifier
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     private func installObserversForRunningApplications() {
@@ -387,6 +442,9 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
 
     private func removeObserver(processIdentifier: pid_t) {
         debounceTasks.removeValue(forKey: processIdentifier)?.cancel()
+        coverageByKey = coverageByKey.filter {
+            $0.key.processIdentifier != processIdentifier
+        }
         guard let observer = observers.removeValue(
             forKey: processIdentifier
         ) else {
@@ -419,8 +477,12 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
         ), !isExcluded(application) else {
             return
         }
-        for observation in Self.snapshot(application) {
-            await repository.accept(observation)
+        for result in Self.snapshotResults(application) {
+            coverageByKey[result.coverage.key] = result.coverage
+            if result.coverage.isUseful,
+               let observation = result.observation {
+                await repository.accept(observation)
+            }
         }
     }
 
@@ -449,9 +511,9 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
         ] as? NSRunningApplication
     }
 
-    private nonisolated static func snapshot(
+    private nonisolated static func snapshotResults(
         _ application: NSRunningApplication
-    ) -> [ContextObservation] {
+    ) -> [SnapshotResult] {
         let appElement = AXUIElementCreateApplication(
             application.processIdentifier
         )
@@ -464,19 +526,52 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
             kAXWindowsAttribute,
             from: appElement
         )
-        return windows.compactMap { window in
+        let attemptedAt = Date()
+        return windows.enumerated().map { index, window in
             let title = stringAttribute(kAXTitleAttribute, from: window)
             let blocks = textBlocks(in: window)
-            guard !blocks.isEmpty else { return nil }
-            return ContextObservation(
+            let key = ContextCoverageKey(
                 processIdentifier: application.processIdentifier,
-                bundleIdentifier: application.bundleIdentifier,
-                applicationName: application.localizedName ?? "Application",
-                windowTitle: title,
-                isFrontmost: application.isActive,
-                blocks: blocks
+                windowTitle: title ?? "__untitled:\(index)"
+            )
+            let characterCount = blocks.reduce(into: 0) {
+                $0 += ContextObservation.normalized($1.text).count
+            }
+            let coverage = AccessibilityCoverage(
+                key: key,
+                lastAttempt: attemptedAt,
+                lastUsefulObservation: (
+                    blocks.count >= 3 || characterCount >= 40
+                ) ? attemptedAt : nil,
+                blockCount: blocks.count,
+                normalizedCharacterCount: characterCount
+            )
+            let observation = blocks.isEmpty ? nil : ContextObservation(
+                    processIdentifier: application.processIdentifier,
+                    bundleIdentifier: application.bundleIdentifier,
+                    applicationName: application.localizedName ?? "Application",
+                    windowTitle: title,
+                    isFrontmost: application.isActive,
+                    blocks: blocks
+                )
+            return SnapshotResult(
+                observation: observation,
+                coverage: coverage
             )
         }
+    }
+
+    private nonisolated static func matchingResult(
+        _ results: [SnapshotResult],
+        target: ContextCaptureTarget
+    ) -> SnapshotResult? {
+        if let title = target.windowTitle,
+           !title.isEmpty {
+            return results.first {
+                $0.coverage.key.windowTitle == title
+            }
+        }
+        return results.count == 1 ? results[0] : nil
     }
 
     private nonisolated static func textBlocks(
@@ -710,6 +805,15 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
                     try await captureAllDisplays()
                 case .typingSettled, .textCommitted:
                     guard let target = request.target else { continue }
+                    let decision = await accessibility.refreshCoverage(
+                        for: target
+                    )
+                    if case .accessibility = decision {
+                        continue
+                    }
+                    guard case .screenshotFallback = decision else {
+                        continue
+                    }
                     try await captureWindow(target)
                 }
             } catch is CancellationError {
@@ -732,82 +836,42 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
     }
 
     private func captureAllDisplays() async throws {
+        _ = await accessibility.refreshVisibleCoverage()
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
             onScreenWindowsOnly: true
         )
         guard isRunning, !isSleeping else { return }
-        let excludedApplications = content.applications.filter(isExcluded)
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?
-            .processIdentifier
-        for display in content.displays {
+        let windows = content.windows.filter { window in
+            guard window.isOnScreen,
+                  window.frame.width > 1,
+                  window.frame.height > 1,
+                  let application = window.owningApplication else {
+                return false
+            }
+            return !isExcluded(application)
+        }
+        for window in windows {
             try Task.checkCancellation()
             guard isRunning, !isSleeping else { return }
-            let descriptors = Self.windowDescriptors(
-                content.windows,
-                display: display,
-                frontmostPID: frontmostPID,
-                excluding: isExcluded
-            )
-            let configuration = Self.configuration(
-                width: display.width,
-                height: display.height
-            )
-            let filter = SCContentFilter(
-                display: display,
-                excludingApplications: excludedApplications,
-                exceptingWindows: []
-            )
-            let image = try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            )
-            try Task.checkCancellation()
-            let capturedAt = Date()
-            for descriptor in descriptors {
-                recentCaptures[
-                    Self.captureIdentity(descriptor)
-                ] = capturedAt
-                recentCaptures[
-                    Self.captureIdentity(
-                        ContextCaptureTarget(
-                            processIdentifier: descriptor.processIdentifier,
-                            bundleIdentifier: descriptor.bundleIdentifier,
-                            applicationName: descriptor.applicationName,
-                            windowTitle: descriptor.title
-                        )
-                    )
-                ] = capturedAt
-                recentCaptures[
-                    Self.captureIdentity(
-                        ContextCaptureTarget(
-                            processIdentifier: descriptor.processIdentifier,
-                            bundleIdentifier: descriptor.bundleIdentifier,
-                            applicationName: descriptor.applicationName
-                        )
-                    )
-                ] = capturedAt
+            guard let application = window.owningApplication else {
+                continue
             }
-            let hashKey = "display:\(display.displayID)"
-            guard shouldRunOCR(image: image, key: hashKey) else { continue }
-            let blocks = try await ocr.recognizeText(in: image)
-            try Task.checkCancellation()
-            guard isRunning, !isSleeping else { return }
-            let observations = OCRWindowMapper.observations(
-                blocks: blocks,
-                displayIdentifier: display.displayID,
-                displayFrame: ContextBounds(
-                    x: display.frame.origin.x,
-                    y: display.frame.origin.y,
-                    width: display.frame.width,
-                    height: display.frame.height
-                ),
-                windows: descriptors,
-                capturedAt: capturedAt
+            let target = ContextCaptureTarget(
+                processIdentifier: application.processID,
+                bundleIdentifier: application.bundleIdentifier,
+                applicationName: application.applicationName,
+                windowIdentifier: window.windowID,
+                windowTitle: window.title
             )
-            for observation in observations {
-                await repository.accept(observation)
+            if await accessibility.coverage(for: target)?.isUseful == true {
+                continue
             }
+            try await captureResolvedWindow(
+                window,
+                content: content,
+                target: target
+            )
         }
     }
 
@@ -827,6 +891,18 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
               !isExcluded(application) else {
             return
         }
+        try await captureResolvedWindow(
+            window,
+            content: content,
+            target: target
+        )
+    }
+
+    private func captureResolvedWindow(
+        _ window: SCWindow,
+        content: SCShareableContent,
+        target: ContextCaptureTarget
+    ) async throws {
         let descriptor = Self.windowDescriptor(
             window,
             frontmostPID: NSWorkspace.shared.frontmostApplication?
@@ -846,7 +922,7 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
         let capturedAt = Date()
         recentCaptures[Self.captureIdentity(descriptor)] = capturedAt
         recentCaptures[Self.captureIdentity(target)] = capturedAt
-        let hashKey = "window:\(window.windowID)"
+        let hashKey = "window:\(descriptor.processIdentifier):\(window.windowID)"
         guard shouldRunOCR(image: image, key: hashKey) else { return }
         let blocks = try await ocr.recognizeText(in: image)
         try Task.checkCancellation()

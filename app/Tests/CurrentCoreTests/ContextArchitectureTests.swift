@@ -3,7 +3,10 @@ import CoreGraphics
 import Testing
 @testable import CurrentCore
 
-private actor StubIntelligence: LocalIntelligenceProviding {
+private actor StubIntelligence:
+    LocalIntelligenceProviding,
+    ContextStructuringProviding
+{
     private(set) var updateCalls = 0
 
     func classifyIntent(_ request: VoiceInteractionRequest) async -> IntentDecision {
@@ -185,7 +188,7 @@ private actor StubIntelligence: LocalIntelligenceProviding {
     let intelligence = StubIntelligence()
     let repository = ContextRepository(
         store: store,
-        intelligence: intelligence,
+        structurer: intelligence,
         calendar: calendar
     )
     let firstDate = calendar.date(
@@ -224,10 +227,193 @@ private actor StubIntelligence: LocalIntelligenceProviding {
         ]
     )
     #expect(await repository.accept(nextDay))
-    try? await Task.sleep(for: .milliseconds(100))
+    await repository.stop()
     store.reload()
     #expect(store.appSessionDocuments().count == 2)
     #expect(await intelligence.updateCalls == 2)
+}
+
+@Test func accessibilityCoverageRequiresSemanticDepthOrUsefulText() {
+    let key = ContextCoverageKey(
+        processIdentifier: 42,
+        windowTitle: "Document"
+    )
+    #expect(
+        AccessibilityCoverage(
+            key: key,
+            lastAttempt: Date(),
+            lastUsefulObservation: Date(),
+            blockCount: 3,
+            normalizedCharacterCount: 12
+        ).isUseful
+    )
+    #expect(
+        AccessibilityCoverage(
+            key: key,
+            lastAttempt: Date(),
+            lastUsefulObservation: Date(),
+            blockCount: 1,
+            normalizedCharacterCount: 40
+        ).isUseful
+    )
+    #expect(
+        !AccessibilityCoverage(
+            key: key,
+            lastAttempt: Date(),
+            lastUsefulObservation: nil,
+            blockCount: 2,
+            normalizedCharacterCount: 39
+        ).isUseful
+    )
+}
+
+@Test func gemmaOutputIsNormalizedToBoundedUniqueBullets() throws {
+    let payload = """
+    {
+      "changed": true,
+      "currentStateBullets": ["- Task 17 is due 2026-07-26", "Task 17 is due 2026-07-26", "https://example.com/item/17"],
+      "activityBullets": ["• Status changed to Done"]
+    }
+    """
+    let update = try ContextBulletNormalizer.update(from: payload)
+    #expect(update.currentStateMarkdown.components(separatedBy: "\n").count == 2)
+    #expect(update.currentStateMarkdown.contains("2026-07-26"))
+    #expect(update.currentStateMarkdown.contains("https://example.com/item/17"))
+    #expect(update.activityEntryMarkdown == "- Status changed to Done")
+}
+
+@MainActor
+@Test func installedGemmaCheckpointProducesDeterministicTokenWhenGated()
+    async throws {
+    guard ProcessInfo.processInfo.environment[
+        "CURRENT_RUN_GEMMA_INTEGRATION"
+    ] == "1" else {
+        return
+    }
+    let manager = GemmaContextModelManager()
+    let response = try await manager.runIntegrationProbe()
+    #expect(!response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    await manager.unload()
+}
+
+@MainActor
+@Test func aliasesPersistAndParticipateInSearch() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-alias-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let document = try store.append("A dictated note", at: Date())
+    try store.rename(
+        documentID: document.id,
+        displayName: "Quarterly planning"
+    )
+    store.reload()
+    #expect(
+        store.document(id: document.id)?.customDisplayName
+            == "Quarterly planning"
+    )
+    #expect(store.filteredDocuments(matching: "Quarterly").count == 1)
+    #expect(
+        FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(
+                "Document Metadata.json"
+            ).path
+        )
+    )
+}
+
+@MainActor
+@Test func legacyAppSessionsMigrateAtomicallyAndPreserveTimestamps()
+    async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-v2-migration-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let dayDirectory = root.appendingPathComponent(
+        "App Sessions/2026-07-25",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+        at: dayDirectory,
+        withIntermediateDirectories: true
+    )
+    let sessionID = UUID().uuidString
+    let markdown = """
+    # Mail — App Session
+
+    | Metadata | Value |
+    | --- | --- |
+    | App | Mail |
+    | Bundle ID | com.apple.mail |
+    | Session ID | \(sessionID) |
+    | Process ID | 909 |
+    | Started | 2026-07-25T10:00:00Z |
+    | Ended | 2026-07-25T10:05:00Z |
+    | Day | 2026-07-25 |
+    | Icon |  |
+    | Sources | Accessibility |
+
+    ## Current state
+
+    Reviewing the project message.
+
+    ## Activity
+
+    ### 10:01:02
+
+    Opened the project message from Alex.
+    """
+    try Data(markdown.utf8).write(
+        to: dayDirectory.appendingPathComponent("legacy.md"),
+        options: .atomic
+    )
+    let store = ContextStore(directory: root)
+    store.reload()
+    #expect(store.appSessionDocumentsRequiringMigration().count == 1)
+    let repository = ContextRepository(
+        store: store,
+        structurer: StubIntelligence()
+    )
+    await repository.migrateLegacyDocuments()
+    let migrated = try #require(store.appSessionDocuments().first)
+    #expect(migrated.markdown.contains("| Format Version | 2 |"))
+    #expect(migrated.markdown.contains("### 10:01:02"))
+    #expect(migrated.markdown.contains("Alex"))
+}
+
+@MainActor
+@Test func deletingAnActiveSessionSuppressesRecreation() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-session-discard-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let repository = ContextRepository(
+        store: store,
+        structurer: StubIntelligence()
+    )
+    let observation = ContextObservation(
+        processIdentifier: 818,
+        bundleIdentifier: "example.active",
+        applicationName: "Active",
+        windowTitle: "Main",
+        blocks: [
+            ContextTextBlock(
+                text: "A sufficiently useful accessibility observation",
+                source: .accessibility
+            ),
+        ]
+    )
+    #expect(await repository.accept(observation))
+    let context = try #require((await repository.snapshot()).first)
+    await repository.discardSession(
+        documentID: "app:\(context.session.sessionID.rawValue)"
+    )
+    #expect(!(await repository.accept(observation)))
+    #expect((await repository.snapshot()).isEmpty)
 }
 
 @Test func screenRecordingParticipatesInPermissionOrdering() {
@@ -271,7 +457,7 @@ private actor StubIntelligence: LocalIntelligenceProviding {
     store.reload()
     let repository = ContextRepository(
         store: store,
-        intelligence: StubIntelligence(),
+        structurer: StubIntelligence(),
         excludedBundleIdentifiers: ["local.Current"],
         excludedProcessIdentifiers: [777]
     )

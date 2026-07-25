@@ -11,11 +11,35 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
+        .package(
+            url: "https://github.com/ml-explore/mlx-swift-lm.git",
+            exact: "3.31.4"
+        ),
+        .package(
+            url: "https://github.com/ml-explore/mlx-swift.git",
+            exact: "0.31.6"
+        ),
+        .package(
+            url: "https://github.com/huggingface/swift-huggingface.git",
+            exact: "0.9.0"
+        ),
+        .package(
+            url: "https://github.com/huggingface/swift-transformers.git",
+            exact: "1.3.0"
+        ),
     ],
     targets: [
         .target(
             name: "CurrentCore",
-            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")]
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ]
         ),
         .executableTarget(
             name: "Current",

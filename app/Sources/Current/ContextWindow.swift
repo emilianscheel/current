@@ -20,7 +20,10 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
     func show() {
         store.reload()
         if viewModel == nil {
-            viewModel = ContextViewModel(store: store)
+            viewModel = ContextViewModel(
+                store: store,
+                repository: runtime.contextRepository
+            )
         } else {
             viewModel?.refreshFromDisk()
         }
@@ -30,9 +33,14 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
             )
             let window = NSWindow(contentViewController: controller)
             window.title = "Context"
-            window.styleMask = [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
+            window.styleMask = [
+                .titled,
+                .closable,
+                .resizable,
+                .miniaturizable,
+            ]
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
             window.setContentSize(NSSize(width: 1_000, height: 680))
             window.minSize = NSSize(width: 760, height: 520)
             window.center()
@@ -75,6 +83,7 @@ final class ContextViewModel {
     }
 
     let store: ContextStore
+    private let repository: ContextRepository
     var searchText = ""
     private(set) var selectedDocumentID: String?
     var richText = AttributedString()
@@ -87,8 +96,9 @@ final class ContextViewModel {
     private var isDirty = false
     private var baselineRichText = AttributedString()
 
-    init(store: ContextStore) {
+    init(store: ContextStore, repository: ContextRepository) {
         self.store = store
+        self.repository = repository
         selectedDocumentID = store.documents.first?.id
         loadSelection()
     }
@@ -103,7 +113,10 @@ final class ContextViewModel {
     }
 
     func displayTitle(for document: ContextDocument) -> String {
-        switch document.kind {
+        if let alias = document.customDisplayName {
+            return alias
+        }
+        return switch document.kind {
         case .dailyDictation:
             store.displayTitle(for: document.date)
         case .appSession(let metadata):
@@ -216,10 +229,24 @@ final class ContextViewModel {
         if selectedDocumentID == documentID { flush() }
         do {
             try store.moveToTrash(documentID: documentID)
+            Task {
+                await repository.discardSession(documentID: documentID)
+            }
             if selectedDocumentID == documentID {
                 selectedDocumentID = store.documents.first?.id
                 loadSelection()
             }
+        } catch {
+            show(error)
+        }
+    }
+
+    func rename(documentID: String, displayName: String) {
+        do {
+            try store.rename(
+                documentID: documentID,
+                displayName: displayName
+            )
         } catch {
             show(error)
         }
@@ -338,13 +365,19 @@ private struct ContextManagementView: View {
     @State private var pendingDeletion: ContextDocument?
     @State private var showingLinkEditor = false
     @State private var linkURL = ""
+    @State private var pendingRename: ContextDocument?
+    @State private var renameText = ""
 
     var body: some View {
-        CurrentWindowBackground {
-            HSplitView {
-                sidebar
-                    .frame(minWidth: 220, idealWidth: 270, maxWidth: 340)
-
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(
+                    min: 220,
+                    ideal: 270,
+                    max: 340
+                )
+        } detail: {
+            CurrentWindowBackground {
                 detail
                     .frame(minWidth: 520)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -382,6 +415,29 @@ private struct ContextManagementView: View {
             }
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         }
+        .alert(
+            "Rename Context Document",
+            isPresented: Binding(
+                get: { pendingRename != nil },
+                set: { if !$0 { pendingRename = nil } }
+            )
+        ) {
+            TextField("Display name", text: $renameText)
+            Button("Cancel", role: .cancel) {
+                pendingRename = nil
+            }
+            Button("Rename") {
+                if let pendingRename {
+                    model.rename(
+                        documentID: pendingRename.id,
+                        displayName: renameText
+                    )
+                }
+                pendingRename = nil
+            }
+        } message: {
+            Text("This changes the sidebar name without renaming the Markdown file.")
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -404,6 +460,23 @@ private struct ContextManagementView: View {
                     .listRowInsets(
                         EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
                     )
+                    .contextMenu {
+                        Button("Copy Contents", systemImage: "doc.on.doc") {
+                            model.copyMarkdown(documentID: document.id)
+                        }
+                        Button("Rename…", systemImage: "pencil") {
+                            pendingRename = document
+                            renameText = model.displayTitle(for: document)
+                        }
+                        Divider()
+                        Button(
+                            "Move to Trash",
+                            systemImage: "trash",
+                            role: .destructive
+                        ) {
+                            pendingDeletion = document
+                        }
+                    }
             }
         }
         .listStyle(.sidebar)
@@ -443,21 +516,8 @@ private struct ContextManagementView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Menu {
-                Button("Copy Markdown", systemImage: "doc.on.doc") {
-                    model.copyMarkdown(documentID: document.id)
-                }
-                Divider()
-                Button("Move to Trash", systemImage: "trash", role: .destructive) {
-                    pendingDeletion = document
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+        }
     }
-}
 
     @ViewBuilder private var detail: some View {
         if model.selectedDocument != nil {

@@ -36,9 +36,12 @@ struct SettingsView: View {
                 if enabled,
                    runtime.settings.isEnabled,
                    runtime.permissions.snapshot().screenRecording.isGranted {
+                    runtime.contextModel.prepareIfNeeded()
                     try? await runtime.screenContext.start()
+                    await runtime.contextRepository.migrateLegacyDocuments()
                 } else {
                     await runtime.screenContext.stop()
+                    await runtime.contextModel.unload()
                 }
             }
         }
@@ -74,14 +77,45 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var transcription: some View {
-        Section("Local model") {
+        Section("Speech recognition") {
             LabeledContent("Model", value: "Parakeet TDT 0.6B v3 Multilingual INT8")
             LabeledContent("Engine", value: "FluidAudio / Core ML / Apple Neural Engine")
+            LabeledContent(
+                "Storage",
+                value: formattedStorage(
+                    runtime.model.downloadedSizeBytes
+                )
+            )
             LabeledContent("State", value: modelState)
             if case .failed(let reason) = runtime.model.state { Text(reason).foregroundStyle(.red); Button("Retry") { runtime.model.retry() } }
             Button("Remove downloaded model", role: .destructive) {
                 Task { try? await runtime.model.removeDownloadedModel() }
             }.disabled(!runtime.model.hasInstalledSnapshot)
+        }
+        Section("Context structuring") {
+            LabeledContent("Model", value: GemmaContextModel.displayName)
+            LabeledContent("Engine", value: "MLX Swift / Metal / unified memory")
+            LabeledContent(
+                "Storage",
+                value: formattedStorage(
+                    runtime.contextModel.downloadedSizeBytes,
+                    fallback: GemmaContextModel.approximateDownloadBytes
+                )
+            )
+            LabeledContent(
+                "State",
+                value: modelState(runtime.contextModel.state)
+            )
+            if case .failed(let reason) = runtime.contextModel.state {
+                Text(reason).foregroundStyle(.red)
+                Button("Retry") { runtime.contextModel.retry() }
+            }
+            Button("Remove Gemma model", role: .destructive) {
+                Task {
+                    try? await runtime.contextModel.removeDownloadedModel()
+                }
+            }
+            .disabled(!runtime.contextModel.hasInstalledSnapshot)
         }
         Section {
             Text("German, French, Italian, Spanish, and English are detected automatically. Punctuation and capitalization are processed entirely on this Mac.")
@@ -106,7 +140,7 @@ struct SettingsView: View {
                 "Capture schedule",
                 value: "Every 30 seconds and 3 seconds after typing"
             )
-            Label("Accessibility text and on-device OCR are grouped into one Markdown document per app process and day", systemImage: "text.viewfinder")
+            Label("Accessibility text is preferred; screenshots and on-device OCR are used only for windows without useful accessible text", systemImage: "text.viewfinder")
             Label("Current is excluded; other visible content may include sensitive information", systemImage: "exclamationmark.shield")
                 .foregroundStyle(.orange)
             Label("macOS controls whether a screen-capture privacy indicator appears", systemImage: "record.circle")
@@ -114,7 +148,7 @@ struct SettingsView: View {
         }
         Section("Local processing") {
             Label("Audio is held in memory only", systemImage: "memorychip")
-            Label("No network requests occur during dictation", systemImage: "network.slash")
+            Label("Model downloads use the network during setup; inference remains local", systemImage: "network.slash")
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
             Label("Screenshots are discarded after OCR; extracted text and metadata are retained", systemImage: "internaldrive")
@@ -133,7 +167,11 @@ struct SettingsView: View {
     }
 
     private var modelState: String {
-        switch runtime.model.state {
+        modelState(runtime.model.state)
+    }
+
+    private func modelState(_ state: ModelState) -> String {
+        switch state {
         case .notInstalled: "Not installed"
         case .downloading(let progress): "Downloading \(Int(progress * 100))%"
         case .verifying: "Verifying"
@@ -141,6 +179,19 @@ struct SettingsView: View {
         case .ready: "Ready"
         case .failed: "Error"
         }
+    }
+
+    private func formattedStorage(
+        _ bytes: Int64,
+        fallback: Int64? = nil
+    ) -> String {
+        let value = bytes > 0 ? bytes : (fallback ?? 0)
+        guard value > 0 else { return "Not downloaded" }
+        let formatted = ByteCountFormatter.string(
+            fromByteCount: value,
+            countStyle: .file
+        )
+        return bytes > 0 ? formatted : "About \(formatted)"
     }
 }
 

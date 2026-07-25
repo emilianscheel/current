@@ -34,7 +34,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add("Context…", to: menu, action: #selector(openContext))
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
-        add(modelTitle, to: menu, enabled: false)
+        add(speechModelTitle, to: menu, enabled: false)
+        add(contextModelTitle, to: menu, enabled: false)
         if !runtime.settings.onboardingComplete {
             add("Permissions & Onboarding…", to: menu, action: #selector(openOnboarding))
         }
@@ -43,12 +44,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add("Quit Current", to: menu, action: #selector(quit), key: "q")
     }
 
-    private var modelTitle: String {
+    private var speechModelTitle: String {
         switch runtime.model.state {
-        case .ready: "Model: Parakeet TDT v3 Multilingual"
-        case .downloading: "Model: Downloading…"
-        case .failed: "Model: Action needed"
-        default: "Model: Preparing…"
+        case .ready: "Speech model: Parakeet TDT v3 Multilingual"
+        case .downloading: "Speech model: Downloading…"
+        case .failed: "Speech model: Action needed"
+        default: "Speech model: Preparing…"
+        }
+    }
+
+    private var contextModelTitle: String {
+        switch runtime.contextModel.state {
+        case .ready: "Context model: Gemma 4 E2B 4-bit"
+        case .downloading: "Context model: Downloading…"
+        case .failed: "Context model: Action needed"
+        default: "Context model: Preparing…"
         }
     }
 
@@ -70,7 +80,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Current",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Private, on-device multilingual dictation with local daily context.\nFluidAudio — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0")
+            .credits: NSAttributedString(string: "Private, on-device multilingual dictation with local daily context.\nFluidAudio / MLX Swift — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0\nGemma 4 E2B 4-bit — Gemma Terms of Use")
         ])
         NSApp.activate(ignoringOtherApps: true)
     }

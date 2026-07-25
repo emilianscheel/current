@@ -60,6 +60,7 @@ fi
 
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
 ICONSET="$PROJECT_DIR/.build/AppIcon.iconset"
+XCODE_DERIVED_DATA="$PROJECT_DIR/.build/xcode-derived"
 typeset -a CODESIGN_KEYCHAIN_ARGS
 export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache"
@@ -118,6 +119,30 @@ print "Building release binaries…"
 swift build --disable-sandbox -c release --arch arm64
 BIN_DIR="$(swift build --disable-sandbox -c release --arch arm64 --show-bin-path)"
 
+if ! xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+  print -u2 "Apple's Metal Toolchain is required to package MLX."
+  print -u2 "Install it with: xcodebuild -downloadComponent MetalToolchain"
+  exit 1
+fi
+
+print "Compiling MLX Metal resources with Xcode…"
+xcodebuild \
+  -quiet \
+  -scheme Current \
+  -configuration Release \
+  -destination "platform=macOS,arch=arm64" \
+  -derivedDataPath "$XCODE_DERIVED_DATA" \
+  -skipPackagePluginValidation \
+  -skipMacroValidation \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+MLX_RESOURCE_BUNDLE="$XCODE_DERIVED_DATA/Build/Products/Release/mlx-swift_Cmlx.bundle"
+MLX_DEFAULT_LIBRARY="$MLX_RESOURCE_BUNDLE/Contents/Resources/default.metallib"
+if [[ ! -f "$MLX_DEFAULT_LIBRARY" ]]; then
+  print -u2 "Xcode did not produce MLX's required default.metallib resource."
+  exit 1
+fi
+
 print "Creating the app icon from icon.png…"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
@@ -140,6 +165,11 @@ cp "$BIN_DIR/CurrentRelauncher" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
 cp "$PROJECT_DIR/.build/AppIcon.icns" "$STAGE_APP/Contents/Resources/AppIcon.icns"
 cp Sources/Current/Resources/model-manifest.json Sources/Current/Resources/Privacy.md Licenses/NOTICE.md "$STAGE_APP/Contents/Resources/"
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do cp -R "$resource_bundle" "$STAGE_APP/Contents/Resources/"; done
+cp -R "$MLX_RESOURCE_BUNDLE" "$STAGE_APP/Contents/Resources/"
+[[ -f "$STAGE_APP/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]] || {
+  print -u2 "Packaged app is missing MLX's required default.metallib resource."
+  exit 1
+}
 
 codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --sign "$SIGNING_IDENTITY" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
 codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements Packaging/Current.entitlements --sign "$SIGNING_IDENTITY" "$STAGE_APP"

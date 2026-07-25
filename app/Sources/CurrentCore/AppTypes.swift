@@ -52,7 +52,7 @@ public enum CurrentError: LocalizedError, Sendable, Equatable {
         case .permissionMissing(let permission): "\(permission.title) permission is required."
         case .noMicrophone: "No microphone is available."
         case .recordingTooShort: "Keep holding fn while you speak."
-        case .modelUnavailable(let reason): "The local speech model is unavailable: \(reason)"
+        case .modelUnavailable(let reason): "A local model is unavailable: \(reason)"
         case .transcriptionFailed(let reason): "Transcription failed: \(reason)"
         case .promptGenerationFailed(let reason): "Prompt generation failed: \(reason)"
         case .insertionFailed(let reason): "Text was copied because insertion failed: \(reason)"

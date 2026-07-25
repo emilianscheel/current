@@ -15,6 +15,50 @@ public enum GemmaContextModel {
     public static let approximateDownloadBytes: Int64 = 3_550_000_000
 }
 
+enum GemmaMetalRuntime {
+    static func requireDefaultLibrary() throws {
+        let bundle = Bundle.main
+        var searchRoots = [bundle.bundleURL]
+        if let resourceURL = bundle.resourceURL {
+            searchRoots.append(resourceURL)
+        }
+        if let executableDirectory = bundle.executableURL?
+            .deletingLastPathComponent() {
+            searchRoots.append(executableDirectory)
+        }
+        guard defaultLibraryURL(searchRoots: searchRoots) != nil else {
+            throw CurrentError.modelUnavailable(
+                "Gemma's MLX Metal resources are missing from this build. "
+                    + "Reinstall Current with a build that includes "
+                    + "mlx-swift_Cmlx.bundle."
+            )
+        }
+    }
+
+    static func defaultLibraryURL(
+        searchRoots: [URL],
+        fileManager: FileManager = .default
+    ) -> URL? {
+        let relativePaths = [
+            "mlx.metallib",
+            "Resources/mlx.metallib",
+            "default.metallib",
+            "Resources/default.metallib",
+            "mlx-swift_Cmlx.bundle/default.metallib",
+            "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib",
+        ]
+        for root in searchRoots {
+            for relativePath in relativePaths {
+                let candidate = root.appendingPathComponent(relativePath)
+                if fileManager.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+}
+
 public struct GemmaModelLocations: Sendable {
     public let modelsDirectory: URL
     public let snapshot: URL
@@ -170,8 +214,14 @@ private actor GemmaInferenceEngine {
     }
 
     func unload() {
+        let hadLoadedContainer = container != nil
         container = nil
-        Memory.clearCache()
+        // MLX initializes its Metal backend when clearing the cache. Calling it
+        // before a model has ever loaded turns a missing packaged metallib into
+        // an unrecoverable C++ process abort instead of a normal model error.
+        if hadLoadedContainer {
+            Memory.clearCache()
+        }
     }
 
     func structure(
@@ -444,6 +494,7 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
                     "Gemma context model is not downloaded yet."
                 )
             }
+            try GemmaMetalRuntime.requireDefaultLibrary()
             state = .loading
             do {
                 let container = try await loadModelContainer(
@@ -491,6 +542,7 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
                     "Install Gemma before running the integration probe."
                 )
             }
+            try GemmaMetalRuntime.requireDefaultLibrary()
             let container = try await loadModelContainer(
                 from: locations.snapshot,
                 using: #huggingFaceTokenizerLoader()

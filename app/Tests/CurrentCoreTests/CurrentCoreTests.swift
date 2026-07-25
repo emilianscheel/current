@@ -50,6 +50,25 @@ import Testing
     #expect(machine.escape() == .cancelled)
 }
 
+@MainActor
+@Test func explicitMenuCaptureResumesPausedCurrent() {
+    let suiteName = "CurrentMenuCaptureTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(false, forKey: "isEnabled")
+    let settings = SettingsStore(defaults: defaults)
+    let coordinator = DictationCoordinator(
+        settings: settings,
+        model: ModelManager()
+    )
+
+    coordinator.beginFromMenu()
+
+    #expect(settings.isEnabled)
+    #expect(coordinator.phase != .paused)
+    coordinator.stopMonitoring()
+}
+
 @Test func insertionSpacingIsDeterministic() {
     #expect(InsertionService.preparedText(" hello\n", trailingSpace: true) == "hello ")
     #expect(InsertionService.preparedText("hello ", trailingSpace: false) == "hello")

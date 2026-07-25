@@ -282,6 +282,27 @@ private actor StubIntelligence:
     #expect(update.activityEntryMarkdown == "- Status changed to Done")
 }
 
+@Test func gemmaMetalRuntimeFindsPackagedResourceAndRejectsMissingOne() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-metal-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resource = root.appendingPathComponent(
+        "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+    )
+    try FileManager.default.createDirectory(
+        at: resource.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    #expect(
+        GemmaMetalRuntime.defaultLibraryURL(searchRoots: [root]) == nil
+    )
+    #expect(FileManager.default.createFile(atPath: resource.path, contents: Data()))
+    #expect(
+        GemmaMetalRuntime.defaultLibraryURL(searchRoots: [root]) == resource
+    )
+}
+
 @MainActor
 @Test func installedGemmaCheckpointProducesDeterministicTokenWhenGated()
     async throws {

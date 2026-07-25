@@ -80,7 +80,19 @@ public final class DictationCoordinator {
     }
 
     public func beginFromMenu() {
-        guard phase == .idle || phase == .success || phase == .error else { stopAndTranscribe(); return }
+        // The menu is an explicit request to dictate. If Current was paused,
+        // resume global monitoring first so this capture works and fn keeps
+        // working for subsequent captures. Previously the paused phase fell
+        // through to stopAndTranscribe(), which had no session and silently
+        // did nothing.
+        if !settings.isEnabled || phase == .paused {
+            settings.isEnabled = true
+            startMonitoring()
+        }
+        guard phase == .idle || phase == .success || phase == .error else {
+            stopAndTranscribe()
+            return
+        }
         beginRecording()
     }
 

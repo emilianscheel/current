@@ -27,7 +27,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             add(runtime.permissions.snapshot().allGranted ? "Permissions: Ready" : "Permissions: Action needed", to: menu, enabled: false)
         }
         menu.addItem(.separator())
-        add(runtime.coordinator.phase == .recording ? "Stop and Transcribe" : "Start Dictation", to: menu, action: #selector(toggleCapture))
+        add(captureTitle, to: menu, action: #selector(toggleCapture))
         add("Paste Last Transcription", to: menu, action: #selector(pasteLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
         add("Copy Last Transcription", to: menu, action: #selector(copyLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
         add("Undo Last Insertion", to: menu, action: #selector(undoLast), enabled: runtime.coordinator.insertion.canUndoLastInsertion)
@@ -51,6 +51,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         case .failed: "Speech model: Action needed"
         default: "Speech model: Preparing…"
         }
+    }
+
+    private var captureTitle: String {
+        if runtime.coordinator.phase == .recording {
+            return "Stop and Transcribe"
+        }
+        if !runtime.settings.isEnabled
+            || runtime.coordinator.phase == .paused {
+            return "Resume and Start Dictation"
+        }
+        return "Start Dictation"
     }
 
     private var contextModelTitle: String {

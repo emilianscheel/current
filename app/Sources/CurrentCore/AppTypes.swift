@@ -78,8 +78,8 @@ public enum PermissionKind: String, Codable, Sendable, CaseIterable, Identifiabl
         switch self {
         case .microphone: "Current records only while you hold fn. Audio stays in memory and is processed on this Mac."
         case .accessibility: "Current needs Accessibility to insert completed text into the field you are using."
-        case .screenRecording: "Current reads visible screen text once per second to maintain local, per-app context documents. Visible sensitive information may be included."
-        case .inputMonitoring: "Current needs Input Monitoring to detect fn while another app is active. macOS requires Current to restart after this is enabled."
+        case .screenRecording: "Current takes short-lived screenshots every 30 seconds and after typing settles to maintain local, per-app context documents. Current itself is excluded, but other visible sensitive information may be included."
+        case .inputMonitoring: "Current needs Input Monitoring to detect fn and schedule context capture after typing settles in another app. macOS requires Current to restart after this is enabled."
         }
     }
 }

@@ -18,7 +18,7 @@ public final class SettingsStore {
     public var soundsEnabled: Bool { didSet { save(soundsEnabled, "soundsEnabled") } }
     public var overlayEnabled: Bool { didSet { save(overlayEnabled, "overlayEnabled") } }
     public var continuousContextEnabled: Bool { didSet { save(continuousContextEnabled, "continuousContextEnabled") } }
-    public var contextCaptureFramesPerSecond: Double { didSet { save(contextCaptureFramesPerSecond, "contextCaptureFramesPerSecond") } }
+    public var contextScreenshotIntervalSeconds: Double { didSet { save(contextScreenshotIntervalSeconds, "contextScreenshotIntervalSeconds") } }
     public var animationIntensity: Double { didSet { save(animationIntensity, "animationIntensity") } }
     public var minimumRecordingDuration: Double { didSet { save(minimumRecordingDuration, "minimumRecordingDuration") } }
     public var maximumRecordingDuration: Double { didSet { save(maximumRecordingDuration, "maximumRecordingDuration") } }
@@ -41,7 +41,7 @@ public final class SettingsStore {
             "soundsEnabled": false,
             "overlayEnabled": true,
             "continuousContextEnabled": true,
-            "contextCaptureFramesPerSecond": 1.0,
+            "contextScreenshotIntervalSeconds": 30.0,
             "animationIntensity": 0.6,
             "minimumRecordingDuration": 0.25,
             "maximumRecordingDuration": 120.0,
@@ -59,9 +59,9 @@ public final class SettingsStore {
         soundsEnabled = defaults.bool(forKey: "soundsEnabled")
         overlayEnabled = defaults.bool(forKey: "overlayEnabled")
         continuousContextEnabled = defaults.bool(forKey: "continuousContextEnabled")
-        contextCaptureFramesPerSecond = max(
-            0.2,
-            defaults.double(forKey: "contextCaptureFramesPerSecond")
+        contextScreenshotIntervalSeconds = max(
+            5,
+            defaults.double(forKey: "contextScreenshotIntervalSeconds")
         )
         animationIntensity = defaults.double(forKey: "animationIntensity")
         minimumRecordingDuration = defaults.double(forKey: "minimumRecordingDuration")

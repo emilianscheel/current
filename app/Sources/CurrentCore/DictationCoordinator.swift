@@ -22,6 +22,7 @@ public final class DictationCoordinator {
     public var onPhaseChange: ((DictationPhase) -> Void)?
     public var onPartialTranscriptionChange: ((String) -> Void)?
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
+    public var onTextCommitted: ((ContextCaptureTarget) -> Void)?
     public var onMonitoringChange: ((Bool) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
 
@@ -93,11 +94,15 @@ public final class DictationCoordinator {
         guard !lastTranscription.isEmpty else { return }
         Task {
             insertion.captureTarget()
-            _ = try? await insertion.insert(
+            let captureTarget = insertion.contextCaptureTarget
+            let result = try? await insertion.insert(
                 lastTranscription,
                 context: insertion.currentContext,
                 restoreClipboard: true
             )
+            if result != .copied, let captureTarget {
+                onTextCommitted?(captureTarget)
+            }
         }
     }
 
@@ -249,6 +254,7 @@ public final class DictationCoordinator {
                 }
                 self.setPhase(.inserting)
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
+                let captureTarget = self.insertion.contextCaptureTarget
                 let result = try await self.insertion.insert(
                     text,
                     context: context,
@@ -263,6 +269,9 @@ public final class DictationCoordinator {
                     currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
                 ) {
                     self.onSuccessfulTranscription?(text, session.startedAt)
+                }
+                if result != .copied, let captureTarget {
+                    self.onTextCommitted?(captureTarget)
                 }
                 self.currentSession = nil
                 if result == .copied { self.errorMessage = "Copied — paste manually." }

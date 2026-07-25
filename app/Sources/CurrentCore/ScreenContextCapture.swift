@@ -1,7 +1,5 @@
 import AppKit
 @preconcurrency import ApplicationServices
-import CoreImage
-import CoreMedia
 import Foundation
 @preconcurrency import ScreenCaptureKit
 @preconcurrency import Vision
@@ -90,7 +88,8 @@ public enum OCRWindowMapper {
             guard let owner else { continue }
             let screenBounds = ContextBounds(
                 x: displayFrame.x + bounds.x * displayFrame.width,
-                y: displayFrame.y + (1 - bounds.y - bounds.height) * displayFrame.height,
+                y: displayFrame.y
+                    + (1 - bounds.y - bounds.height) * displayFrame.height,
                 width: bounds.width * displayFrame.width,
                 height: bounds.height * displayFrame.height
             )
@@ -140,18 +139,76 @@ public enum OCRWindowMapper {
     }
 }
 
+public enum PerceptualImageHasher {
+    public static func hash(_ image: CGImage) -> UInt64? {
+        let width = 9
+        let height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(
+                data: bytes.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else {
+                return false
+            }
+            context.interpolationQuality = .low
+            context.draw(
+                image,
+                in: CGRect(x: 0, y: 0, width: width, height: height)
+            )
+            return true
+        }
+        guard rendered else { return nil }
+        var result: UInt64 = 0
+        var bit: UInt64 = 1
+        for y in 0..<height {
+            for x in 0..<(width - 1) {
+                if pixels[y * width + x] > pixels[y * width + x + 1] {
+                    result |= bit
+                }
+                bit <<= 1
+            }
+        }
+        return result
+    }
+
+    public static func isVisuallyEquivalent(
+        _ lhs: UInt64,
+        _ rhs: UInt64,
+        threshold: Int = 4
+    ) -> Bool {
+        (lhs ^ rhs).nonzeroBitCount <= threshold
+    }
+}
+
 @MainActor
 public final class AccessibilityContextSource: AccessibilityContextProviding {
-    private let repository: ContextRepository
-    private var observers: [pid_t: AXObserver] = [:]
-    private var workspaceTokens: [NSObjectProtocol] = []
-    private var pollingTask: Task<Void, Never>?
+    private static let currentBundleIdentifier = "local.Current"
 
-    public init(repository: ContextRepository) {
+    private let repository: ContextRepository
+    private let recoveryInterval: Duration
+    private let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+    private var observers: [pid_t: AXObserver] = [:]
+    private var debounceTasks: [pid_t: Task<Void, Never>] = [:]
+    private var workspaceTokens: [NSObjectProtocol] = []
+    private var recoveryTask: Task<Void, Never>?
+
+    public init(
+        repository: ContextRepository,
+        recoveryInterval: Duration = .seconds(30)
+    ) {
         self.repository = repository
+        self.recoveryInterval = recoveryInterval
     }
 
     public func start() {
+        guard workspaceTokens.isEmpty else { return }
         installObserversForRunningApplications()
         let center = NSWorkspace.shared.notificationCenter
         workspaceTokens.append(
@@ -160,14 +217,19 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
                 object: nil,
                 queue: .main
             ) { [weak self] notification in
-                guard let application = notification.userInfo?[
-                    NSWorkspace.applicationUserInfoKey
-                ] as? NSRunningApplication else {
+                guard let application = Self.application(from: notification)
+                else {
                     return
                 }
                 Task { @MainActor [weak self] in
-                    self?.installObserver(for: application)
-                    await self?.capture(processIdentifier: application.processIdentifier)
+                    guard let self, !self.isExcluded(application) else {
+                        return
+                    }
+                    self.installObserver(for: application)
+                    self.scheduleCapture(
+                        processIdentifier: application.processIdentifier,
+                        delay: .milliseconds(750)
+                    )
                 }
             }
         )
@@ -177,14 +239,18 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
                 object: nil,
                 queue: .main
             ) { [weak self] notification in
-                guard let application = notification.userInfo?[
-                    NSWorkspace.applicationUserInfoKey
-                ] as? NSRunningApplication else {
+                guard let application = Self.application(from: notification)
+                else {
                     return
                 }
                 Task { @MainActor [weak self] in
-                    self?.removeObserver(processIdentifier: application.processIdentifier)
-                    await self?.repository.applicationTerminated(
+                    guard let self, !self.isExcluded(application) else {
+                        return
+                    }
+                    self.removeObserver(
+                        processIdentifier: application.processIdentifier
+                    )
+                    await self.repository.applicationTerminated(
                         processIdentifier: application.processIdentifier
                     )
                 }
@@ -196,31 +262,40 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
                 object: nil,
                 queue: .main
             ) { [weak self] notification in
-                guard let application = notification.userInfo?[
-                    NSWorkspace.applicationUserInfoKey
-                ] as? NSRunningApplication else {
+                guard let application = Self.application(from: notification)
+                else {
                     return
                 }
                 Task { @MainActor [weak self] in
-                    await self?.capture(processIdentifier: application.processIdentifier)
+                    guard let self, !self.isExcluded(application) else {
+                        return
+                    }
+                    self.installObserver(for: application)
+                    self.scheduleCapture(
+                        processIdentifier: application.processIdentifier,
+                        delay: .milliseconds(250)
+                    )
                 }
             }
         )
-        pollingTask = Task { [weak self] in
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            await self.captureVisibleApplications()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled, let self else { return }
-                let observations = await self.snapshotVisibleApplications()
-                for observation in observations {
-                    await self.repository.accept(observation)
-                }
+                try? await Task.sleep(for: self.recoveryInterval)
+                guard !Task.isCancelled else { return }
+                await self.captureVisibleApplications()
             }
         }
     }
 
     public func stop() {
-        pollingTask?.cancel()
-        pollingTask = nil
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        for task in debounceTasks.values {
+            task.cancel()
+        }
+        debounceTasks.removeAll()
         for token in workspaceTokens {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
@@ -236,20 +311,27 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
     }
 
     public func snapshotVisibleApplications() async -> [ContextObservation] {
-        let applications = NSWorkspace.shared.runningApplications.filter {
-            !$0.isTerminated && $0.activationPolicy != .prohibited
+        visibleApplications().flatMap(Self.snapshot)
+    }
+
+    private func captureVisibleApplications() async {
+        for application in visibleApplications() {
+            installObserver(for: application)
+            for observation in Self.snapshot(application) {
+                await repository.accept(observation)
+            }
         }
-        return applications.flatMap(Self.snapshot)
     }
 
     private func installObserversForRunningApplications() {
         for application in NSWorkspace.shared.runningApplications
-        where !application.isTerminated && application.activationPolicy != .prohibited {
+        where isVisible(application) && !isExcluded(application) {
             installObserver(for: application)
         }
     }
 
     private func installObserver(for application: NSRunningApplication) {
+        guard !isExcluded(application) else { return }
         let processIdentifier = application.processIdentifier
         guard observers[processIdentifier] == nil else { return }
         var observer: AXObserver?
@@ -261,17 +343,23 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
                     .fromOpaque(pointer)
                     .takeUnretainedValue()
                 var processIdentifier: pid_t = 0
-                guard AXUIElementGetPid(element, &processIdentifier) == .success else {
+                guard AXUIElementGetPid(element, &processIdentifier)
+                        == .success else {
                     return
                 }
                 Task { @MainActor in
-                    await source.capture(processIdentifier: processIdentifier)
+                    source.scheduleCapture(
+                        processIdentifier: processIdentifier,
+                        delay: .milliseconds(750)
+                    )
                 }
             },
             &observer
         )
         guard result == .success, let observer else { return }
-        let applicationElement = AXUIElementCreateApplication(processIdentifier)
+        let applicationElement = AXUIElementCreateApplication(
+            processIdentifier
+        )
         let pointer = Unmanaged.passUnretained(self).toOpaque()
         let notifications = [
             kAXFocusedWindowChangedNotification,
@@ -298,6 +386,7 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
     }
 
     private func removeObserver(processIdentifier: pid_t) {
+        debounceTasks.removeValue(forKey: processIdentifier)?.cancel()
         guard let observer = observers.removeValue(
             forKey: processIdentifier
         ) else {
@@ -310,15 +399,54 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
         )
     }
 
+    private func scheduleCapture(
+        processIdentifier: pid_t,
+        delay: Duration
+    ) {
+        guard processIdentifier != ownProcessIdentifier else { return }
+        debounceTasks[processIdentifier]?.cancel()
+        debounceTasks[processIdentifier] = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            await self.capture(processIdentifier: processIdentifier)
+            self.debounceTasks.removeValue(forKey: processIdentifier)
+        }
+    }
+
     private func capture(processIdentifier: pid_t) async {
         guard let application = NSRunningApplication(
             processIdentifier: processIdentifier
-        ) else {
+        ), !isExcluded(application) else {
             return
         }
         for observation in Self.snapshot(application) {
             await repository.accept(observation)
         }
+    }
+
+    private func visibleApplications() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications.filter {
+            isVisible($0) && !isExcluded($0)
+        }
+    }
+
+    private func isVisible(_ application: NSRunningApplication) -> Bool {
+        !application.isTerminated
+            && !application.isHidden
+            && application.activationPolicy != .prohibited
+    }
+
+    private func isExcluded(_ application: NSRunningApplication) -> Bool {
+        application.processIdentifier == ownProcessIdentifier
+            || application.bundleIdentifier == Self.currentBundleIdentifier
+    }
+
+    private nonisolated static func application(
+        from notification: Notification
+    ) -> NSRunningApplication? {
+        notification.userInfo?[
+            NSWorkspace.applicationUserInfoKey
+        ] as? NSRunningApplication
     }
 
     private nonisolated static func snapshot(
@@ -429,25 +557,45 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
 
 @MainActor
 public final class ScreenContextCoordinator: ScreenContextProviding {
+    private struct CaptureRequest {
+        let trigger: ContextCaptureTrigger
+        let target: ContextCaptureTarget?
+        let requestedAt: Date
+    }
+
+    private static let currentBundleIdentifier = "local.Current"
+    private static let maximumCaptureLongEdge = 1_600
+    private static let coalescingInterval: TimeInterval = 5
+    private static let typingSettleDelay: Duration = .seconds(3)
+
     private let repository: ContextRepository
     private let ocr: any OCRProviding
-    private let framesPerSecond: Double
+    private let screenshotInterval: Duration
     private let accessibility: AccessibilityContextSource
-    private var streams: [SCStream] = []
-    private var outputs: [DisplayStreamOutput] = []
-    private var refreshTask: Task<Void, Never>?
-    private var screenChangeToken: NSObjectProtocol?
+    private let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+    private var periodicTask: Task<Void, Never>?
+    private var workerTask: Task<Void, Never>?
+    private var settleTasks: [String: Task<Void, Never>] = [:]
+    private var pendingRequests: [String: CaptureRequest] = [:]
+    private var recentCaptures: [String: Date] = [:]
+    private var imageHashes: [String: UInt64] = [:]
+    private var notificationTokens: [NSObjectProtocol] = []
+    private var captureGeneration = UUID()
     private var isRunning = false
+    private var isSleeping = false
 
     public init(
         repository: ContextRepository,
         ocr: any OCRProviding = VisionOCRService(),
-        framesPerSecond: Double = 1
+        screenshotInterval: Duration = .seconds(30)
     ) {
         self.repository = repository
         self.ocr = ocr
-        self.framesPerSecond = max(0.2, framesPerSecond)
-        accessibility = AccessibilityContextSource(repository: repository)
+        self.screenshotInterval = screenshotInterval
+        accessibility = AccessibilityContextSource(
+            repository: repository,
+            recoveryInterval: screenshotInterval
+        )
     }
 
     public func start() async throws {
@@ -456,235 +604,500 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
             throw CurrentError.permissionMissing(.screenRecording)
         }
         isRunning = true
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: true
-            )
-            let frontmostPID = NSWorkspace.shared.frontmostApplication?
-                .processIdentifier
-            for display in content.displays {
-                let descriptors = Self.windowDescriptors(
-                    content.windows,
-                    display: display,
-                    frontmostPID: frontmostPID
-                )
-                let output = DisplayStreamOutput(
-                    repository: repository,
-                    ocr: ocr,
-                    display: display,
-                    windows: descriptors
-                )
-                let configuration = SCStreamConfiguration()
-                configuration.width = max(1, display.width)
-                configuration.height = max(1, display.height)
-                configuration.minimumFrameInterval = CMTime(
-                    seconds: 1 / framesPerSecond,
-                    preferredTimescale: 600
-                )
-                configuration.queueDepth = 1
-                configuration.showsCursor = false
-                configuration.capturesAudio = false
-                let filter = SCContentFilter(
-                    display: display,
-                    excludingApplications: [],
-                    exceptingWindows: []
-                )
-                let stream = SCStream(
-                    filter: filter,
-                    configuration: configuration,
-                    delegate: output
-                )
-                try stream.addStreamOutput(
-                    output,
-                    type: .screen,
-                    sampleHandlerQueue: output.queue
-                )
-                try await stream.startCapture()
-                outputs.append(output)
-                streams.append(stream)
-            }
-            accessibility.start()
-            startWindowRefresh()
-            screenChangeToken = NotificationCenter.default.addObserver(
-                forName: NSApplication.didChangeScreenParametersNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.restart()
-                }
-            }
-        } catch {
-            await stop()
-            throw error
-        }
+        isSleeping = false
+        captureGeneration = UUID()
+        accessibility.start()
+        installNotifications()
+        startPeriodicTimer()
     }
 
     public func stop() async {
         guard isRunning else { return }
         isRunning = false
-        refreshTask?.cancel()
-        refreshTask = nil
+        isSleeping = false
+        captureGeneration = UUID()
+        periodicTask?.cancel()
+        periodicTask = nil
+        workerTask?.cancel()
+        workerTask = nil
+        for task in settleTasks.values {
+            task.cancel()
+        }
+        settleTasks.removeAll()
+        pendingRequests.removeAll()
+        removeNotifications()
         accessibility.stop()
-        if let screenChangeToken {
-            NotificationCenter.default.removeObserver(screenChangeToken)
-            self.screenChangeToken = nil
-        }
-        for stream in streams {
-            try? await stream.stopCapture()
-        }
-        streams.removeAll()
-        outputs.removeAll()
         await repository.stop()
     }
 
-    private func restart() async {
-        await stop()
-        try? await start()
+    public func scheduleCapture(
+        trigger: ContextCaptureTrigger,
+        target: ContextCaptureTarget? = nil
+    ) async {
+        guard isRunning, !isSleeping else { return }
+        switch trigger {
+        case .periodic:
+            enqueue(
+                CaptureRequest(
+                    trigger: trigger,
+                    target: nil,
+                    requestedAt: Date()
+                )
+            )
+        case .typingSettled, .textCommitted:
+            guard let target, !isExcluded(target) else { return }
+            let key = Self.captureIdentity(target)
+            settleTasks[key]?.cancel()
+            settleTasks[key] = Task { [weak self] in
+                try? await Task.sleep(for: Self.typingSettleDelay)
+                guard !Task.isCancelled, let self else { return }
+                self.settleTasks.removeValue(forKey: key)
+                self.enqueue(
+                    CaptureRequest(
+                        trigger: trigger,
+                        target: target,
+                        requestedAt: Date()
+                    )
+                )
+            }
+        }
     }
 
-    private func startWindowRefresh() {
-        refreshTask?.cancel()
-        refreshTask = Task { [weak self] in
+    private func startPeriodicTimer() {
+        periodicTask?.cancel()
+        periodicTask = Task { [weak self] in
+            guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, let self else { return }
-                guard let content = try? await SCShareableContent
-                    .excludingDesktopWindows(
-                        false,
-                        onScreenWindowsOnly: true
-                    ) else {
-                    continue
+                try? await Task.sleep(for: self.screenshotInterval)
+                guard !Task.isCancelled else { return }
+                await self.scheduleCapture(trigger: .periodic, target: nil)
+            }
+        }
+    }
+
+    private func enqueue(_ request: CaptureRequest) {
+        guard isRunning, !isSleeping else { return }
+        let key = Self.requestKey(request)
+        if let target = request.target,
+           let lastCapture = recentCaptures[Self.captureIdentity(target)],
+           request.requestedAt.timeIntervalSince(lastCapture)
+                < Self.coalescingInterval {
+            return
+        }
+        pendingRequests[key] = request
+        guard workerTask == nil else { return }
+        let generation = captureGeneration
+        workerTask = Task { [weak self] in
+            await self?.drainPendingRequests(generation: generation)
+        }
+    }
+
+    private func drainPendingRequests(generation: UUID) async {
+        defer {
+            if captureGeneration == generation {
+                workerTask = nil
+            }
+        }
+        while isRunning,
+              !isSleeping,
+              captureGeneration == generation,
+              !pendingRequests.isEmpty {
+            let request = nextPendingRequest()
+            pendingRequests.removeValue(forKey: Self.requestKey(request))
+            do {
+                switch request.trigger {
+                case .periodic:
+                    try await captureAllDisplays()
+                case .typingSettled, .textCommitted:
+                    guard let target = request.target else { continue }
+                    try await captureWindow(target)
                 }
-                let frontmostPID = NSWorkspace.shared.frontmostApplication?
-                    .processIdentifier
-                for output in self.outputs {
-                    let display = output.display
-                    output.update(
-                        windows: Self.windowDescriptors(
-                            content.windows,
-                            display: display,
-                            frontmostPID: frontmostPID
+            } catch is CancellationError {
+                return
+            } catch {
+                continue
+            }
+        }
+    }
+
+    private func nextPendingRequest() -> CaptureRequest {
+        pendingRequests.values.max { lhs, rhs in
+            let leftPriority = Self.priority(lhs.trigger)
+            let rightPriority = Self.priority(rhs.trigger)
+            if leftPriority != rightPriority {
+                return leftPriority < rightPriority
+            }
+            return lhs.requestedAt < rhs.requestedAt
+        }!
+    }
+
+    private func captureAllDisplays() async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
+        guard isRunning, !isSleeping else { return }
+        let excludedApplications = content.applications.filter(isExcluded)
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?
+            .processIdentifier
+        for display in content.displays {
+            try Task.checkCancellation()
+            guard isRunning, !isSleeping else { return }
+            let descriptors = Self.windowDescriptors(
+                content.windows,
+                display: display,
+                frontmostPID: frontmostPID,
+                excluding: isExcluded
+            )
+            let configuration = Self.configuration(
+                width: display.width,
+                height: display.height
+            )
+            let filter = SCContentFilter(
+                display: display,
+                excludingApplications: excludedApplications,
+                exceptingWindows: []
+            )
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            )
+            try Task.checkCancellation()
+            let capturedAt = Date()
+            for descriptor in descriptors {
+                recentCaptures[
+                    Self.captureIdentity(descriptor)
+                ] = capturedAt
+                recentCaptures[
+                    Self.captureIdentity(
+                        ContextCaptureTarget(
+                            processIdentifier: descriptor.processIdentifier,
+                            bundleIdentifier: descriptor.bundleIdentifier,
+                            applicationName: descriptor.applicationName,
+                            windowTitle: descriptor.title
                         )
                     )
-                }
+                ] = capturedAt
+                recentCaptures[
+                    Self.captureIdentity(
+                        ContextCaptureTarget(
+                            processIdentifier: descriptor.processIdentifier,
+                            bundleIdentifier: descriptor.bundleIdentifier,
+                            applicationName: descriptor.applicationName
+                        )
+                    )
+                ] = capturedAt
             }
-        }
-    }
-
-    private static func windowDescriptors(
-        _ windows: [SCWindow],
-        display: SCDisplay,
-        frontmostPID: pid_t?
-    ) -> [WindowContextDescriptor] {
-        windows.compactMap { window in
-            guard window.isOnScreen,
-                  window.frame.intersects(display.frame),
-                  let application = window.owningApplication else {
-                return nil
-            }
-            return WindowContextDescriptor(
-                windowIdentifier: window.windowID,
-                processIdentifier: application.processID,
-                bundleIdentifier: application.bundleIdentifier,
-                applicationName: application.applicationName,
-                title: window.title,
-                frame: ContextBounds(
-                    x: window.frame.origin.x,
-                    y: window.frame.origin.y,
-                    width: window.frame.width,
-                    height: window.frame.height
-                ),
-                isFrontmost: application.processID == frontmostPID
-            )
-        }
-    }
-}
-
-private final class DisplayStreamOutput: NSObject, SCStreamOutput, SCStreamDelegate,
-    @unchecked Sendable {
-    let queue: DispatchQueue
-    let display: SCDisplay
-    private let repository: ContextRepository
-    private let ocr: any OCRProviding
-    private let ciContext = CIContext(options: [.cacheIntermediates: false])
-    private let lock = NSLock()
-    private var windows: [WindowContextDescriptor]
-    private var processing = false
-
-    init(
-        repository: ContextRepository,
-        ocr: any OCRProviding,
-        display: SCDisplay,
-        windows: [WindowContextDescriptor]
-    ) {
-        self.repository = repository
-        self.ocr = ocr
-        self.display = display
-        self.windows = windows
-        queue = DispatchQueue(
-            label: "local.Current.screen-context.\(display.displayID)",
-            qos: .utility
-        )
-    }
-
-    func update(windows: [WindowContextDescriptor]) {
-        lock.withLock { self.windows = windows }
-    }
-
-    func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of type: SCStreamOutputType
-    ) {
-        guard type == .screen,
-              lock.withLock({
-                  guard !processing else { return false }
-                  processing = true
-                  return true
-              }),
-              let attachments = CMSampleBufferGetSampleAttachmentsArray(
-                  sampleBuffer,
-                  createIfNecessary: false
-              ) as? [[SCStreamFrameInfo: Any]],
-              let attachment = attachments.first,
-              let rawStatus = attachment[.status] as? Int,
-              SCFrameStatus(rawValue: rawStatus) == .complete,
-              let pixelBuffer = sampleBuffer.imageBuffer else {
-            lock.withLock { processing = false }
-            return
-        }
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(
-            image,
-            from: image.extent
-        ) else {
-            lock.withLock { processing = false }
-            return
-        }
-        let windows = lock.withLock { self.windows }
-        let displayFrame = ContextBounds(
-            x: display.frame.origin.x,
-            y: display.frame.origin.y,
-            width: display.frame.width,
-            height: display.frame.height
-        )
-        Task { [ocr, repository, displayID = display.displayID] in
-            defer { self.lock.withLock { self.processing = false } }
-            guard let blocks = try? await ocr.recognizeText(in: cgImage) else {
-                return
-            }
+            let hashKey = "display:\(display.displayID)"
+            guard shouldRunOCR(image: image, key: hashKey) else { continue }
+            let blocks = try await ocr.recognizeText(in: image)
+            try Task.checkCancellation()
+            guard isRunning, !isSleeping else { return }
             let observations = OCRWindowMapper.observations(
                 blocks: blocks,
-                displayIdentifier: displayID,
-                displayFrame: displayFrame,
-                windows: windows,
-                capturedAt: Date()
+                displayIdentifier: display.displayID,
+                displayFrame: ContextBounds(
+                    x: display.frame.origin.x,
+                    y: display.frame.origin.y,
+                    width: display.frame.width,
+                    height: display.frame.height
+                ),
+                windows: descriptors,
+                capturedAt: capturedAt
             )
             for observation in observations {
                 await repository.accept(observation)
             }
         }
+    }
+
+    private func captureWindow(_ target: ContextCaptureTarget) async throws {
+        guard !isExcluded(target) else { return }
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
+        guard isRunning, !isSleeping,
+              let window = Self.resolveWindow(
+                  target,
+                  from: content.windows,
+                  excluding: isExcluded
+              ),
+              let application = window.owningApplication,
+              !isExcluded(application) else {
+            return
+        }
+        let descriptor = Self.windowDescriptor(
+            window,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?
+                .processIdentifier
+        )
+        let configuration = Self.configuration(
+            width: max(1, Int(window.frame.width)),
+            height: max(1, Int(window.frame.height))
+        )
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(
+                desktopIndependentWindow: window
+            ),
+            configuration: configuration
+        )
+        try Task.checkCancellation()
+        let capturedAt = Date()
+        recentCaptures[Self.captureIdentity(descriptor)] = capturedAt
+        recentCaptures[Self.captureIdentity(target)] = capturedAt
+        let hashKey = "window:\(window.windowID)"
+        guard shouldRunOCR(image: image, key: hashKey) else { return }
+        let blocks = try await ocr.recognizeText(in: image)
+        try Task.checkCancellation()
+        guard isRunning, !isSleeping else { return }
+        let displayIdentifier = content.displays.first {
+            $0.frame.intersects(window.frame)
+        }?.displayID ?? 0
+        let observations = OCRWindowMapper.observations(
+            blocks: blocks,
+            displayIdentifier: displayIdentifier,
+            displayFrame: descriptor.frame,
+            windows: [descriptor],
+            capturedAt: capturedAt
+        )
+        for observation in observations {
+            await repository.accept(observation)
+        }
+    }
+
+    private func shouldRunOCR(image: CGImage, key: String) -> Bool {
+        guard let newHash = PerceptualImageHasher.hash(image) else {
+            return true
+        }
+        defer { imageHashes[key] = newHash }
+        guard let previousHash = imageHashes[key] else { return true }
+        return !PerceptualImageHasher.isVisuallyEquivalent(
+            previousHash,
+            newHash
+        )
+    }
+
+    private func installNotifications() {
+        guard notificationTokens.isEmpty else { return }
+        notificationTokens.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.scheduleCapture(
+                        trigger: .periodic,
+                        target: nil
+                    )
+                }
+            }
+        )
+        let center = NSWorkspace.shared.notificationCenter
+        notificationTokens.append(
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.suspendForSleep()
+                }
+            }
+        )
+        notificationTokens.append(
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.resumeAfterWake()
+                }
+            }
+        )
+    }
+
+    private func removeNotifications() {
+        for token in notificationTokens {
+            NotificationCenter.default.removeObserver(token)
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        notificationTokens.removeAll()
+    }
+
+    private func suspendForSleep() {
+        guard isRunning else { return }
+        isSleeping = true
+        captureGeneration = UUID()
+        periodicTask?.cancel()
+        periodicTask = nil
+        workerTask?.cancel()
+        workerTask = nil
+        for task in settleTasks.values {
+            task.cancel()
+        }
+        settleTasks.removeAll()
+        pendingRequests.removeAll()
+    }
+
+    private func resumeAfterWake() {
+        guard isRunning, isSleeping else { return }
+        isSleeping = false
+        captureGeneration = UUID()
+        startPeriodicTimer()
+    }
+
+    private func isExcluded(_ application: SCRunningApplication) -> Bool {
+        application.processID == ownProcessIdentifier
+            || application.bundleIdentifier == Self.currentBundleIdentifier
+    }
+
+    private func isExcluded(_ target: ContextCaptureTarget) -> Bool {
+        target.processIdentifier == ownProcessIdentifier
+            || target.bundleIdentifier == Self.currentBundleIdentifier
+    }
+
+    private static func resolveWindow(
+        _ target: ContextCaptureTarget,
+        from windows: [SCWindow],
+        excluding isExcluded: (SCRunningApplication) -> Bool
+    ) -> SCWindow? {
+        let candidates = windows.filter { window in
+            guard window.isOnScreen,
+                  window.frame.width > 1,
+                  window.frame.height > 1,
+                  let application = window.owningApplication else {
+                return false
+            }
+            return application.processID == target.processIdentifier
+                && !isExcluded(application)
+        }
+        if let windowIdentifier = target.windowIdentifier {
+            return candidates.first { $0.windowID == windowIdentifier }
+        }
+        if let windowTitle = target.windowTitle
+            ?? focusedWindowTitle(
+                processIdentifier: target.processIdentifier
+            ) {
+            if let exactMatch = candidates.first(where: {
+                $0.title == windowTitle
+            }) {
+                return exactMatch
+            }
+            return candidates.count == 1 ? candidates[0] : nil
+        }
+        return candidates.first
+    }
+
+    private static func focusedWindowTitle(
+        processIdentifier: pid_t
+    ) -> String? {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedWindowAttribute as CFString,
+            &windowValue
+        ) == .success,
+              let windowValue else {
+            return nil
+        }
+        var titleValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            windowValue as! AXUIElement,
+            kAXTitleAttribute as CFString,
+            &titleValue
+        ) == .success else {
+            return nil
+        }
+        return titleValue as? String
+    }
+
+    private static func configuration(
+        width: Int,
+        height: Int
+    ) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
+        let longestEdge = max(width, height)
+        let scale = longestEdge > maximumCaptureLongEdge
+            ? Double(maximumCaptureLongEdge) / Double(longestEdge)
+            : 1
+        configuration.width = max(1, Int(Double(width) * scale))
+        configuration.height = max(1, Int(Double(height) * scale))
+        configuration.showsCursor = false
+        configuration.capturesAudio = false
+        return configuration
+    }
+
+    private static func windowDescriptors(
+        _ windows: [SCWindow],
+        display: SCDisplay,
+        frontmostPID: pid_t?,
+        excluding isExcluded: (SCRunningApplication) -> Bool
+    ) -> [WindowContextDescriptor] {
+        windows.compactMap { window in
+            guard window.isOnScreen,
+                  window.frame.intersects(display.frame),
+                  let application = window.owningApplication,
+                  !isExcluded(application) else {
+                return nil
+            }
+            return windowDescriptor(window, frontmostPID: frontmostPID)
+        }
+    }
+
+    private static func windowDescriptor(
+        _ window: SCWindow,
+        frontmostPID: pid_t?
+    ) -> WindowContextDescriptor {
+        let application = window.owningApplication!
+        return WindowContextDescriptor(
+            windowIdentifier: window.windowID,
+            processIdentifier: application.processID,
+            bundleIdentifier: application.bundleIdentifier,
+            applicationName: application.applicationName,
+            title: window.title,
+            frame: ContextBounds(
+                x: window.frame.origin.x,
+                y: window.frame.origin.y,
+                width: window.frame.width,
+                height: window.frame.height
+            ),
+            isFrontmost: application.processID == frontmostPID
+        )
+    }
+
+    private static func priority(_ trigger: ContextCaptureTrigger) -> Int {
+        switch trigger {
+        case .periodic: 0
+        case .typingSettled: 1
+        case .textCommitted: 2
+        }
+    }
+
+    private static func requestKey(_ request: CaptureRequest) -> String {
+        request.target.map(captureIdentity) ?? "periodic"
+    }
+
+    private static func captureIdentity(
+        _ target: ContextCaptureTarget
+    ) -> String {
+        [
+            String(target.processIdentifier),
+            target.windowIdentifier.map(String.init) ?? "",
+            target.windowTitle ?? "",
+        ].joined(separator: ":")
+    }
+
+    private static func captureIdentity(
+        _ descriptor: WindowContextDescriptor
+    ) -> String {
+        [
+            String(descriptor.processIdentifier),
+            String(descriptor.windowIdentifier),
+            descriptor.title ?? "",
+        ].joined(separator: ":")
     }
 }

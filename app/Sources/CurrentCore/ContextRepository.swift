@@ -9,6 +9,8 @@ public actor ContextRepository {
 
     private let store: ContextStore
     private let intelligence: any LocalIntelligenceProviding
+    private let excludedBundleIdentifiers: Set<String>
+    private let excludedProcessIdentifiers: Set<pid_t>
     private var calendar: Calendar
     private var liveContexts: [SessionKey: LiveAppContext] = [:]
     private var processingSessions: Set<SessionKey> = []
@@ -17,16 +19,28 @@ public actor ContextRepository {
     public init(
         store: ContextStore,
         intelligence: any LocalIntelligenceProviding,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        excludedBundleIdentifiers: Set<String> = ["local.Current"],
+        excludedProcessIdentifiers: Set<pid_t> = [
+            ProcessInfo.processInfo.processIdentifier,
+        ]
     ) {
         self.store = store
         self.intelligence = intelligence
         self.calendar = calendar
+        self.excludedBundleIdentifiers = excludedBundleIdentifiers
+        self.excludedProcessIdentifiers = excludedProcessIdentifiers
     }
 
     @discardableResult
     public func accept(_ observation: ContextObservation) async -> Bool {
-        guard !observation.blocks.isEmpty else { return false }
+        guard !observation.blocks.isEmpty,
+              !isExcluded(
+                  processIdentifier: observation.processIdentifier,
+                  bundleIdentifier: observation.bundleIdentifier
+              ) else {
+            return false
+        }
         let dayIdentifier = Self.dayIdentifier(
             for: observation.capturedAt,
             calendar: calendar
@@ -69,10 +83,23 @@ public actor ContextRepository {
     }
 
     public func snapshot() -> [LiveAppContext] {
-        liveContexts.values.sorted {
+        liveContexts.values.filter {
+            !isExcluded(
+                processIdentifier: $0.session.processIdentifier,
+                bundleIdentifier: $0.session.bundleIdentifier
+            )
+        }.sorted {
             ($0.latestObservation?.capturedAt ?? .distantPast)
                 > ($1.latestObservation?.capturedAt ?? .distantPast)
         }
+    }
+
+    private func isExcluded(
+        processIdentifier: pid_t,
+        bundleIdentifier: String?
+    ) -> Bool {
+        excludedProcessIdentifiers.contains(processIdentifier)
+            || bundleIdentifier.map(excludedBundleIdentifiers.contains) == true
     }
 
     public func promptContext(

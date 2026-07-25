@@ -52,6 +52,7 @@ public struct ShortcutStateMachine: Sendable {
 
 public final class ShortcutMonitor: @unchecked Sendable {
     public var onEvent: (@Sendable (ShortcutEvent) -> Void)?
+    public var onKeyboardActivity: (@Sendable () -> Void)?
     public var holdThreshold: Duration = .milliseconds(180)
     public var fallbackPreset = "control-option-space"
 
@@ -116,6 +117,9 @@ public final class ShortcutMonitor: @unchecked Sendable {
             }
             if shouldStart { emit(.pressed) }
             return true
+        }
+        if type == .keyDown {
+            onKeyboardActivity?()
         }
         if type == .keyUp, keyCode == 49, lock.withLock({ fallbackIsDown }) {
             lock.withLock { fallbackIsDown = false }

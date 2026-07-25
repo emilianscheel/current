@@ -35,7 +35,9 @@ final class AppRuntime {
     )
     @ObservationIgnored lazy var screenContext = ScreenContextCoordinator(
         repository: contextRepository,
-        framesPerSecond: settings.contextCaptureFramesPerSecond
+        screenshotInterval: .seconds(
+            settings.contextScreenshotIntervalSeconds
+        )
     )
     @ObservationIgnored lazy var coordinator = VoiceInteractionCoordinator(
         settings: settings,
@@ -72,6 +74,27 @@ final class AppRuntime {
         }
         coordinator.onSuccessfulTranscription = { [weak self] text, date in
             self?.context.append(text, at: date)
+        }
+        coordinator.shortcut.onKeyboardActivity = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let target = InsertionService
+                          .frontmostContextCaptureTarget() else {
+                    return
+                }
+                await self.screenContext.scheduleCapture(
+                    trigger: .typingSettled,
+                    target: target
+                )
+            }
+        }
+        coordinator.onTextCommitted = { [weak self] target in
+            Task { @MainActor [weak self] in
+                await self?.screenContext.scheduleCapture(
+                    trigger: .textCommitted,
+                    target: target
+                )
+            }
         }
         coordinator.onMonitoringChange = { [weak self] active in
             guard let self else { return }

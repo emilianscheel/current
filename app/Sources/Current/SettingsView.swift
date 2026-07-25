@@ -102,10 +102,15 @@ struct SettingsView: View {
                 "Keep per-app screen context",
                 isOn: $runtime.settings.continuousContextEnabled
             )
-            LabeledContent("Capture rate", value: "1 frame per second per display")
+            LabeledContent(
+                "Capture schedule",
+                value: "Every 30 seconds and 3 seconds after typing"
+            )
             Label("Accessibility text and on-device OCR are grouped into one Markdown document per app process and day", systemImage: "text.viewfinder")
-            Label("All visible content is eligible, including Current and sensitive information", systemImage: "exclamationmark.shield")
+            Label("Current is excluded; other visible content may include sensitive information", systemImage: "exclamationmark.shield")
                 .foregroundStyle(.orange)
+            Label("macOS controls whether a screen-capture privacy indicator appears", systemImage: "record.circle")
+                .foregroundStyle(.secondary)
         }
         Section("Local processing") {
             Label("Audio is held in memory only", systemImage: "memorychip")

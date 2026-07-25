@@ -198,6 +198,34 @@ public struct ContextObservation: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public enum ContextCaptureTrigger: String, Sendable, Equatable {
+    case periodic
+    case typingSettled
+    case textCommitted
+}
+
+public struct ContextCaptureTarget: Sendable, Equatable, Hashable {
+    public let processIdentifier: pid_t
+    public let bundleIdentifier: String?
+    public let applicationName: String
+    public let windowIdentifier: UInt32?
+    public let windowTitle: String?
+
+    public init(
+        processIdentifier: pid_t,
+        bundleIdentifier: String?,
+        applicationName: String,
+        windowIdentifier: UInt32? = nil,
+        windowTitle: String? = nil
+    ) {
+        self.processIdentifier = processIdentifier
+        self.bundleIdentifier = bundleIdentifier
+        self.applicationName = applicationName
+        self.windowIdentifier = windowIdentifier
+        self.windowTitle = windowTitle
+    }
+}
+
 public struct LiveAppContext: Codable, Sendable, Equatable, Identifiable {
     public var id: AppSessionID { session.sessionID }
     public var session: AppSessionMetadata
@@ -322,6 +350,10 @@ public struct PromptContextEnvelope: Sendable, Equatable {
 public protocol ScreenContextProviding: Sendable {
     func start() async throws
     func stop() async
+    func scheduleCapture(
+        trigger: ContextCaptureTrigger,
+        target: ContextCaptureTarget?
+    ) async
 }
 
 public protocol AccessibilityContextProviding: Sendable {

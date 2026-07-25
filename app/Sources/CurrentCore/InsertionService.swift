@@ -108,6 +108,30 @@ public final class InsertionService {
         currentContext = .empty
     }
 
+    public var contextCaptureTarget: ContextCaptureTarget? {
+        guard let application = targetApplicationPresentation else { return nil }
+        return ContextCaptureTarget(
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier,
+            applicationName: application.localizedName,
+            windowTitle: currentContext.windowTitle
+        )
+    }
+
+    public static func frontmostContextCaptureTarget() -> ContextCaptureTarget? {
+        guard let application = NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+        return ContextCaptureTarget(
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier,
+            applicationName: application.localizedName ?? "Application",
+            windowTitle: focusedWindowTitle(
+                processIdentifier: application.processIdentifier
+            )
+        )
+    }
+
     public var canUndoLastInsertion: Bool {
         guard let undoSnapshot else { return false }
         return Date().timeIntervalSince(undoSnapshot.createdAt) < 5 * 60

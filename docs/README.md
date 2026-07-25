@@ -63,7 +63,7 @@ Current polls permission state and automatically advances when a grant is detect
 | Microphone | Capture speech while dictating | `AVCaptureDevice.authorizationStatus(for: .audio)` |
 | Accessibility | Replace selected text or synthesize paste | `AXIsProcessTrusted()` |
 | Screen Recording | Read visible screen text for per-app context | `CGPreflightScreenCaptureAccess()` |
-| Input Monitoring | Receive global `secondaryFn` modifier events | `CGPreflightListenEventAccess()` |
+| Input Monitoring | Receive global `secondaryFn` events and detect when typing settles | `CGPreflightListenEventAccess()` |
 
 macOS requires Current to restart after Input Monitoring is enabled. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
 
@@ -73,8 +73,9 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 
 - Audio is buffered as 16 kHz mono Float32 in memory and discarded after transcription or cancellation.
 - Successful external-app dictations are appended to `~/Library/Application Support/Current/Context/YYYY-MM-DD.md`.
-- At one frame per second per display, Accessibility and Vision OCR update `Context/App Sessions/YYYY-MM-DD/*.md`; raw screenshots are discarded after OCR.
-- Continuous capture intentionally applies no app or secure-content exclusions beyond restrictions enforced by macOS, so visible sensitive information may be retained.
+- Accessibility events plus one-shot Vision OCR screenshots update `Context/App Sessions/YYYY-MM-DD/*.md`. Screenshots run every 30 seconds across displays and three seconds after typing settles in the originating window; raw images are discarded after change detection/OCR.
+- Current's own process is excluded at the capture and repository boundaries. Other visible sensitive information may be retained when macOS exposes it.
+- Screen Recording permission remains required, and macOS controls whether its screen-capture privacy indicator appears.
 - Context files stay local until edited or moved to Trash.
 - No analytics, crash upload, account, update check, or cloud inference is included.
 - The last successful result is held in memory for recovery and can be cleared from Settings.
@@ -90,7 +91,7 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - CoreGraphics `CGEventTap` for global `fn` events
 - AVFoundation / `AVAudioEngine` / `AVAudioConverter` for capture and resampling
 - macOS Accessibility API plus CoreGraphics paste fallback
-- ScreenCaptureKit, Vision OCR, and AX observers for continuous per-app context
+- ScreenCaptureKit one-shot screenshots, perceptual change detection, Vision OCR, and AX observers for per-app context
 - Apple Foundation Models for intent classification, app-session maintenance, and prompt responses
 - Core ML and Apple Neural Engine inference through FluidAudio 0.15.5
 - ServiceManagement `SMAppService` for launch at login
@@ -195,14 +196,14 @@ Automated tests cover:
 - deterministic text trimming and trailing-space behavior
 - session-safe coordinator boundaries and model-file SHA-256 support
 - daily context grouping, local-time boundaries, search, deletion/recreation, and Markdown round-tripping
-- automatic direct/prompt intent fallback, OCR window attribution, static-screen deduplication, app-session metadata, process/day rollover, and prompt-context budgeting
+- automatic direct/prompt intent fallback, OCR window attribution, Current exclusion, static-screen deduplication, capture-setting migration, app-session metadata, process/day rollover, and prompt-context budgeting
 
 Before release, manually test:
 
 - Safari, Chromium, Notes, Mail, Messages, Xcode, Terminal, and secure fields
 - built-in and external Apple keyboards
 - a notched display plus a non-notched external display
-- full-screen apps, Spaces, menu-bar auto-hide, sleep/wake, and microphone changes
+- 30-second multi-display capture, three-second post-typing capture, full-screen apps, Spaces, menu-bar auto-hide, sleep/wake, and microphone changes
 - first request, denial, later approval, revocation, and Input Monitoring restart
 - two consecutive runs of `app/build-install-restart.sh` with permissions and settings preserved
 - offline dictation after model setup
@@ -211,7 +212,7 @@ Before release, manually test:
 - context search, rich formatting, autosave, copy, Trash confirmation, and reopen behavior
 - M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 
-Targets are feedback within 100 ms after the hold threshold, no sustained idle work beyond the event tap, and warm release-to-result below 1.5 seconds for a typical short phrase on the reference M3 Pro MacBook.
+Targets are feedback within 100 ms after the hold threshold, no continuous screen stream or one-second AX polling, no OCR/model work for unchanged screenshots, and warm release-to-result below 1.5 seconds for a typical short phrase on the reference M3 Pro MacBook.
 
 ## Known platform limits
 

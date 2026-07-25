@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import Testing
 @testable import CurrentCore
 
@@ -243,4 +244,94 @@ private actor StubIntelligence: LocalIntelligenceProviding {
             permissions: snapshot
         ) == .screenRecording
     )
+}
+
+@MainActor
+@Test func screenshotIntervalIgnoresTheObsoleteFrameRateSetting() {
+    let suiteName = "CurrentContextSettings.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(4.0, forKey: "contextCaptureFramesPerSecond")
+
+    let settings = SettingsStore(defaults: defaults)
+    #expect(settings.contextScreenshotIntervalSeconds == 30)
+
+    settings.contextScreenshotIntervalSeconds = 45
+    let restored = SettingsStore(defaults: defaults)
+    #expect(restored.contextScreenshotIntervalSeconds == 45)
+}
+
+@MainActor
+@Test func repositoryDefensivelyRejectsCurrentByPIDOrBundle() async {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-exclusion-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let repository = ContextRepository(
+        store: store,
+        intelligence: StubIntelligence(),
+        excludedBundleIdentifiers: ["local.Current"],
+        excludedProcessIdentifiers: [777]
+    )
+    let block = ContextTextBlock(
+        text: "Should not be retained",
+        source: .accessibility
+    )
+
+    #expect(
+        !(await repository.accept(
+            ContextObservation(
+                processIdentifier: 777,
+                bundleIdentifier: "example.other",
+                applicationName: "PID match",
+                blocks: [block]
+            )
+        ))
+    )
+    #expect(
+        !(await repository.accept(
+            ContextObservation(
+                processIdentifier: 778,
+                bundleIdentifier: "local.Current",
+                applicationName: "Bundle match",
+                blocks: [block]
+            )
+        ))
+    )
+    #expect((await repository.snapshot()).isEmpty)
+}
+
+@Test func perceptualHashUsesTheConfiguredChangeTolerance() {
+    let original: UInt64 = 0b1010
+    #expect(
+        PerceptualImageHasher.isVisuallyEquivalent(
+            original,
+            original ^ 0b1111
+        )
+    )
+    #expect(
+        !PerceptualImageHasher.isVisuallyEquivalent(
+            original,
+            original ^ 0b1_1111
+        )
+    )
+
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let context = CGContext(
+        data: nil,
+        width: 90,
+        height: 80,
+        bitsPerComponent: 8,
+        bytesPerRow: 90 * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )
+    context?.setFillColor(CGColor(gray: 0, alpha: 1))
+    context?.fill(CGRect(x: 0, y: 0, width: 45, height: 80))
+    context?.setFillColor(CGColor(gray: 1, alpha: 1))
+    context?.fill(CGRect(x: 45, y: 0, width: 45, height: 80))
+    let image = context?.makeImage()
+    #expect(image.flatMap(PerceptualImageHasher.hash) != nil)
 }

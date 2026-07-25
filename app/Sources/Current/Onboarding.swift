@@ -14,6 +14,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     var permissions = PermissionSnapshot()
     var practiceText = ""
     var requestedInputMonitoring = false
+    var requestedScreenRecording = false
 
     init(runtime: AppRuntime) {
         self.runtime = runtime
@@ -73,6 +74,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 
     func request(_ kind: PermissionKind) {
         if kind == .inputMonitoring { requestedInputMonitoring = true }
+        if kind == .screenRecording { requestedScreenRecording = true }
         Task {
             _ = await runtime.permissions.request(kind)
             refreshPermissions()
@@ -168,9 +170,10 @@ struct OnboardingView: View {
                 }
             case .microphone: permissionStep(.microphone)
             case .accessibility: permissionStep(.accessibility)
+            case .screenRecording: permissionStep(.screenRecording)
             case .inputMonitoring: permissionStep(.inputMonitoring)
             case .restart:
-                StepLayout(symbol: "arrow.clockwise.circle", title: "One quick restart", text: "macOS activates Input Monitoring after Current restarts. Your model download and onboarding place are preserved.") {
+                StepLayout(symbol: "arrow.clockwise.circle", title: "One quick restart", text: "macOS activates Screen Recording and Input Monitoring after Current restarts. Your model download and onboarding place are preserved.") {
                     Button("Restart Current") { controller.restart() }.buttonStyle(.borderedProminent).controlSize(.large)
                 }
             case .model:
@@ -212,6 +215,9 @@ struct OnboardingView: View {
                 if kind == .inputMonitoring, controller.requestedInputMonitoring {
                     Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
                 }
+                if kind == .screenRecording, controller.requestedScreenRecording {
+                    Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
+                }
             }
         }
     }
@@ -230,7 +236,7 @@ struct OnboardingView: View {
     private var modelSummary: String { runtime.model.state.isReady ? "Local model ready" : "Model download started automatically" }
     private var showNext: Bool {
         switch controller.step {
-        case .microphone, .accessibility, .inputMonitoring, .restart: false
+        case .microphone, .accessibility, .screenRecording, .inputMonitoring, .restart: false
         case .model: runtime.model.state.isReady
         default: true
         }
@@ -238,7 +244,12 @@ struct OnboardingView: View {
     private var nextTitle: String { controller.step == .complete ? "Done" : "Continue" }
     private func advance() { controller.step == .complete ? controller.finish() : controller.next() }
     private func permissionSymbol(_ kind: PermissionKind) -> String {
-        switch kind { case .microphone: "mic"; case .accessibility: "accessibility"; case .inputMonitoring: "keyboard" }
+        switch kind {
+        case .microphone: "mic"
+        case .accessibility: "accessibility"
+        case .screenRecording: "rectangle.dashed.badge.record"
+        case .inputMonitoring: "keyboard"
+        }
     }
 }
 

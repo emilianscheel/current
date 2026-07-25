@@ -28,7 +28,21 @@ final class AppRuntime {
     let permissions = PermissionManager()
     let model = ModelManager()
     let contextStore = ContextStore()
-    @ObservationIgnored lazy var coordinator = DictationCoordinator(settings: settings, model: model)
+    let intelligence = AppleFoundationModelProvider()
+    @ObservationIgnored lazy var contextRepository = ContextRepository(
+        store: contextStore,
+        intelligence: intelligence
+    )
+    @ObservationIgnored lazy var screenContext = ScreenContextCoordinator(
+        repository: contextRepository,
+        framesPerSecond: settings.contextCaptureFramesPerSecond
+    )
+    @ObservationIgnored lazy var coordinator = VoiceInteractionCoordinator(
+        settings: settings,
+        model: model,
+        intelligence: intelligence,
+        contextRepository: contextRepository
+    )
     let hardware = HardwareChecker().current()
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
@@ -36,6 +50,8 @@ final class AppRuntime {
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
 
     init() {
+        contextStore.reload()
+        try? contextStore.closeAppSessions(at: Date())
         coordinator.onPhaseChange = { [weak self] phase in
             guard let self else { return }
             self.overlay.show(
@@ -56,6 +72,19 @@ final class AppRuntime {
         }
         coordinator.onSuccessfulTranscription = { [weak self] text, date in
             self?.context.append(text, at: date)
+        }
+        coordinator.onMonitoringChange = { [weak self] active in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if active,
+                   self.settings.continuousContextEnabled,
+                   self.permissions.snapshot().screenRecording.isGranted {
+                    try? await self.screenContext.start()
+                } else {
+                    await self.screenContext.stop()
+                }
+            }
         }
     }
 
@@ -94,6 +123,7 @@ final class AppRuntime {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var runtime: AppRuntime?
     private var statusController: StatusItemController?
+    private var isFinishingTermination = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let runtime = AppRuntime()
@@ -116,8 +146,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runtime?.onboarding.refreshPermissions()
     }
 
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard !isFinishingTermination, let runtime else {
+            return .terminateNow
+        }
+        isFinishingTermination = true
+        runtime.context.flush()
+        Task {
+            await runtime.screenContext.stop()
+            runtime.coordinator.stopMonitoring()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         runtime?.context.flush()
-        runtime?.coordinator.stopMonitoring()
     }
 }

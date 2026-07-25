@@ -2,6 +2,6 @@
 
 # current
 
-private, local-first dictation utility for mac. hold fn, speak, and release. it works everywhere.
+private, local-first voice writing for mac. hold fn, speak, and release for direct dictation or context-aware prompt writing.
 
 [Website](https://current-mac.vercel.app) | [Download](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg)

@@ -19,6 +19,7 @@ public final class PermissionManager: PermissionManaging {
         PermissionSnapshot(
             microphone: microphoneState,
             accessibility: AXIsProcessTrusted() ? .granted : .denied,
+            screenRecording: CGPreflightScreenCaptureAccess() ? .granted : .denied,
             inputMonitoring: CGPreflightListenEventAccess() ? .granted : .denied
         )
     }
@@ -32,6 +33,8 @@ public final class PermissionManager: PermissionManaging {
         case .accessibility:
             let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
+        case .screenRecording:
+            _ = CGRequestScreenCaptureAccess()
         case .inputMonitoring:
             _ = CGRequestListenEventAccess()
         }
@@ -44,6 +47,7 @@ public final class PermissionManager: PermissionManaging {
         switch kind {
         case .microphone: anchor = "Privacy_Microphone"
         case .accessibility: anchor = "Privacy_Accessibility"
+        case .screenRecording: anchor = "Privacy_ScreenCapture"
         case .inputMonitoring: anchor = "Privacy_ListenEvent"
         }
         let direct = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!

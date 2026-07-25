@@ -1,8 +1,8 @@
 # Current
 
-Current is a private, local-first dictation utility for recent Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, and inserts the result into the field you were using.
+Current is a private, local-first voice writing utility for recent Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, automatically distinguishes literal dictation from writing instructions, and inserts the result into the field you were using.
 
-It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful dictations are retained locally as one editable Markdown context document per day.
+It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful dictations are retained locally as one editable Markdown context document per day. Accessibility and on-device screen OCR additionally maintain one Markdown context document per visible application process and calendar day.
 
 ## Supported Macs
 
@@ -21,7 +21,7 @@ Current checks these requirements before starting its capture and model services
 1. Focus any editable field.
 2. Hold `fn` for at least 180 ms. A quick tap is ignored.
 3. Speak while the notch island shows the live waveform.
-4. Release `fn` to transcribe and insert.
+4. Release `fn` to transcribe. Literal speech is refined and inserted; instructions such as “Write a proper response email here” use current screen context to generate and insert a response.
 5. Press Escape while recording to cancel.
 
 The event tap never suppresses `fn` events and abandons a pending recording if another key is pressed, preserving normal combinations such as `fn` + arrow keys. It suppresses only the configured fallback shortcut’s Space event. The menu bar also provides mouse-driven Start/Stop actions and recovery actions for the last result.
@@ -62,6 +62,7 @@ Current polls permission state and automatically advances when a grant is detect
 | --- | --- | --- |
 | Microphone | Capture speech while dictating | `AVCaptureDevice.authorizationStatus(for: .audio)` |
 | Accessibility | Replace selected text or synthesize paste | `AXIsProcessTrusted()` |
+| Screen Recording | Read visible screen text for per-app context | `CGPreflightScreenCaptureAccess()` |
 | Input Monitoring | Receive global `secondaryFn` modifier events | `CGPreflightListenEventAccess()` |
 
 macOS requires Current to restart after Input Monitoring is enabled. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
@@ -71,8 +72,10 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 ## Privacy
 
 - Audio is buffered as 16 kHz mono Float32 in memory and discarded after transcription or cancellation.
-- Successful external-app dictations are appended to `~/Library/Application Support/Current/Context/YYYY-MM-DD.md`, including dictation into sensitive or secure fields.
-- Context files stay local until edited or moved to Trash. Dictation into Current itself is not duplicated in the daily log.
+- Successful external-app dictations are appended to `~/Library/Application Support/Current/Context/YYYY-MM-DD.md`.
+- At one frame per second per display, Accessibility and Vision OCR update `Context/App Sessions/YYYY-MM-DD/*.md`; raw screenshots are discarded after OCR.
+- Continuous capture intentionally applies no app or secure-content exclusions beyond restrictions enforced by macOS, so visible sensitive information may be retained.
+- Context files stay local until edited or moved to Trash.
 - No analytics, crash upload, account, update check, or cloud inference is included.
 - The last successful result is held in memory for recovery and can be cleared from Settings.
 - Accessibility insertion is attempted first. If the target rejects it, Current uses a temporary pasteboard and Command-V; when configured, it restores the previous pasteboard after a short delay.
@@ -87,16 +90,21 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - CoreGraphics `CGEventTap` for global `fn` events
 - AVFoundation / `AVAudioEngine` / `AVAudioConverter` for capture and resampling
 - macOS Accessibility API plus CoreGraphics paste fallback
+- ScreenCaptureKit, Vision OCR, and AX observers for continuous per-app context
+- Apple Foundation Models for intent classification, app-session maintenance, and prompt responses
 - Core ML and Apple Neural Engine inference through FluidAudio 0.15.5
 - ServiceManagement `SMAppService` for launch at login
 - Swift Testing for core behavior
 - Hardened Runtime with the audio-input entitlement; App Sandbox is intentionally not enabled because Current must manipulate focused controls in other applications
 
-The coordinator owns a single session-tagged state flow:
+The coordinator owns a single session-tagged voice-interaction flow:
 
 ```text
-Idle → Armed → Recording → Transcribing → Inserting → Success → Idle
-                    ↘ Cancelled / Error ───────────────→ Idle
+Idle → Armed → Recording → Transcribing → Classifying
+                                      ↙                 ↘
+                               Refining              Generating
+                                      ↘                 ↙
+                                      Inserting → Success → Idle
 ```
 
 Every asynchronous transcription is matched against its session UUID before insertion, so a cancelled or superseded result cannot type later.
@@ -172,7 +180,7 @@ Running the raw SwiftPM executable is not recommended for permission testing bec
 - Audio: input-device selection, live microphone level, sounds, recording limits
 - Transcription: model and engine status
 - Appearance: notch overlay and animation intensity
-- Privacy: local-processing and context-retention summary plus last-result clearing
+- Privacy: continuous-context control, capture disclosure, local-processing summary, and last-result clearing
 - Context: searchable daily Markdown history with rich editing and recoverable deletion
 
 The solid-black overlay follows Reduce Motion, joins all Spaces, can appear beside full-screen applications, ignores mouse input, and falls back to a centered island when a display has no notch safe area. All Current windows otherwise follow the active macOS light or dark appearance.
@@ -187,6 +195,7 @@ Automated tests cover:
 - deterministic text trimming and trailing-space behavior
 - session-safe coordinator boundaries and model-file SHA-256 support
 - daily context grouping, local-time boundaries, search, deletion/recreation, and Markdown round-tripping
+- automatic direct/prompt intent fallback, OCR window attribution, static-screen deduplication, app-session metadata, process/day rollover, and prompt-context budgeting
 
 Before release, manually test:
 
@@ -216,8 +225,8 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 - Cloud transcription or accounts
 - Context synchronization
 - Meeting transcription and speaker diarization
-- Local LLM rewriting or filler-word removal
-- Voice commands and automation
+- Cloud inference or cross-device context
+- Actions or automation beyond generating text for the captured field
 - Intel, Windows, Linux, or pre-M3 support
 
 ## Download and releases

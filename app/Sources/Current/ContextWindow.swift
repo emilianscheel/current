@@ -103,7 +103,38 @@ final class ContextViewModel {
     }
 
     func displayTitle(for document: ContextDocument) -> String {
-        store.displayTitle(for: document.date)
+        switch document.kind {
+        case .dailyDictation:
+            store.displayTitle(for: document.date)
+        case .appSession(let metadata):
+            metadata.applicationName
+        }
+    }
+
+    func subtitle(for document: ContextDocument) -> String {
+        switch document.kind {
+        case .dailyDictation:
+            return "\(document.wordCount) words"
+        case .appSession(let metadata):
+            let started = metadata.startedAt.formatted(
+                date: .omitted,
+                time: .shortened
+            )
+            if let endedAt = metadata.endedAt {
+                return "\(started)–\(endedAt.formatted(date: .omitted, time: .shortened)) · \(document.wordCount) words"
+            }
+            return "\(started) · Active · \(document.wordCount) words"
+        }
+    }
+
+    func appIcon(for document: ContextDocument) -> NSImage? {
+        guard case .appSession(let metadata) = document.kind,
+              let relativePath = metadata.iconRelativePath else {
+            return nil
+        }
+        return NSImage(
+            contentsOf: store.directory.appendingPathComponent(relativePath)
+        )
     }
 
     func select(_ documentID: String) {
@@ -157,6 +188,15 @@ final class ContextViewModel {
             self.selectedDocumentID = store.documents.first?.id
             loadSelection()
         }
+    }
+
+    func refreshLiveDocumentIfNeeded() {
+        guard !isDirty,
+              let selectedDocument,
+              selectedDocument.markdown != lastSavedMarkdown else {
+            return
+        }
+        loadSelection()
     }
 
     func didAppend(documentID: String) {
@@ -342,6 +382,13 @@ private struct ContextManagementView: View {
             }
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                model.refreshLiveDocumentIfNeeded()
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -371,12 +418,28 @@ private struct ContextManagementView: View {
 
     private func contextRow(_ document: ContextDocument) -> some View {
         HStack(spacing: 8) {
+            Group {
+                if let icon = model.appIcon(for: document) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: "calendar")
+                        .resizable()
+                        .scaledToFit()
+                        .padding(4)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 28, height: 28)
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(model.displayTitle(for: document))
                     .lineLimit(1)
-                Text("\(document.wordCount) words")
+                Text(model.subtitle(for: document))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 

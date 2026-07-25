@@ -17,9 +17,12 @@ public final class DictationCoordinator {
     public let insertion: InsertionService
     public let shortcut: ShortcutMonitor
     public let vocabulary: LearnedVocabularyStore
+    public let intelligence: any LocalIntelligenceProviding
+    public let contextRepository: ContextRepository?
     public var onPhaseChange: ((DictationPhase) -> Void)?
     public var onPartialTranscriptionChange: ((String) -> Void)?
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
+    public var onMonitoringChange: ((Bool) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
 
     public init(
@@ -28,7 +31,9 @@ public final class DictationCoordinator {
         audio: AudioCaptureService = AudioCaptureService(),
         insertion: InsertionService = InsertionService(),
         shortcut: ShortcutMonitor = ShortcutMonitor(),
-        vocabulary: LearnedVocabularyStore = LearnedVocabularyStore()
+        vocabulary: LearnedVocabularyStore = LearnedVocabularyStore(),
+        intelligence: any LocalIntelligenceProviding = AppleFoundationModelProvider(),
+        contextRepository: ContextRepository? = nil
     ) {
         self.settings = settings
         self.model = model
@@ -36,6 +41,8 @@ public final class DictationCoordinator {
         self.insertion = insertion
         self.shortcut = shortcut
         self.vocabulary = vocabulary
+        self.intelligence = intelligence
+        self.contextRepository = contextRepository
         self.audio.selectedDeviceID = settings.inputDeviceID
         shortcut.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in self?.handleShortcut(event) }
@@ -43,12 +50,17 @@ public final class DictationCoordinator {
     }
 
     public func startMonitoring() {
-        guard settings.isEnabled else { setPhase(.paused); return }
+        guard settings.isEnabled else {
+            setPhase(.paused)
+            onMonitoringChange?(false)
+            return
+        }
         shortcut.holdThreshold = .milliseconds(settings.holdThresholdMilliseconds)
         shortcut.fallbackPreset = settings.fallbackShortcut
         do {
             try shortcut.start()
             setPhase(.idle)
+            onMonitoringChange?(true)
         } catch {
             fail(error)
         }
@@ -58,6 +70,7 @@ public final class DictationCoordinator {
         shortcut.stop()
         cancel()
         setPhase(.paused)
+        onMonitoringChange?(false)
     }
 
     public func toggleEnabled() {
@@ -180,40 +193,59 @@ public final class DictationCoordinator {
         Task { [weak self, transcription = model.transcription] in
             do {
                 await transcription.stopPartialTranscription()
-                let candidate = try await transcription.transcribe(
-                    DictationRequest(
-                        samples: samples,
+                let rawText = try await transcription.transcribe(samples)
+                guard let self, self.currentSession?.id == session.id else { return }
+                self.setPhase(.classifying)
+                let decision = await self.intelligence.classifyIntent(
+                    VoiceInteractionRequest(
+                        transcript: rawText,
+                        context: context
+                    )
+                )
+                guard self.currentSession?.id == session.id else { return }
+                let text: String
+                if decision.effectiveIntent == .prompt {
+                    self.setPhase(.generating)
+                    let envelope: PromptContextEnvelope
+                    if let contextRepository = self.contextRepository {
+                        envelope = await contextRepository.promptContext(
+                            instruction: rawText,
+                            focusedContext: context
+                        )
+                    } else {
+                        envelope = PromptContextEnvelope(
+                            instruction: rawText,
+                            focusedContext: context,
+                            targetApplicationContext: "",
+                            otherVisibleApplicationContexts: []
+                        )
+                    }
+                    text = try await self.intelligence
+                        .generatePromptResponse(envelope)
+                        .text
+                } else {
+                    let deterministic = DeterministicRefiner.refine(
+                        rawText,
                         context: context,
                         vocabulary: vocabularyEntries
                     )
-                )
-                guard let self, self.currentSession?.id == session.id else { return }
-                let text: String
-                if context.isEditingSelection, let selection = context.selectedText {
-                    if let edit = await transcription.editSelection(
-                        selection,
-                        instruction: candidate.rawText,
+                    let refinement = await self.intelligence.refineDictation(
+                        deterministic,
                         context: context
-                    ) {
-                        text = edit.text
-                    } else if Self.looksLikeUnsupportedEditInstruction(candidate.rawText) {
-                        throw CurrentError.transcriptionFailed(
-                            "That edit requires Apple Intelligence. Try dictating the replacement directly."
-                        )
-                    } else {
-                        text = candidate.refinedText
-                    }
-                    if let learned = Self.learnedCorrection(
-                        from: selection,
-                        to: text
-                    ) {
-                        self.vocabulary.learn(
-                            spokenForm: learned.spoken,
-                            writtenForm: learned.written
-                        )
-                    }
-                } else {
-                    text = candidate.refinedText
+                    )
+                    text = refinement.text
+                }
+                guard self.currentSession?.id == session.id else { return }
+                if decision.effectiveIntent == .direct,
+                   let selection = context.selectedText,
+                   let learned = Self.learnedCorrection(
+                       from: selection,
+                       to: text
+                   ) {
+                    self.vocabulary.learn(
+                        spokenForm: learned.spoken,
+                        writtenForm: learned.written
+                    )
                 }
                 self.setPhase(.inserting)
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
@@ -336,3 +368,5 @@ public final class DictationCoordinator {
         }
     }
 }
+
+public typealias VoiceInteractionCoordinator = DictationCoordinator

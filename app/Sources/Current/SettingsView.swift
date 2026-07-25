@@ -31,6 +31,17 @@ struct SettingsView: View {
             enabled ? runtime.coordinator.startMonitoring() : runtime.coordinator.stopMonitoring()
         }
         .onChange(of: runtime.settings.inputDeviceID) { _, device in runtime.coordinator.audio.selectedDeviceID = device }
+        .onChange(of: runtime.settings.continuousContextEnabled) { _, enabled in
+            Task {
+                if enabled,
+                   runtime.settings.isEnabled,
+                   runtime.permissions.snapshot().screenRecording.isGranted {
+                    try? await runtime.screenContext.start()
+                } else {
+                    await runtime.screenContext.stop()
+                }
+            }
+        }
     }
 
     @ViewBuilder private var general: some View {
@@ -86,12 +97,22 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var privacy: some View {
-        Section("Local by design") {
+        Section("Continuous context") {
+            Toggle(
+                "Keep per-app screen context",
+                isOn: $runtime.settings.continuousContextEnabled
+            )
+            LabeledContent("Capture rate", value: "1 frame per second per display")
+            Label("Accessibility text and on-device OCR are grouped into one Markdown document per app process and day", systemImage: "text.viewfinder")
+            Label("All visible content is eligible, including Current and sensitive information", systemImage: "exclamationmark.shield")
+                .foregroundStyle(.orange)
+        }
+        Section("Local processing") {
             Label("Audio is held in memory only", systemImage: "memorychip")
             Label("No network requests occur during dictation", systemImage: "network.slash")
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
-            Label("Nearby text is ephemeral and secure fields are never read", systemImage: "text.viewfinder")
+            Label("Screenshots are discarded after OCR; extracted text and metadata are retained", systemImage: "internaldrive")
             Button("Open Context Library…") { runtime.context.show() }
         }
         Section("Recovery") {

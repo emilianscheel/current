@@ -61,15 +61,27 @@ public actor TranscriptionService {
 
     public func transcribe(_ request: DictationRequest) async throws -> TranscriptionCandidate {
         let rawText = try await transcribe(request.samples)
-        let deterministic = DeterministicRefiner.refine(
-            rawText,
+        return await refine(
+            rawText: rawText,
             context: request.context,
             vocabulary: request.vocabulary
+        )
+    }
+
+    public func refine(
+        rawText: String,
+        context: DictationContext,
+        vocabulary: [LearnedVocabularyEntry] = []
+    ) async -> TranscriptionCandidate {
+        let deterministic = DeterministicRefiner.refine(
+            rawText,
+            context: context,
+            vocabulary: vocabulary
         )
         let refined = await refinement.refine(
             deterministic: deterministic,
             rawText: rawText,
-            context: request.context
+            context: context
         )
         return TranscriptionCandidate(rawText: rawText, refinement: refined)
     }

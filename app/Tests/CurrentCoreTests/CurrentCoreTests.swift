@@ -561,7 +561,12 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
 }
 
 @Test func onboardingContinuesPastThePermissionRestart() {
-    let granted = PermissionSnapshot(microphone: .granted, accessibility: .granted, inputMonitoring: .granted)
+    let granted = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
     #expect(OnboardingFlow.initialStep(saved: .restart, completed: false, permissions: granted, modelInstalled: false) == .model)
     #expect(OnboardingFlow.automaticDestination(from: .inputMonitoring, permissions: granted) == .restart)
 }

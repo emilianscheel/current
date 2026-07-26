@@ -38,7 +38,6 @@ struct SettingsView: View {
                    runtime.permissions.snapshot().screenRecording.isGranted {
                     runtime.contextModel.prepareIfNeeded()
                     try? await runtime.screenContext.start()
-                    await runtime.contextRepository.migrateLegacyDocuments()
                 } else {
                     await runtime.screenContext.stop()
                     await runtime.contextModel.unload()
@@ -137,11 +136,12 @@ struct SettingsView: View {
                 isOn: $runtime.settings.continuousContextEnabled
             )
             LabeledContent(
-                "Capture schedule",
-                value: "Every 30 seconds and 3 seconds after typing"
+                "Background policy",
+                value: "Recently active apps only · one refresh every 10 seconds"
             )
+            LabeledContent("Worker", value: contextWorkerState)
             Label("Accessibility text is preferred; screenshots and on-device OCR are used only for windows without useful accessible text", systemImage: "text.viewfinder")
-            Label("Current is excluded; other visible content may include sensitive information", systemImage: "exclamationmark.shield")
+            Label("Current, Dock, Control Center, and SystemUIServer are excluded", systemImage: "exclamationmark.shield")
                 .foregroundStyle(.orange)
             Label("macOS controls whether a screen-capture privacy indicator appears", systemImage: "record.circle")
                 .foregroundStyle(.secondary)
@@ -168,6 +168,17 @@ struct SettingsView: View {
 
     private var modelState: String {
         modelState(runtime.model.state)
+    }
+
+    private var contextWorkerState: String {
+        switch runtime.screenContext.backgroundState {
+        case .idle: "Idle"
+        case .waitingForIdle: "Waiting for idle"
+        case .processing: "Processing"
+        case .suspendedDuringDictation: "Suspended during dictation"
+        case .deferredForPower: "Deferred for power or thermal pressure"
+        case .degraded: "Degraded"
+        }
     }
 
     private func modelState(_ state: ModelState) -> String {

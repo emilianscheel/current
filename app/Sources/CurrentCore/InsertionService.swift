@@ -118,7 +118,9 @@ public final class InsertionService {
         )
     }
 
-    public static func frontmostContextCaptureTarget() -> ContextCaptureTarget? {
+    public static func frontmostContextCaptureTarget(
+        includeWindowTitle: Bool = true
+    ) -> ContextCaptureTarget? {
         guard let application = NSWorkspace.shared.frontmostApplication else {
             return nil
         }
@@ -126,9 +128,11 @@ public final class InsertionService {
             processIdentifier: application.processIdentifier,
             bundleIdentifier: application.bundleIdentifier,
             applicationName: application.localizedName ?? "Application",
-            windowTitle: focusedWindowTitle(
-                processIdentifier: application.processIdentifier
-            )
+            windowTitle: includeWindowTitle
+                ? focusedWindowTitle(
+                    processIdentifier: application.processIdentifier
+                )
+                : nil
         )
     }
 

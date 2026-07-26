@@ -15,8 +15,8 @@ public enum GemmaContextModel {
     public static let approximateDownloadBytes: Int64 = 3_550_000_000
 }
 
-enum GemmaMetalRuntime {
-    static func requireDefaultLibrary() throws {
+public enum GemmaMetalRuntime {
+    public static func requireDefaultLibrary() throws {
         let bundle = Bundle.main
         var searchRoots = [bundle.bundleURL]
         if let resourceURL = bundle.resourceURL {
@@ -197,23 +197,34 @@ public enum GemmaModelValidator {
     }
 }
 
-private actor GemmaInferenceEngine {
+public actor GemmaWorkerInferenceEngine {
     private var container: ModelContainer?
     private var isSuspended = false
+
+    public init() {}
+
+    public func load(snapshot: URL) async throws {
+        guard container == nil else { return }
+        try GemmaMetalRuntime.requireDefaultLibrary()
+        container = try await loadModelContainer(
+            from: snapshot,
+            using: #huggingFaceTokenizerLoader()
+        )
+    }
 
     func install(_ container: ModelContainer) {
         self.container = container
     }
 
-    func isLoaded() -> Bool {
+    public func isLoaded() -> Bool {
         container != nil
     }
 
-    func setSuspended(_ suspended: Bool) {
+    public func setSuspended(_ suspended: Bool) {
         isSuspended = suspended
     }
 
-    func unload() {
+    public func unload() {
         let hadLoadedContainer = container != nil
         container = nil
         // MLX initializes its Metal backend when clearing the cache. Calling it
@@ -224,7 +235,7 @@ private actor GemmaInferenceEngine {
         }
     }
 
-    func structure(
+    public func structure(
         currentState: String,
         observations: [ContextObservation]
     ) async throws -> ContextDocumentUpdate {
@@ -267,7 +278,7 @@ private actor GemmaInferenceEngine {
         return try ContextBulletNormalizer.update(from: response)
     }
 
-    func oneTokenProbe() async throws -> String {
+    public func oneTokenProbe() async throws -> String {
         guard let container else {
             throw CurrentError.modelUnavailable(
                 "Gemma context model is not loaded."
@@ -399,12 +410,16 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
     public private(set) var lastLoadDuration: Duration?
 
     private let locations: GemmaModelLocations
-    private let engine = GemmaInferenceEngine()
+    private let worker: ContextWorkerClient
     private var preparationTask: Task<Void, Never>?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
 
-    public init(locations: GemmaModelLocations = .current) {
+    public init(
+        locations: GemmaModelLocations = .current,
+        worker: ContextWorkerClient = ContextWorkerClient()
+    ) {
         self.locations = locations
+        self.worker = worker
         if GemmaModelValidator.isComplete(locations: locations) {
             state = .notInstalled
         }
@@ -479,8 +494,9 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
     }
 
     public func setVoiceInteractionActive(_ active: Bool) {
-        Task {
-            await engine.setSuspended(active)
+        guard active else { return }
+        Task { @MainActor in
+            await worker.cancelAll()
         }
     }
 
@@ -488,36 +504,30 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
         currentState: String,
         observations: [ContextObservation]
     ) async throws -> ContextDocumentUpdate {
-        if !(await engine.isLoaded()) {
-            guard hasInstalledSnapshot else {
-                throw CurrentError.modelUnavailable(
-                    "Gemma context model is not downloaded yet."
-                )
-            }
-            try GemmaMetalRuntime.requireDefaultLibrary()
-            state = .loading
-            do {
-                let container = try await loadModelContainer(
-                    from: locations.snapshot,
-                    using: #huggingFaceTokenizerLoader()
-                )
-                await engine.install(container)
-                state = .ready
-            } catch {
-                state = .failed(error.localizedDescription)
-                throw error
-            }
+        guard hasInstalledSnapshot else {
+            throw CurrentError.modelUnavailable(
+                "Gemma context model is not downloaded yet."
+            )
         }
-        return try await engine.structure(
-            currentState: currentState,
-            observations: observations
-        )
+        state = .loading
+        do {
+            let update = try await worker.structure(
+                snapshot: locations.snapshot,
+                currentState: currentState,
+                observations: observations
+            )
+            state = .ready
+            return update
+        } catch {
+            state = .failed(error.localizedDescription)
+            throw error
+        }
     }
 
     public func unload() async {
         preparationTask?.cancel()
         preparationTask = nil
-        await engine.unload()
+        await worker.unload()
         state = hasInstalledSnapshot ? .ready : .notInstalled
     }
 
@@ -536,19 +546,22 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
     }
 
     public func runIntegrationProbe() async throws -> String {
-        if !(await engine.isLoaded()) {
-            guard hasInstalledSnapshot else {
-                throw CurrentError.modelUnavailable(
-                    "Install Gemma before running the integration probe."
-                )
-            }
-            try GemmaMetalRuntime.requireDefaultLibrary()
-            let container = try await loadModelContainer(
-                from: locations.snapshot,
-                using: #huggingFaceTokenizerLoader()
+        guard hasInstalledSnapshot else {
+            throw CurrentError.modelUnavailable(
+                "Install Gemma before running the integration probe."
             )
-            await engine.install(container)
         }
-        return try await engine.oneTokenProbe()
+        let observation = ContextObservation(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier,
+            bundleIdentifier: nil,
+            applicationName: "Probe",
+            blocks: [ContextTextBlock(text: "Probe", source: .accessibility)]
+        )
+        let update = try await worker.structure(
+            snapshot: locations.snapshot,
+            currentState: "",
+            observations: [observation]
+        )
+        return update.currentStateMarkdown
     }
 }

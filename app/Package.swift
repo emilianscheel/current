@@ -7,6 +7,10 @@ let package = Package(
     products: [
         .executable(name: "Current", targets: ["Current"]),
         .executable(name: "CurrentRelauncher", targets: ["CurrentRelauncher"]),
+        .executable(
+            name: "CurrentContextWorker",
+            targets: ["CurrentContextWorker"]
+        ),
         .library(name: "CurrentCore", targets: ["CurrentCore"]),
     ],
     dependencies: [
@@ -47,6 +51,10 @@ let package = Package(
             resources: [.process("Resources")]
         ),
         .executableTarget(name: "CurrentRelauncher"),
+        .executableTarget(
+            name: "CurrentContextWorker",
+            dependencies: ["CurrentCore"]
+        ),
         .testTarget(
             name: "CurrentCoreTests",
             dependencies: ["CurrentCore"],

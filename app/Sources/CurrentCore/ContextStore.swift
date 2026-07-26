@@ -111,7 +111,8 @@ public final class ContextStore {
                    options: [.skipsHiddenFiles]
                ) {
                 for case let url as URL in enumerator where url.pathExtension.lowercased() == "md" {
-                    if let document = try loadAppSessionDocument(at: url) {
+                    if let document = try loadAppSessionDocument(at: url),
+                       !Self.isExcludedAppSession(document) {
                         loaded.append(document)
                     }
                 }
@@ -124,6 +125,17 @@ public final class ContextStore {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private static func isExcludedAppSession(
+        _ document: ContextDocument
+    ) -> Bool {
+        guard case .appSession(let metadata) = document.kind else {
+            return false
+        }
+        return metadata.bundleIdentifier.map(
+            ContextApplicationExclusions.bundleIdentifiers.contains
+        ) == true
     }
 
     @discardableResult

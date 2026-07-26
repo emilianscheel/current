@@ -198,13 +198,13 @@ public struct ContextObservation: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public enum ContextCaptureTrigger: String, Sendable, Equatable {
-    case periodic
+public enum ContextCaptureTrigger: String, Codable, Sendable, Equatable {
+    case backgroundRefresh
     case typingSettled
     case textCommitted
 }
 
-public struct ContextCaptureTarget: Sendable, Equatable, Hashable {
+public struct ContextCaptureTarget: Codable, Sendable, Equatable, Hashable {
     public let processIdentifier: pid_t
     public let bundleIdentifier: String?
     public let applicationName: String
@@ -223,6 +223,118 @@ public struct ContextCaptureTarget: Sendable, Equatable, Hashable {
         self.applicationName = applicationName
         self.windowIdentifier = windowIdentifier
         self.windowTitle = windowTitle
+    }
+}
+
+public enum ContextActivityKind: String, Codable, Sendable, Equatable {
+    case launch
+    case activation
+    case keyboard
+    case mouse
+    case accessibility
+    case typingSettled
+    case textCommitted
+
+    public var isUrgent: Bool {
+        self == .typingSettled || self == .textCommitted
+    }
+}
+
+public struct RecentApplicationActivity: Codable, Sendable, Equatable {
+    public let target: ContextCaptureTarget
+    public let kind: ContextActivityKind
+    public let occurredAt: Date
+
+    public init(
+        target: ContextCaptureTarget,
+        kind: ContextActivityKind,
+        occurredAt: Date = Date()
+    ) {
+        self.target = target
+        self.kind = kind
+        self.occurredAt = occurredAt
+    }
+}
+
+public struct ContextBackgroundPolicy: Sendable, Equatable {
+    public var recencyInterval: TimeInterval
+    public var normalRefreshDelay: TimeInterval
+    public var urgentRefreshDelay: TimeInterval
+    public var interJobSpacing: TimeInterval
+    public var userIdleDelay: TimeInterval
+    public var maximumRecentApplications: Int
+
+    public init(
+        recencyInterval: TimeInterval = 5 * 60,
+        normalRefreshDelay: TimeInterval = 30,
+        urgentRefreshDelay: TimeInterval = 3,
+        interJobSpacing: TimeInterval = 10,
+        userIdleDelay: TimeInterval = 2,
+        maximumRecentApplications: Int = 12
+    ) {
+        self.recencyInterval = recencyInterval
+        self.normalRefreshDelay = normalRefreshDelay
+        self.urgentRefreshDelay = urgentRefreshDelay
+        self.interJobSpacing = interJobSpacing
+        self.userIdleDelay = userIdleDelay
+        self.maximumRecentApplications = maximumRecentApplications
+    }
+}
+
+public enum ContextBackgroundState: String, Codable, Sendable, Equatable {
+    case idle
+    case waitingForIdle
+    case processing
+    case suspendedDuringDictation
+    case deferredForPower
+    case degraded
+}
+
+public enum ContextApplicationExclusions {
+    public static let bundleIdentifiers: Set<String> = [
+        "local.Current",
+        "com.apple.dock",
+        "com.apple.controlcenter",
+        "com.apple.systemuiserver",
+        "local.Current.ContextWorker",
+    ]
+
+    public static func contains(
+        processIdentifier: pid_t,
+        bundleIdentifier: String?,
+        ownProcessIdentifier: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) -> Bool {
+        processIdentifier == ownProcessIdentifier
+            || bundleIdentifier.map(bundleIdentifiers.contains) == true
+    }
+}
+
+public struct ContextWorkerImagePayload: Codable, Sendable, Equatable {
+    public static let maximumByteCount = 16 * 1_024 * 1_024
+
+    public let bgraData: Data
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+
+    public init(
+        bgraData: Data,
+        width: Int,
+        height: Int,
+        bytesPerRow: Int
+    ) throws {
+        guard width > 0, height > 0,
+              bytesPerRow >= width * 4,
+              bgraData.count == bytesPerRow * height,
+              bgraData.count <= Self.maximumByteCount else {
+            throw CurrentError.modelUnavailable(
+                "The context-worker image payload is invalid or too large."
+            )
+        }
+        self.bgraData = bgraData
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
     }
 }
 
@@ -308,7 +420,7 @@ public struct LiveAppContext: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct ContextDocumentUpdate: Sendable, Equatable {
+public struct ContextDocumentUpdate: Codable, Sendable, Equatable {
     public let changed: Bool
     public let currentStateMarkdown: String
     public let activityEntryMarkdown: String?
@@ -402,11 +514,11 @@ public protocol ScreenContextProviding: Sendable {
         trigger: ContextCaptureTrigger,
         target: ContextCaptureTarget?
     ) async
+    func recordActivity(_ activity: RecentApplicationActivity) async
+    func setForegroundInteractionActive(_ active: Bool) async
 }
 
 public protocol AccessibilityContextProviding: Sendable {
-    func snapshotVisibleApplications() async -> [ContextObservation]
-    func refreshVisibleCoverage() async -> [AccessibilityCoverage]
     func refreshCoverage(
         for target: ContextCaptureTarget
     ) async -> ContextCaptureDecision

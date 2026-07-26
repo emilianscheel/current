@@ -27,18 +27,20 @@ final class AppRuntime {
     var settings = SettingsStore.shared
     let permissions = PermissionManager()
     let model = ModelManager()
-    let contextModel = GemmaContextModelManager()
+    let contextWorker = ContextWorkerClient()
     let contextStore = ContextStore()
     let intelligence = AppleFoundationModelProvider()
+    @ObservationIgnored lazy var contextModel = GemmaContextModelManager(
+        worker: contextWorker
+    )
     @ObservationIgnored lazy var contextRepository = ContextRepository(
         store: contextStore,
         structurer: contextModel
     )
     @ObservationIgnored lazy var screenContext = ScreenContextCoordinator(
         repository: contextRepository,
-        screenshotInterval: .seconds(
-            settings.contextScreenshotIntervalSeconds
-        )
+        ocr: XPCVisionOCRProvider(client: contextWorker),
+        worker: contextWorker
     )
     @ObservationIgnored lazy var coordinator = VoiceInteractionCoordinator(
         settings: settings,
@@ -51,27 +53,29 @@ final class AppRuntime {
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
     @ObservationIgnored lazy var context = ContextWindowController(runtime: self, store: contextStore)
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
+    @ObservationIgnored private var phaseUpdateGeneration = UUID()
 
     init() {
         contextStore.reload()
         try? contextStore.closeAppSessions(at: Date())
         coordinator.onPhaseChange = { [weak self] phase in
             guard let self else { return }
-            self.contextModel.setVoiceInteractionActive(
-                [
-                    DictationPhase.recording,
-                    .transcribing,
-                    .classifying,
-                    .generating,
-                    .inserting,
-                ].contains(phase)
-            )
-            self.overlay.show(
-                phase: phase,
-                targetApplication: self.coordinator.insertion.targetApplicationPresentation,
-                editingWordCount: self.coordinator.insertion.currentContext.selectedWordCount,
-                partialTranscript: self.coordinator.partialTranscription
-            )
+            let interactionActive = phase != .idle
+            let generation = UUID()
+            self.phaseUpdateGeneration = generation
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.screenContext.setForegroundInteractionActive(
+                    interactionActive
+                )
+                guard self.phaseUpdateGeneration == generation else { return }
+                self.overlay.show(
+                    phase: phase,
+                    targetApplication: self.coordinator.insertion.targetApplicationPresentation,
+                    editingWordCount: self.coordinator.insertion.currentContext.selectedWordCount,
+                    partialTranscript: self.coordinator.partialTranscription
+                )
+            }
         }
         coordinator.onPartialTranscriptionChange = { [weak self] partial in
             guard let self else { return }
@@ -89,13 +93,29 @@ final class AppRuntime {
             Task { @MainActor [weak self] in
                 guard let self,
                       let target = InsertionService
-                          .frontmostContextCaptureTarget() else {
+                          .frontmostContextCaptureTarget(
+                              includeWindowTitle: false
+                          ) else {
                     return
                 }
                 await self.screenContext.scheduleCapture(
                     trigger: .typingSettled,
                     target: target
                 )
+            }
+        }
+        coordinator.shortcut.onUserActivity = { [weak self] kind in
+            guard kind == .mouse else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let target = InsertionService
+                          .frontmostContextCaptureTarget(
+                              includeWindowTitle: false
+                          ) else { return }
+                await self.screenContext.recordActivity(.init(
+                    target: target,
+                    kind: kind
+                ))
             }
         }
         coordinator.onTextCommitted = { [weak self] target in
@@ -115,7 +135,6 @@ final class AppRuntime {
                    self.permissions.snapshot().screenRecording.isGranted {
                     self.contextModel.prepareIfNeeded()
                     try? await self.screenContext.start()
-                    await self.contextRepository.migrateLegacyDocuments()
                 } else {
                     await self.screenContext.stop()
                     await self.contextModel.unload()
@@ -168,17 +187,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController = StatusItemController(runtime: runtime)
         runtime.model.prepareIfNeeded()
         runtime.contextModel.prepareIfNeeded()
-        Task { [weak runtime] in
-            while let runtime,
-                  !runtime.contextModel.state.isReady {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-            }
-            guard let runtime else { return }
-            if runtime.settings.continuousContextEnabled {
-                await runtime.contextRepository.migrateLegacyDocuments()
-            }
-        }
 
         if runtime.hardware.isSupported {
             if runtime.permissions.snapshot().inputMonitoring.isGranted { runtime.coordinator.startMonitoring() }

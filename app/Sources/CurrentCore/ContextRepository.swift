@@ -26,7 +26,8 @@ public actor ContextRepository {
         store: ContextStore,
         structurer: any ContextStructuringProviding,
         calendar: Calendar = .autoupdatingCurrent,
-        excludedBundleIdentifiers: Set<String> = ["local.Current"],
+        excludedBundleIdentifiers: Set<String> =
+            ContextApplicationExclusions.bundleIdentifiers,
         excludedProcessIdentifiers: Set<pid_t> = [
             ProcessInfo.processInfo.processIdentifier,
         ]
@@ -40,6 +41,34 @@ public actor ContextRepository {
 
     @discardableResult
     public func accept(_ observation: ContextObservation) async -> Bool {
+        await accept(observation, scheduleProcessing: true)
+    }
+
+    @discardableResult
+    public func acceptAndProcess(
+        _ observation: ContextObservation
+    ) async -> Bool {
+        let accepted = await accept(
+            observation,
+            scheduleProcessing: false
+        )
+        guard accepted else { return false }
+        let key = SessionKey(
+            processIdentifier: observation.processIdentifier,
+            dayIdentifier: Self.dayIdentifier(
+                for: observation.capturedAt,
+                calendar: calendar
+            )
+        )
+        processingTasks.removeValue(forKey: key)?.cancel()
+        await processPending(for: key)
+        return true
+    }
+
+    private func accept(
+        _ observation: ContextObservation,
+        scheduleProcessing shouldSchedule: Bool
+    ) async -> Bool {
         guard !observation.blocks.isEmpty,
               !isExcluded(
                   processIdentifier: observation.processIdentifier,
@@ -85,7 +114,9 @@ public actor ContextRepository {
         context.pendingObservations.append(merged)
         context.session.sources.formUnion(merged.blocks.map(\.source))
         liveContexts[key] = context
-        scheduleProcessing(for: key)
+        if shouldSchedule {
+            scheduleProcessing(for: key)
+        }
         return true
     }
 

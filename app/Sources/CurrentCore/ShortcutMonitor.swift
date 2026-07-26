@@ -53,6 +53,7 @@ public struct ShortcutStateMachine: Sendable {
 public final class ShortcutMonitor: @unchecked Sendable {
     public var onEvent: (@Sendable (ShortcutEvent) -> Void)?
     public var onKeyboardActivity: (@Sendable () -> Void)?
+    public var onUserActivity: (@Sendable (ContextActivityKind) -> Void)?
     public var holdThreshold: Duration = .milliseconds(180)
     public var fallbackPreset = "control-option-space"
 
@@ -62,6 +63,7 @@ public final class ShortcutMonitor: @unchecked Sendable {
     private var state = ShortcutStateMachine()
     private var thresholdTask: Task<Void, Never>?
     private var fallbackIsDown = false
+    private var lastPointerActivity = Date.distantPast
 
     public init() {}
 
@@ -70,6 +72,10 @@ public final class ShortcutMonitor: @unchecked Sendable {
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
             | CGEventMask(1 << CGEventType.keyDown.rawValue)
             | CGEventMask(1 << CGEventType.keyUp.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.rightMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.scrollWheel.rawValue)
             | CGEventMask(1 << CGEventType.tapDisabledByTimeout.rawValue)
             | CGEventMask(1 << CGEventType.tapDisabledByUserInput.rawValue)
         let pointer = Unmanaged.passUnretained(self).toOpaque()
@@ -100,7 +106,11 @@ public final class ShortcutMonitor: @unchecked Sendable {
         if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
         eventTap = nil
         runLoopSource = nil
-        lock.withLock { state = ShortcutStateMachine(); fallbackIsDown = false }
+        lock.withLock {
+            state = ShortcutStateMachine()
+            fallbackIsDown = false
+            lastPointerActivity = .distantPast
+        }
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
@@ -120,6 +130,19 @@ public final class ShortcutMonitor: @unchecked Sendable {
         }
         if type == .keyDown {
             onKeyboardActivity?()
+            onUserActivity?(.keyboard)
+        }
+        if type == .leftMouseDown || type == .rightMouseDown
+            || type == .otherMouseDown || type == .scrollWheel {
+            let shouldPublish = lock.withLock { () -> Bool in
+                let now = Date()
+                guard now.timeIntervalSince(lastPointerActivity) >= 2 else {
+                    return false
+                }
+                lastPointerActivity = now
+                return true
+            }
+            if shouldPublish { onUserActivity?(.mouse) }
         }
         if type == .keyUp, keyCode == 49, lock.withLock({ fallbackIsDown }) {
             lock.withLock { fallbackIsDown = false }

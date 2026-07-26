@@ -155,7 +155,9 @@ done
 iconutil -c icns "$ICONSET" -o "$PROJECT_DIR/.build/AppIcon.icns"
 
 rm -rf "$STAGE_APP"
-mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Helpers" "$STAGE_APP/Contents/Resources"
+WORKER_BUNDLE="$STAGE_APP/Contents/XPCServices/CurrentContextWorker.xpc"
+mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Helpers" "$STAGE_APP/Contents/Resources" \
+  "$WORKER_BUNDLE/Contents/MacOS" "$WORKER_BUNDLE/Contents/Resources"
 cp Packaging/Info.plist "$STAGE_APP/Contents/Info.plist"
 if [[ -n "$APP_VERSION" ]]; then
   plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
@@ -165,16 +167,24 @@ fi
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$STAGE_APP/Contents/Info.plist"
 cp "$BIN_DIR/Current" "$STAGE_APP/Contents/MacOS/Current"
 cp "$BIN_DIR/CurrentRelauncher" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
+cp Packaging/ContextWorker-Info.plist "$WORKER_BUNDLE/Contents/Info.plist"
+cp "$BIN_DIR/CurrentContextWorker" "$WORKER_BUNDLE/Contents/MacOS/CurrentContextWorker"
 cp "$PROJECT_DIR/.build/AppIcon.icns" "$STAGE_APP/Contents/Resources/AppIcon.icns"
 cp Sources/Current/Resources/model-manifest.json Sources/Current/Resources/Privacy.md Licenses/NOTICE.md "$STAGE_APP/Contents/Resources/"
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do cp -R "$resource_bundle" "$STAGE_APP/Contents/Resources/"; done
 cp -R "$MLX_RESOURCE_BUNDLE" "$STAGE_APP/Contents/Resources/"
+cp -R "$MLX_RESOURCE_BUNDLE" "$WORKER_BUNDLE/Contents/Resources/"
 [[ -f "$STAGE_APP/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]] || {
   print -u2 "Packaged app is missing MLX's required default.metallib resource."
   exit 1
 }
+[[ -f "$WORKER_BUNDLE/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]] || {
+  print -u2 "Packaged context worker is missing MLX's required default.metallib resource."
+  exit 1
+}
 
 codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --sign "$SIGNING_IDENTITY" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
+codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --sign "$SIGNING_IDENTITY" "$WORKER_BUNDLE"
 codesign --force --options runtime --timestamp=none "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements Packaging/Current.entitlements --sign "$SIGNING_IDENTITY" "$STAGE_APP"
 codesign --verify --deep --strict --verbose=2 "$STAGE_APP"
 

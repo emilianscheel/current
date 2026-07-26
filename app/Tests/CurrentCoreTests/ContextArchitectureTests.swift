@@ -454,18 +454,19 @@ private actor StubIntelligence:
 }
 
 @MainActor
-@Test func screenshotIntervalIgnoresTheObsoleteFrameRateSetting() {
+@Test func fixedBackgroundPolicyIgnoresObsoleteCaptureSettings() {
     let suiteName = "CurrentContextSettings.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
     defaults.set(4.0, forKey: "contextCaptureFramesPerSecond")
+    defaults.set(1.0, forKey: "contextScreenshotIntervalSeconds")
 
-    let settings = SettingsStore(defaults: defaults)
-    #expect(settings.contextScreenshotIntervalSeconds == 30)
-
-    settings.contextScreenshotIntervalSeconds = 45
-    let restored = SettingsStore(defaults: defaults)
-    #expect(restored.contextScreenshotIntervalSeconds == 45)
+    _ = SettingsStore(defaults: defaults)
+    let policy = ContextBackgroundPolicy()
+    #expect(policy.recencyInterval == 300)
+    #expect(policy.normalRefreshDelay == 30)
+    #expect(policy.interJobSpacing == 10)
+    #expect(policy.userIdleDelay == 2)
 }
 
 @MainActor
@@ -541,4 +542,128 @@ private actor StubIntelligence:
     context?.fill(CGRect(x: 45, y: 0, width: 45, height: 80))
     let image = context?.makeImage()
     #expect(image.flatMap(PerceptualImageHasher.hash) != nil)
+}
+
+@Test func recentApplicationLedgerSpacesJobsAndUsesRoundRobinFairness() {
+    let start = Date(timeIntervalSince1970: 1_000)
+    var ledger = RecentApplicationLedger()
+    let first = ContextCaptureTarget(
+        processIdentifier: 1_001,
+        bundleIdentifier: "example.first",
+        applicationName: "First"
+    )
+    let second = ContextCaptureTarget(
+        processIdentifier: 1_002,
+        bundleIdentifier: "example.second",
+        applicationName: "Second"
+    )
+    let acceptedFirst = ledger.record(.init(
+        target: first,
+        kind: .activation,
+        occurredAt: start
+    ))
+    let acceptedSecond = ledger.record(.init(
+        target: second,
+        kind: .activation,
+        occurredAt: start
+    ))
+    #expect(acceptedFirst)
+    #expect(acceptedSecond)
+    #expect(ledger.nextEligible(at: start.addingTimeInterval(29)) == nil)
+    #expect(
+        ledger.nextEligible(at: start.addingTimeInterval(30))?
+            .target.processIdentifier == first.processIdentifier
+    )
+    ledger.markCompleted(
+        processIdentifier: first.processIdentifier,
+        at: start.addingTimeInterval(30)
+    )
+    #expect(ledger.nextEligible(at: start.addingTimeInterval(39.9)) == nil)
+    #expect(
+        ledger.nextEligible(at: start.addingTimeInterval(40))?
+            .target.processIdentifier == second.processIdentifier
+    )
+}
+
+@Test func recentApplicationLedgerResetsTypingDebounceAndExpiresApps() {
+    let start = Date(timeIntervalSince1970: 2_000)
+    var ledger = RecentApplicationLedger()
+    let target = ContextCaptureTarget(
+        processIdentifier: 2_001,
+        bundleIdentifier: "example.editor",
+        applicationName: "Editor"
+    )
+    let acceptedFirst = ledger.record(.init(
+        target: target,
+        kind: .typingSettled,
+        occurredAt: start
+    ))
+    let acceptedSecond = ledger.record(.init(
+        target: target,
+        kind: .typingSettled,
+        occurredAt: start.addingTimeInterval(2)
+    ))
+    #expect(acceptedFirst)
+    #expect(acceptedSecond)
+    #expect(ledger.nextEligible(at: start.addingTimeInterval(4.9)) == nil)
+    #expect(ledger.nextEligible(at: start.addingTimeInterval(5)) != nil)
+    ledger.expire(at: start.addingTimeInterval(5 * 60 + 2.1))
+    #expect(ledger.entries.isEmpty)
+}
+
+@Test func recentApplicationLedgerIsBoundedAndRejectsSystemApps() {
+    var ledger = RecentApplicationLedger()
+    let start = Date(timeIntervalSince1970: 3_000)
+    for index in 0..<13 {
+        _ = ledger.record(.init(
+            target: .init(
+                processIdentifier: pid_t(3_000 + index),
+                bundleIdentifier: "example.\(index)",
+                applicationName: "App \(index)"
+            ),
+            kind: .activation,
+            occurredAt: start.addingTimeInterval(Double(index))
+        ))
+    }
+    #expect(ledger.entries.count == 12)
+    for (offset, bundleIdentifier) in [
+        "local.Current",
+        "com.apple.dock",
+        "com.apple.controlcenter",
+        "com.apple.systemuiserver",
+        "local.Current.ContextWorker",
+    ].enumerated() {
+        let accepted = ledger.record(.init(
+            target: .init(
+                processIdentifier: pid_t(4_000 + offset),
+                bundleIdentifier: bundleIdentifier,
+                applicationName: "Excluded"
+            ),
+            kind: .activation,
+            occurredAt: start
+        ))
+        #expect(!accepted)
+    }
+}
+
+@Test func contextWorkerImagePayloadEnforcesBounds() throws {
+    let valid = try ContextWorkerImagePayload(
+        bgraData: Data(repeating: 0, count: 4 * 3 * 2),
+        width: 3,
+        height: 2,
+        bytesPerRow: 12
+    )
+    #expect(valid.bgraData.count == 24)
+    var rejected = false
+    do {
+        _ = try ContextWorkerImagePayload(
+            bgraData: Data(repeating: 0, count: 4),
+            width: 3,
+            height: 2,
+            bytesPerRow: 12
+        )
+    } catch {
+        rejected = true
+    }
+    #expect(rejected)
 }

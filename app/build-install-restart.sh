@@ -61,6 +61,7 @@ fi
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
 ICONSET="$PROJECT_DIR/.build/AppIcon.iconset"
 XCODE_DERIVED_DATA="$PROJECT_DIR/.build/xcode-derived"
+BUILD_VERSION="${APP_VERSION:-$(date -u +%Y%m%d%H%M%S)}"
 typeset -a CODESIGN_KEYCHAIN_ARGS
 export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache"
@@ -158,8 +159,10 @@ mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Helpers" "$STAGE_APP/C
 cp Packaging/Info.plist "$STAGE_APP/Contents/Info.plist"
 if [[ -n "$APP_VERSION" ]]; then
   plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
-  plutil -replace CFBundleVersion -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
 fi
+# Finder caches an app's icon by bundle identifier, path, and build version. Local
+# installs reuse the first two, so every assembled bundle needs a fresh version.
+plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$STAGE_APP/Contents/Info.plist"
 cp "$BIN_DIR/Current" "$STAGE_APP/Contents/MacOS/Current"
 cp "$BIN_DIR/CurrentRelauncher" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
 cp "$PROJECT_DIR/.build/AppIcon.icns" "$STAGE_APP/Contents/Resources/AppIcon.icns"
@@ -188,6 +191,10 @@ if [[ -e "$PREVIOUS_APP" ]]; then rm -rf "$PREVIOUS_APP"; fi
 if [[ -e "$INSTALL_APP" ]]; then mv "$INSTALL_APP" "$PREVIOUS_APP"; fi
 mv "$STAGE_APP" "$INSTALL_APP"
 codesign --verify --deep --strict --verbose=2 "$INSTALL_APP"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$INSTALL_APP" >/dev/null 2>&1 || true
+fi
 open -n "$INSTALL_APP"
 print "Installed and launched $INSTALL_APP"
 print "Permissions persist while the signing identity, bundle identifier, and install path remain unchanged."

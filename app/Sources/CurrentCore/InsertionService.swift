@@ -114,6 +114,10 @@ public final class InsertionService {
             processIdentifier: application.processIdentifier,
             bundleIdentifier: application.bundleIdentifier,
             applicationName: application.localizedName,
+            windowIdentifier: Self.windowIdentifier(
+                processIdentifier: application.processIdentifier,
+                title: currentContext.windowTitle
+            ),
             windowTitle: currentContext.windowTitle
         )
     }
@@ -124,16 +128,42 @@ public final class InsertionService {
         guard let application = NSWorkspace.shared.frontmostApplication else {
             return nil
         }
+        let title = includeWindowTitle
+            ? focusedWindowTitle(
+                processIdentifier: application.processIdentifier
+            )
+            : nil
         return ContextCaptureTarget(
             processIdentifier: application.processIdentifier,
             bundleIdentifier: application.bundleIdentifier,
             applicationName: application.localizedName ?? "Application",
-            windowTitle: includeWindowTitle
-                ? focusedWindowTitle(
-                    processIdentifier: application.processIdentifier
-                )
-                : nil
+            windowIdentifier: windowIdentifier(
+                processIdentifier: application.processIdentifier,
+                title: title
+            ),
+            windowTitle: title
         )
+    }
+
+    private nonisolated static func windowIdentifier(
+        processIdentifier: pid_t,
+        title: String?
+    ) -> UInt32? {
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        let candidates = windows.filter { window in
+            (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                == processIdentifier
+                && (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+        }
+        let match = title.flatMap { expected in
+            candidates.first {
+                ($0[kCGWindowName as String] as? String) == expected
+            }
+        } ?? candidates.first
+        return (match?[kCGWindowNumber as String] as? NSNumber)?.uint32Value
     }
 
     public var canUndoLastInsertion: Bool {

@@ -12,7 +12,7 @@ public enum DictationDestination: String, Codable, Sendable, CaseIterable {
     case generic
 }
 
-public struct DictationContext: Sendable, Equatable {
+public struct DictationContext: Codable, Sendable, Equatable {
     public static let maximumNearbyCharacters = 1_200
     public static let maximumSelectionCharacters = 6_000
 

@@ -29,7 +29,7 @@ final class AppRuntime {
     let model = ModelManager()
     let contextWorker = ContextWorkerClient()
     let contextStore = ContextStore()
-    let intelligence = AppleFoundationModelProvider()
+    let appleIntelligence = AppleFoundationModelProvider()
     @ObservationIgnored lazy var contextModel = GemmaContextModelManager(
         worker: contextWorker
     )
@@ -42,11 +42,26 @@ final class AppRuntime {
         ocr: XPCVisionOCRProvider(client: contextWorker),
         worker: contextWorker
     )
+    @ObservationIgnored lazy var promptContextPreparer =
+        LivePromptContextPreparer(
+            repository: contextRepository,
+            screenContext: screenContext
+        )
+    @ObservationIgnored lazy var intelligence = HybridLocalIntelligenceProvider(
+        primary: appleIntelligence,
+        fallback: XPCGemmaPromptProvider(client: contextWorker)
+    )
+    @ObservationIgnored lazy var intentRouter = HybridVoiceIntentRouter(
+        primary: AppleVoiceIntentRouter(),
+        fallback: GemmaVoiceIntentRouter(client: contextWorker)
+    )
     @ObservationIgnored lazy var coordinator = VoiceInteractionCoordinator(
         settings: settings,
         model: model,
         intelligence: intelligence,
-        contextRepository: contextRepository
+        intentRouter: intentRouter,
+        contextRepository: contextRepository,
+        promptContextPreparer: promptContextPreparer
     )
     let hardware = HardwareChecker().current()
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
@@ -216,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await runtime.screenContext.stop()
             runtime.coordinator.stopMonitoring()
+            await runtime.contextWorker.unload(force: true)
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

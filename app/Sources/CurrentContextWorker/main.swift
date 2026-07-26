@@ -7,8 +7,19 @@ private final class ContextWorkerService: NSObject,
     ContextWorkerXPCProtocol, @unchecked Sendable {
     private final class ReplyBox: @unchecked Sendable {
         let callback: (Data?, String?) -> Void
+        private let lock = NSLock()
+        private var didReply = false
         init(_ callback: @escaping (Data?, String?) -> Void) {
             self.callback = callback
+        }
+
+        func send(_ data: Data?, _ error: String?) {
+            let shouldSend = lock.withLock {
+                guard !didReply else { return false }
+                didReply = true
+                return true
+            }
+            if shouldSend { callback(data, error) }
         }
     }
 
@@ -28,7 +39,13 @@ private final class ContextWorkerService: NSObject,
     }()
     private let lock = NSLock()
     private let gemma = GemmaWorkerInferenceEngine()
-    private var currentTask: Task<Void, Never>?
+    private struct PendingJob {
+        let priority: ContextWorkerRequestPriority
+        let operation: Operation
+        let reply: ReplyBox
+    }
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var jobs: [UUID: PendingJob] = [:]
 
     func handshake(withReply reply: @escaping (Int) -> Void) {
         reply(ContextWorkerProtocolVersion.current)
@@ -38,15 +55,23 @@ private final class ContextWorkerService: NSObject,
         _ requestData: Data,
         withReply reply: @escaping (Data?, String?) -> Void
     ) {
-        enqueue(reply: ReplyBox(reply)) {
+        do {
             let request = try JSONDecoder().decode(
                 ContextWorkerOCRRequest.self,
                 from: requestData
             )
+            enqueue(
+                requestID: request.requestID,
+                priority: request.priority,
+                reply: ReplyBox(reply)
+            ) {
             let image = try Self.image(from: request.image)
             defer { _ = image }
             let blocks = try Self.recognizeText(in: image)
             return try JSONEncoder().encode(blocks)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
         }
     }
 
@@ -54,11 +79,16 @@ private final class ContextWorkerService: NSObject,
         _ requestData: Data,
         withReply reply: @escaping (Data?, String?) -> Void
     ) {
-        enqueue(reply: ReplyBox(reply)) { [gemma] in
+        do {
             let request = try JSONDecoder().decode(
                 ContextWorkerStructureRequest.self,
                 from: requestData
             )
+            enqueue(
+                requestID: request.requestID,
+                priority: request.priority,
+                reply: ReplyBox(reply)
+            ) { [gemma] in
             let snapshot = URL(fileURLWithPath: request.modelSnapshotPath)
             try await gemma.load(snapshot: snapshot)
             try Task.checkCancellation()
@@ -67,15 +97,111 @@ private final class ContextWorkerService: NSObject,
                 observations: request.observations
             )
             return try JSONEncoder().encode(update)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
         }
     }
 
-    func cancelAll(withReply reply: @escaping () -> Void) {
-        queue.cancelAllOperations()
-        lock.withLock {
-            currentTask?.cancel()
-            currentTask = nil
+    func generatePrompt(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    ) {
+        do {
+            let request = try JSONDecoder().decode(
+                ContextWorkerPromptRequest.self,
+                from: requestData
+            )
+            enqueue(
+                requestID: request.requestID,
+                priority: request.priority,
+                reply: ReplyBox(reply)
+            ) { [gemma] in
+                let snapshot = URL(fileURLWithPath: request.modelSnapshotPath)
+                try await gemma.load(snapshot: snapshot)
+                try Task.checkCancellation()
+                let response = try await gemma.generatePrompt(
+                    envelope: request.envelope
+                )
+                return try JSONEncoder().encode(response)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
         }
+    }
+
+    func prepareIntentModel(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    ) {
+        do {
+            let request = try JSONDecoder().decode(
+                ContextWorkerModelPreparationRequest.self,
+                from: requestData
+            )
+            enqueue(
+                requestID: request.requestID,
+                priority: request.priority,
+                reply: ReplyBox(reply)
+            ) { [gemma] in
+                try await gemma.load(
+                    snapshot: URL(fileURLWithPath: request.modelSnapshotPath)
+                )
+                return try JSONEncoder().encode(true)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
+        }
+    }
+
+    func classifyIntent(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    ) {
+        do {
+            let request = try JSONDecoder().decode(
+                ContextWorkerIntentRequest.self,
+                from: requestData
+            )
+            enqueue(
+                requestID: request.requestID,
+                priority: request.priority,
+                reply: ReplyBox(reply)
+            ) { [gemma] in
+                try await gemma.load(
+                    snapshot: URL(fileURLWithPath: request.modelSnapshotPath)
+                )
+                try Task.checkCancellation()
+                let decision = try await gemma.classifyIntent(
+                    request: request.routingRequest
+                )
+                return try JSONEncoder().encode(decision)
+            }
+        } catch {
+            reply(nil, error.localizedDescription)
+        }
+    }
+
+    func cancelRequest(
+        _ requestData: Data,
+        withReply reply: @escaping () -> Void
+    ) {
+        if let request = try? JSONDecoder().decode(
+            ContextWorkerCancellationRequest.self,
+            from: requestData
+        ) {
+            cancelJobs { $0 == request.requestID }
+        }
+        reply()
+    }
+
+    func cancelBackgroundWork(withReply reply: @escaping () -> Void) {
+        cancelBackgroundJobs()
+        reply()
+    }
+
+    func cancelAll(withReply reply: @escaping () -> Void) {
+        cancelJobs { _ in true }
         reply()
     }
 
@@ -86,33 +212,89 @@ private final class ContextWorkerService: NSObject,
             await gemma.unload()
             reply.callback()
         }
-        lock.withLock { currentTask = task }
+        lock.withLock { tasks[UUID()] = task }
     }
 
     private func enqueue(
+        requestID: UUID,
+        priority: ContextWorkerRequestPriority,
         reply: ReplyBox,
         operation: @escaping @Sendable () async throws -> Data
     ) {
-        queue.addOperation { [weak self] in
+        if priority != .background {
+            cancelBackgroundJobs()
+        }
+        let queued = BlockOperation { [weak self] in
             guard let self else {
-                reply.callback(nil, "The context worker operation was cancelled.")
+                reply.send(nil, "The context worker operation was cancelled.")
                 return
             }
             let semaphore = DispatchSemaphore(value: 0)
-            let task = Task(priority: .background) {
+            let task = Task(
+                priority: priority == .background
+                    ? .background : .userInitiated
+            ) {
                 defer { semaphore.signal() }
                 do {
                     let result = try await operation()
                     try Task.checkCancellation()
-                    reply.callback(result, nil)
+                    reply.send(result, nil)
                 } catch {
-                    reply.callback(nil, error.localizedDescription)
+                    reply.send(nil, error.localizedDescription)
                 }
             }
-            lock.withLock { currentTask = task }
+            lock.withLock { tasks[requestID] = task }
             semaphore.wait()
-            lock.withLock { currentTask = nil }
+            lock.withLock {
+                tasks.removeValue(forKey: requestID)
+                jobs.removeValue(forKey: requestID)
+            }
         }
+        switch priority {
+        case .background:
+            queued.queuePriority = .low
+            queued.qualityOfService = .background
+        case .interactive:
+            queued.queuePriority = .high
+            queued.qualityOfService = .userInitiated
+        case .voiceRouting:
+            queued.queuePriority = .veryHigh
+            queued.qualityOfService = .userInitiated
+        }
+        lock.withLock {
+            jobs[requestID] = PendingJob(
+                priority: priority,
+                operation: queued,
+                reply: reply
+            )
+        }
+        queue.addOperation(queued)
+    }
+
+    private func cancelJobs(where shouldCancel: (UUID) -> Bool) {
+        let cancelled: [(Operation, ReplyBox, Task<Void, Never>?)] = lock.withLock {
+            let ids = jobs.keys.filter(shouldCancel)
+            let values = ids.compactMap { id -> (Operation, ReplyBox, Task<Void, Never>?)? in
+                guard let job = jobs.removeValue(forKey: id) else { return nil }
+                return (job.operation, job.reply, tasks.removeValue(forKey: id))
+            }
+            return values
+        }
+        for (operation, reply, task) in cancelled {
+            operation.cancel()
+            task?.cancel()
+            reply.send(nil, "The context worker operation was cancelled.")
+        }
+    }
+
+    private func cancelBackgroundJobs() {
+        let identifiers = lock.withLock {
+            jobs.compactMap { key, value in
+                value.priority == .background ? key : nil
+            }
+        }
+        let selected = Set(identifiers)
+        cancelJobs { selected.contains($0) }
     }
 
     private static func image(

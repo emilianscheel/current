@@ -1,7 +1,8 @@
 import Foundation
 
 public enum DictationPhase: String, Sendable, Codable, CaseIterable {
-    case idle, armed, recording, transcribing, classifying, generating, inserting
+    case idle, armed, recording, transcribing, classifying, gatheringContext
+    case generating, inserting
     case success, cancelled, error, paused
 
     public var displayName: String {
@@ -11,6 +12,7 @@ public enum DictationPhase: String, Sendable, Codable, CaseIterable {
         case .recording: "Listening…"
         case .transcribing: "Transcribing…"
         case .classifying: "Understanding…"
+        case .gatheringContext: "Reading context…"
         case .generating: "Writing…"
         case .inserting: "Inserting…"
         case .success: "Inserted"
@@ -42,7 +44,9 @@ public enum CurrentError: LocalizedError, Sendable, Equatable {
     case recordingTooShort
     case modelUnavailable(String)
     case transcriptionFailed(String)
+    case intentClassificationFailed(String)
     case promptGenerationFailed(String)
+    case insufficientPromptContext
     case insertionFailed(String)
     case cancelled
 
@@ -54,7 +58,10 @@ public enum CurrentError: LocalizedError, Sendable, Equatable {
         case .recordingTooShort: "Keep holding fn while you speak."
         case .modelUnavailable(let reason): "A local model is unavailable: \(reason)"
         case .transcriptionFailed(let reason): "Transcription failed: \(reason)"
+        case .intentClassificationFailed(let reason):
+            "Could not determine whether to dictate or follow an instruction: \(reason)"
         case .promptGenerationFailed(let reason): "Prompt generation failed: \(reason)"
+        case .insufficientPromptContext: "Not enough context to generate this safely."
         case .insertionFailed(let reason): "Text was copied because insertion failed: \(reason)"
         case .cancelled: "Dictation was cancelled."
         }

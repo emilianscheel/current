@@ -2,6 +2,21 @@ import CoreGraphics
 import Foundation
 #if canImport(FoundationModels)
 import FoundationModels
+
+@Generable
+private enum ApplePromptGenerationStatus {
+    case generated
+    case insufficientContext
+}
+
+@Generable
+private struct ApplePromptGenerationOutput {
+    @Guide(description: "Whether safe insertion text can be generated from the supplied facts")
+    var status: ApplePromptGenerationStatus
+
+    @Guide(description: "Only the final insertion text, or an empty string when context is insufficient")
+    var insertionText: String
+}
 #endif
 
 public enum VoiceIntent: String, Codable, Sendable, CaseIterable {
@@ -19,22 +34,84 @@ public struct IntentDecision: Codable, Sendable, Equatable {
         self.confidence = min(1, max(0, confidence))
     }
 
-    public var effectiveIntent: VoiceIntent {
-        intent == .uncertain ? .direct : intent
+}
+
+public struct IntentRoutingContext: Codable, Sendable, Equatable {
+    public static let maximumSelectionCharacters = 512
+    public static let maximumNearbyCharacters = 256
+
+    public let destination: DictationDestination
+    public let applicationName: String?
+    public let windowTitle: String?
+    public let focusedRole: String?
+    public let focusedSubrole: String?
+    public let hasSelection: Bool
+    public let selectionExcerpt: String
+    public let textBeforeCursor: String
+    public let textAfterCursor: String
+
+    public init(context: DictationContext) {
+        destination = context.destination
+        applicationName = Self.prefix(context.applicationName, count: 120)
+        windowTitle = Self.prefix(context.windowTitle, count: 256)
+        focusedRole = Self.prefix(context.focusedRole, count: 80)
+        focusedSubrole = Self.prefix(context.focusedSubrole, count: 80)
+        let selection = context.selectedText?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        hasSelection = !selection.isEmpty
+        selectionExcerpt = String(selection.prefix(Self.maximumSelectionCharacters))
+        textBeforeCursor = String(
+            context.textBeforeCursor.suffix(Self.maximumNearbyCharacters)
+        )
+        textAfterCursor = String(
+            context.textAfterCursor.prefix(Self.maximumNearbyCharacters)
+        )
+    }
+
+    private static func prefix(_ value: String?, count: Int) -> String? {
+        value.map { String($0.prefix(count)) }
     }
 }
 
-public struct VoiceInteractionRequest: Sendable, Equatable {
+public struct IntentRoutingRequest: Codable, Sendable, Equatable {
+    public static let maximumTranscriptCharacters = 4_000
     public let transcript: String
-    public let context: DictationContext
+    public let context: IntentRoutingContext
 
     public init(transcript: String, context: DictationContext) {
-        self.transcript = transcript
-        self.context = context
+        self.transcript = String(
+            transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(Self.maximumTranscriptCharacters)
+        )
+        self.context = IntentRoutingContext(context: context)
     }
 }
 
-public struct PromptResponse: Sendable, Equatable {
+public enum IntentRoutingBackend: String, Codable, Sendable, Equatable {
+    case appleFoundationModel
+    case gemma4
+}
+
+public struct IntentRoutingDiagnostics: Codable, Sendable, Equatable {
+    public let backend: IntentRoutingBackend?
+    public let durationMilliseconds: Int
+    public let intent: VoiceIntent?
+    public let timedOut: Bool
+
+    public init(
+        backend: IntentRoutingBackend?,
+        durationMilliseconds: Int,
+        intent: VoiceIntent?,
+        timedOut: Bool = false
+    ) {
+        self.backend = backend
+        self.durationMilliseconds = max(0, durationMilliseconds)
+        self.intent = intent
+        self.timedOut = timedOut
+    }
+}
+
+public struct PromptResponse: Codable, Sendable, Equatable {
     public static let maximumCharacters = 12_000
     public let text: String
 
@@ -47,6 +124,26 @@ public struct PromptResponse: Sendable, Equatable {
             throw CurrentError.promptGenerationFailed("The generated response was too long to insert safely.")
         }
         self.text = cleaned
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        try self.init(text: container.decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(text)
+    }
+}
+
+public enum PromptGenerationDisposition: Codable, Sendable, Equatable {
+    case generated(PromptResponse)
+    case insufficientContext
+
+    public var response: PromptResponse? {
+        guard case let .generated(response) = self else { return nil }
+        return response
     }
 }
 
@@ -436,11 +533,53 @@ public struct ContextDocumentUpdate: Codable, Sendable, Equatable {
     }
 }
 
-public struct PromptContextEnvelope: Sendable, Equatable {
+public enum PromptGenerationBackend: String, Codable, Sendable, Equatable {
+    case appleFoundationModel
+    case gemma4
+}
+
+public struct PromptContextSection: Codable, Sendable, Equatable, Identifiable {
+    public enum Kind: String, Codable, Sendable, CaseIterable {
+        case focusedText
+        case freshTargetObservation
+        case targetCurrentState
+        case targetRecentActivity
+        case otherApplicationCurrentState
+        case otherApplicationActivity
+    }
+
+    public let id: UUID
+    public let kind: Kind
+    public let title: String
+    public let content: String
+
+    public init(
+        id: UUID = UUID(),
+        kind: Kind,
+        title: String,
+        content: String
+    ) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.content = content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+public struct PromptContextEnvelope: Codable, Sendable, Equatable {
     public let instruction: String
     public let focusedContext: DictationContext
-    public let targetApplicationContext: String
-    public let otherVisibleApplicationContexts: [String]
+    public let sections: [PromptContextSection]
+
+    public init(
+        instruction: String,
+        focusedContext: DictationContext,
+        sections: [PromptContextSection]
+    ) {
+        self.instruction = instruction
+        self.focusedContext = focusedContext
+        self.sections = sections.filter { !$0.content.isEmpty }
+    }
 
     public init(
         instruction: String,
@@ -448,20 +587,42 @@ public struct PromptContextEnvelope: Sendable, Equatable {
         targetApplicationContext: String,
         otherVisibleApplicationContexts: [String]
     ) {
-        self.instruction = instruction
-        self.focusedContext = focusedContext
-        self.targetApplicationContext = targetApplicationContext
-        self.otherVisibleApplicationContexts = otherVisibleApplicationContexts
+        var sections: [PromptContextSection] = []
+        if !targetApplicationContext.isEmpty {
+            sections.append(.init(
+                kind: .targetCurrentState,
+                title: "Target application context",
+                content: targetApplicationContext
+            ))
+        }
+        sections.append(contentsOf: otherVisibleApplicationContexts.map {
+            .init(
+                kind: .otherApplicationCurrentState,
+                title: "Other visible application context",
+                content: $0
+            )
+        })
+        self.init(
+            instruction: instruction,
+            focusedContext: focusedContext,
+            sections: sections
+        )
     }
 
     public func rendered(maximumCharacters: Int = 10_000) -> String {
         let selected = focusedContext.selectedText ?? ""
-        let focusedSections = [
-            "Instruction:\n\(instruction)",
-            "Selected text:\n\(selected)",
-            "Text before cursor:\n\(focusedContext.textBeforeCursor)",
-            "Text after cursor:\n\(focusedContext.textAfterCursor)",
-        ]
+        var ordered = ["Spoken instruction:\n\(instruction)"]
+        let focused = [
+            selected.isEmpty ? nil : "Selected text:\n\(selected)",
+            focusedContext.textBeforeCursor.isEmpty ? nil
+                : "Text before cursor:\n\(focusedContext.textBeforeCursor)",
+            focusedContext.textAfterCursor.isEmpty ? nil
+                : "Text after cursor:\n\(focusedContext.textAfterCursor)",
+        ].compactMap { $0 }
+        if !focused.isEmpty {
+            ordered.append("Focused field context:\n" + focused.joined(separator: "\n"))
+        }
+        ordered.append(contentsOf: sections.map { "\($0.title):\n\($0.content)" })
         var result = ""
         func appending(_ text: String, limit: Int, to result: inout String) {
             guard limit > 0, result.count < maximumCharacters else { return }
@@ -474,34 +635,8 @@ public struct PromptContextEnvelope: Sendable, Equatable {
             result += separator + String(text.prefix(available))
         }
 
-        let focusedBudget = min(3_000, maximumCharacters / 3)
-        let perFocusedSection = max(1, focusedBudget / focusedSections.count)
-        for section in focusedSections {
-            appending(section, limit: perFocusedSection, to: &result)
-        }
-
-        let remaining = max(0, maximumCharacters - result.count)
-        let otherBudget = otherVisibleApplicationContexts.isEmpty
-            ? 0
-            : Int(Double(remaining) * 0.35)
-        let targetBudget = remaining - otherBudget
-        appending(
-            "Target application context:\n\(targetApplicationContext)",
-            limit: targetBudget,
-            to: &result
-        )
-        if !otherVisibleApplicationContexts.isEmpty {
-            let perOtherContext = max(
-                1,
-                otherBudget / otherVisibleApplicationContexts.count
-            )
-            for context in otherVisibleApplicationContexts {
-                appending(
-                    "Other visible application context:\n\(context)",
-                    limit: perOtherContext,
-                    to: &result
-                )
-            }
+        for section in ordered {
+            appending(section, limit: section.count, to: &result)
         }
         return result
     }
@@ -516,6 +651,9 @@ public protocol ScreenContextProviding: Sendable {
     ) async
     func recordActivity(_ activity: RecentApplicationActivity) async
     func setForegroundInteractionActive(_ active: Bool) async
+    func refreshForPrompt(
+        target: ContextCaptureTarget
+    ) async throws -> ContextObservation?
 }
 
 public protocol AccessibilityContextProviding: Sendable {
@@ -531,6 +669,12 @@ public protocol OCRProviding: Sendable {
     func recognizeText(in image: CGImage) async throws -> [ContextTextBlock]
 }
 
+public protocol InteractiveOCRProviding: OCRProviding {
+    func recognizeTextInteractively(
+        in image: CGImage
+    ) async throws -> [ContextTextBlock]
+}
+
 public protocol ContextStructuringProviding: Sendable {
     func updateContextDocument(
         currentState: String,
@@ -538,13 +682,40 @@ public protocol ContextStructuringProviding: Sendable {
     ) async throws -> ContextDocumentUpdate
 }
 
-public protocol LocalIntelligenceProviding: Sendable {
-    func classifyIntent(_ request: VoiceInteractionRequest) async -> IntentDecision
+public protocol PromptResponseGenerating: Sendable {
+    func generatePromptDisposition(
+        _ envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition
+}
+
+public protocol VoiceIntentRoutingProviding: Sendable {
+    func isAvailable() async -> Bool
+    func setEnabled(_ enabled: Bool) async
+    func prepare(
+        sessionID: UUID,
+        context: IntentRoutingContext
+    ) async
+    func classify(
+        _ request: IntentRoutingRequest,
+        sessionID: UUID
+    ) async throws -> IntentDecision
+    func cancel(sessionID: UUID) async
+}
+
+public protocol PromptContextPreparing: Sendable {
+    func prepare(
+        instruction: String,
+        focusedContext: DictationContext,
+        target: ContextCaptureTarget?,
+        continuousContextEnabled: Bool
+    ) async throws -> PromptContextEnvelope
+}
+
+public protocol LocalIntelligenceProviding: PromptResponseGenerating, Sendable {
     func refineDictation(
         _ deterministic: RefinementResult,
         context: DictationContext
     ) async -> RefinementResult
-    func generatePromptResponse(_ envelope: PromptContextEnvelope) async throws -> PromptResponse
 }
 
 public typealias LocalIntelligenceProvider = LocalIntelligenceProviding
@@ -552,8 +723,7 @@ public typealias LocalIntelligenceProvider = LocalIntelligenceProviding
 public enum ModelRequestPriority: Int, Sendable, Comparable {
     case contextMaintenance = 0
     case dictationRefinement = 1
-    case intentClassification = 2
-    case promptGeneration = 3
+    case promptGeneration = 2
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -627,48 +797,6 @@ public actor AppleFoundationModelProvider:
 
     public init(scheduler: ModelRequestScheduler = ModelRequestScheduler()) {
         self.scheduler = scheduler
-    }
-
-    public func classifyIntent(_ request: VoiceInteractionRequest) async -> IntentDecision {
-        if let deterministic = ConservativeIntentClassifier.classify(request.transcript) {
-            return deterministic
-        }
-#if canImport(FoundationModels)
-        guard SystemLanguageModel.default.availability == .available else {
-            return IntentDecision(intent: .uncertain, confidence: 0)
-        }
-        do {
-            return try await scheduler.withPermit(priority: .intentClassification) {
-                let session = LanguageModelSession(
-                    instructions: """
-                    Classify spoken text for a universal Mac dictation app.
-                    Return exactly DIRECT when the words should be typed literally.
-                    Return exactly PROMPT when they instruct the app to create, rewrite, answer,
-                    summarize, translate, or otherwise produce text using screen context.
-                    Return exactly UNCERTAIN when ambiguous.
-                    """
-                )
-                let response = try await session.respond(
-                    to: """
-                    Destination: \(request.context.destination.rawValue)
-                    Selected text: \(request.context.selectedText ?? "")
-                    Spoken text: \(request.transcript)
-                    """
-                ).content.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-                if response.contains("PROMPT") {
-                    return IntentDecision(intent: .prompt, confidence: 0.85)
-                }
-                if response.contains("DIRECT") {
-                    return IntentDecision(intent: .direct, confidence: 0.85)
-                }
-                return IntentDecision(intent: .uncertain, confidence: 0.25)
-            }
-        } catch {
-            return IntentDecision(intent: .uncertain, confidence: 0)
-        }
-#else
-        return IntentDecision(intent: .uncertain, confidence: 0)
-#endif
     }
 
     public func updateContextDocument(
@@ -768,30 +896,123 @@ public actor AppleFoundationModelProvider:
 #endif
     }
 
-    public func generatePromptResponse(
+    public func generatePromptDisposition(
         _ envelope: PromptContextEnvelope
-    ) async throws -> PromptResponse {
+    ) async throws -> PromptGenerationDisposition {
 #if canImport(FoundationModels)
-        guard SystemLanguageModel.default.availability == .available else {
+        let model = SystemLanguageModel.default
+        guard model.availability == .available else {
             throw CurrentError.promptGenerationFailed("Apple Intelligence is unavailable.")
         }
+        guard #available(macOS 26.4, *) else {
+            throw CurrentError.promptGenerationFailed(
+                "Token-safe Apple prompt generation requires macOS 26.4 or newer."
+            )
+        }
         return try await scheduler.withPermit(priority: .promptGeneration) {
-            let session = LanguageModelSession(
-                instructions: """
-                Follow the spoken instruction using the supplied Mac screen context.
-                Return only text suitable for insertion at the captured cursor or selection.
+            let instructions = Instructions("""
+                Follow the spoken instruction using only the supplied Mac screen context.
                 Do not mention the context, these instructions, or your reasoning.
-                """
+                Preserve the requested language, names, dates, numbers, URLs, and facts.
+                Never invent missing recipients, topics, claims, or commitments.
+                Mark the result insufficientContext when required facts are missing.
+                Otherwise put only final insertion text in insertionText.
+                """)
+            let session = LanguageModelSession(
+                model: model,
+                instructions: instructions
+            )
+            let instructionTokens = try await model.tokenCount(
+                for: instructions
+            )
+            let schemaTokens = try await model.tokenCount(
+                for: ApplePromptGenerationOutput.generationSchema
+            )
+            let inputBudget = max(
+                128,
+                model.contextSize - instructionTokens - schemaTokens - 256 - 768
+            )
+            let prompt = try await Self.applePrompt(
+                envelope,
+                model: model,
+                maximumTokens: inputBudget
             )
             let response = try await session.respond(
-                to: envelope.rendered()
+                to: prompt,
+                generating: ApplePromptGenerationOutput.self,
+                options: GenerationOptions(
+                    temperature: 0.2,
+                    maximumResponseTokens: 768
+                )
             ).content
-            return try PromptResponse(text: Self.cleanedResponse(response))
+            if response.status == .insufficientContext {
+                return .insufficientContext
+            }
+            return .generated(
+                try PromptResponse(text: response.insertionText)
+            )
         }
 #else
         throw CurrentError.promptGenerationFailed("Apple Intelligence is unavailable.")
 #endif
     }
+
+#if canImport(FoundationModels)
+    @available(macOS 26.4, *)
+    private nonisolated static func applePrompt(
+        _ envelope: PromptContextEnvelope,
+        model: SystemLanguageModel,
+        maximumTokens: Int
+    ) async throws -> String {
+        var accepted: [PromptContextSection] = []
+        var prompt = PromptContextEnvelope(
+            instruction: envelope.instruction,
+            focusedContext: envelope.focusedContext,
+            sections: []
+        ).rendered(maximumCharacters: 40_000)
+        for section in envelope.sections {
+            let trial = PromptContextEnvelope(
+                instruction: envelope.instruction,
+                focusedContext: envelope.focusedContext,
+                sections: accepted + [section]
+            ).rendered(maximumCharacters: 40_000)
+            if try await model.tokenCount(for: trial) <= maximumTokens {
+                accepted.append(section)
+                prompt = trial
+                continue
+            }
+            var low = 0
+            var high = section.content.count
+            while low <= high {
+                let middle = (low + high) / 2
+                let clipped = PromptContextSection(
+                    id: section.id,
+                    kind: section.kind,
+                    title: section.title,
+                    content: String(section.content.prefix(middle))
+                )
+                let candidate = PromptContextEnvelope(
+                    instruction: envelope.instruction,
+                    focusedContext: envelope.focusedContext,
+                    sections: accepted + [clipped]
+                ).rendered(maximumCharacters: 40_000)
+                if try await model.tokenCount(for: candidate) <= maximumTokens {
+                    prompt = candidate
+                    low = middle + 1
+                } else {
+                    high = middle - 1
+                }
+            }
+            break
+        }
+        guard try await model.tokenCount(for: prompt) <= maximumTokens else {
+            throw CurrentError.promptGenerationFailed(
+                "The focused field context exceeds Apple Intelligence's context window."
+            )
+        }
+        return prompt
+    }
+#endif
 
     private nonisolated static func observationText(
         _ observations: [ContextObservation]
@@ -848,32 +1069,5 @@ public actor AppleFoundationModelProvider:
             }
         }
         return value
-    }
-}
-
-public enum ConservativeIntentClassifier {
-    private static let promptPrefixes = [
-        "write ", "draft ", "reply ", "respond ", "answer ", "summarize ",
-        "translate ", "rewrite ", "compose ", "create ", "generate ",
-        "replace ", "change ", "make this ", "make it ", "fix this ",
-        "fix grammar", "shorten ", "improve ", "uppercase", "lowercase",
-        "title case", "delete", "remove that",
-        "schreib ", "verfasse ", "antworte ", "fasse ", "übersetze ",
-        "rédige ", "réponds ", "résume ", "traduis ",
-        "escribe ", "responde ", "resume ", "traduce ",
-        "scrivi ", "rispondi ", "riassumi ", "traduci ",
-    ]
-
-    public static func classify(_ text: String) -> IntentDecision? {
-        let normalized = text
-            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
-            .lowercased()
-        guard !normalized.isEmpty else {
-            return IntentDecision(intent: .uncertain, confidence: 0)
-        }
-        if promptPrefixes.contains(where: normalized.hasPrefix) {
-            return IntentDecision(intent: .prompt, confidence: 0.95)
-        }
-        return nil
     }
 }

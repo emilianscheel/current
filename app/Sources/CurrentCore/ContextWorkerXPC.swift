@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 public enum ContextWorkerProtocolVersion {
-    public static let current = 1
+    public static let current = 3
     public static let serviceName = "local.Current.ContextWorker"
 }
 
@@ -16,17 +16,86 @@ public enum ContextWorkerProtocolVersion {
         _ requestData: Data,
         withReply reply: @escaping (Data?, String?) -> Void
     )
+    func generatePrompt(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    )
+    func prepareIntentModel(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    )
+    func classifyIntent(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?, String?) -> Void
+    )
+    func cancelRequest(_ requestData: Data, withReply reply: @escaping () -> Void)
+    func cancelBackgroundWork(withReply reply: @escaping () -> Void)
     func cancelAll(withReply reply: @escaping () -> Void)
     func unload(withReply reply: @escaping () -> Void)
+}
+
+public enum ContextWorkerRequestPriority: String, Codable, Sendable, Equatable {
+    case background
+    case interactive
+    case voiceRouting
+}
+
+public struct ContextWorkerModelPreparationRequest: Codable, Sendable {
+    public let requestID: UUID
+    public let modelSnapshotPath: String
+    public let priority: ContextWorkerRequestPriority
+
+    public init(
+        requestID: UUID = UUID(),
+        modelSnapshotPath: String,
+        priority: ContextWorkerRequestPriority = .voiceRouting
+    ) {
+        self.requestID = requestID
+        self.modelSnapshotPath = modelSnapshotPath
+        self.priority = priority
+    }
+}
+
+public struct ContextWorkerIntentRequest: Codable, Sendable {
+    public let requestID: UUID
+    public let modelSnapshotPath: String
+    public let routingRequest: IntentRoutingRequest
+    public let priority: ContextWorkerRequestPriority
+
+    public init(
+        requestID: UUID,
+        modelSnapshotPath: String,
+        routingRequest: IntentRoutingRequest,
+        priority: ContextWorkerRequestPriority = .voiceRouting
+    ) {
+        self.requestID = requestID
+        self.modelSnapshotPath = modelSnapshotPath
+        self.routingRequest = routingRequest
+        self.priority = priority
+    }
+}
+
+public struct ContextWorkerCancellationRequest: Codable, Sendable {
+    public let requestID: UUID
+
+    public init(requestID: UUID) {
+        self.requestID = requestID
+    }
 }
 
 public struct ContextWorkerOCRRequest: Codable, Sendable {
     public let requestID: UUID
     public let image: ContextWorkerImagePayload
+    public let priority: ContextWorkerRequestPriority
 
-    public init(requestID: UUID = UUID(), image: ContextWorkerImagePayload) {
+    public init(
+        requestID: UUID = UUID(),
+        image: ContextWorkerImagePayload,
+        priority: ContextWorkerRequestPriority = .background
+    ) {
         self.requestID = requestID
         self.image = image
+        self.priority = priority
     }
 }
 
@@ -35,17 +104,39 @@ public struct ContextWorkerStructureRequest: Codable, Sendable {
     public let modelSnapshotPath: String
     public let currentState: String
     public let observations: [ContextObservation]
+    public let priority: ContextWorkerRequestPriority
 
     public init(
         requestID: UUID = UUID(),
         modelSnapshotPath: String,
         currentState: String,
-        observations: [ContextObservation]
+        observations: [ContextObservation],
+        priority: ContextWorkerRequestPriority = .background
     ) {
         self.requestID = requestID
         self.modelSnapshotPath = modelSnapshotPath
         self.currentState = currentState
         self.observations = observations
+        self.priority = priority
+    }
+}
+
+public struct ContextWorkerPromptRequest: Codable, Sendable {
+    public let requestID: UUID
+    public let modelSnapshotPath: String
+    public let envelope: PromptContextEnvelope
+    public let priority: ContextWorkerRequestPriority
+
+    public init(
+        requestID: UUID = UUID(),
+        modelSnapshotPath: String,
+        envelope: PromptContextEnvelope,
+        priority: ContextWorkerRequestPriority = .interactive
+    ) {
+        self.requestID = requestID
+        self.modelSnapshotPath = modelSnapshotPath
+        self.envelope = envelope
+        self.priority = priority
     }
 }
 
@@ -56,18 +147,25 @@ public final class ContextWorkerClient: @unchecked Sendable {
     private var connection: NSXPCConnection?
     private var handshakeComplete = false
     private var consecutiveFailures = 0
+    private var retainsGemmaForIntentRouting = false
+    private var routingReleaseTask: Task<Void, Never>?
 
     public init() {}
 
     public func recognizeText(
-        image: ContextWorkerImagePayload
+        image: ContextWorkerImagePayload,
+        priority: ContextWorkerRequestPriority = .background
     ) async throws -> [ContextTextBlock] {
-        let payload = ContextWorkerOCRRequest(image: image)
+        let payload = ContextWorkerOCRRequest(
+            image: image,
+            priority: priority
+        )
         let response = try await request(
             method: { proxy, data, reply in
                 proxy.recognizeText(data, withReply: reply)
             },
-            payload: payload
+            payload: payload,
+            requestID: payload.requestID
         )
         return try JSONDecoder().decode(
             [ContextTextBlock].self,
@@ -89,12 +187,101 @@ public final class ContextWorkerClient: @unchecked Sendable {
             method: { proxy, data, reply in
                 proxy.structureContext(data, withReply: reply)
             },
-            payload: payload
+            payload: payload,
+            requestID: payload.requestID
         )
         return try JSONDecoder().decode(
             ContextDocumentUpdate.self,
             from: response
         )
+    }
+
+    public func generatePrompt(
+        snapshot: URL,
+        envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        let payload = ContextWorkerPromptRequest(
+            modelSnapshotPath: snapshot.path,
+            envelope: envelope
+        )
+        let response = try await request(
+            method: { proxy, data, reply in
+                proxy.generatePrompt(data, withReply: reply)
+            },
+            payload: payload,
+            requestID: payload.requestID
+        )
+        return try JSONDecoder().decode(
+            PromptGenerationDisposition.self,
+            from: response
+        )
+    }
+
+    public func setIntentRoutingEnabled(
+        _ enabled: Bool,
+        snapshot: URL
+    ) async throws {
+        let wasRetained = retainsGemmaForIntentRouting
+        retainsGemmaForIntentRouting = enabled
+        routingReleaseTask?.cancel()
+        routingReleaseTask = nil
+        guard enabled else {
+            if wasRetained {
+                routingReleaseTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(5 * 60))
+                    guard !Task.isCancelled else { return }
+                    await self?.unload()
+                }
+            }
+            return
+        }
+        let payload = ContextWorkerModelPreparationRequest(
+            modelSnapshotPath: snapshot.path
+        )
+        _ = try await request(
+            method: { proxy, data, reply in
+                proxy.prepareIntentModel(data, withReply: reply)
+            },
+            payload: payload,
+            requestID: payload.requestID
+        )
+    }
+
+    public func classifyIntent(
+        snapshot: URL,
+        request routingRequest: IntentRoutingRequest,
+        requestID: UUID
+    ) async throws -> IntentDecision {
+        let payload = ContextWorkerIntentRequest(
+            requestID: requestID,
+            modelSnapshotPath: snapshot.path,
+            routingRequest: routingRequest
+        )
+        let response = try await request(
+            method: { proxy, data, reply in
+                proxy.classifyIntent(data, withReply: reply)
+            },
+            payload: payload,
+            requestID: payload.requestID
+        )
+        return try JSONDecoder().decode(IntentDecision.self, from: response)
+    }
+
+    public func cancel(requestID: UUID) async {
+        guard connection != nil, let proxy = try? await proxy(),
+              let data = try? JSONEncoder().encode(
+                  ContextWorkerCancellationRequest(requestID: requestID)
+              ) else { return }
+        await withCheckedContinuation { continuation in
+            proxy.cancelRequest(data) { continuation.resume() }
+        }
+    }
+
+    public func cancelBackgroundWork() async {
+        guard connection != nil, let proxy = try? await proxy() else { return }
+        await withCheckedContinuation { continuation in
+            proxy.cancelBackgroundWork { continuation.resume() }
+        }
     }
 
     public func cancelAll() async {
@@ -107,7 +294,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
         }
     }
 
-    public func unload() async {
+    public func unload(force: Bool = false) async {
+        guard force || !retainsGemmaForIntentRouting else { return }
         guard connection != nil else { return }
         guard let proxy = try? await proxy() else {
             invalidate()
@@ -122,6 +310,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
     }
 
     public func invalidate() {
+        routingReleaseTask?.cancel()
+        routingReleaseTask = nil
         connection?.invalidationHandler = nil
         connection?.interruptionHandler = nil
         connection?.invalidate()
@@ -136,41 +326,53 @@ public final class ContextWorkerClient: @unchecked Sendable {
             Data,
             @escaping (Data?, String?) -> Void
         ) -> Void,
-        payload: Payload
+        payload: Payload,
+        requestID: UUID
     ) async throws -> Data {
         let encoded = try JSONEncoder().encode(payload)
-        var lastError: Error?
-        for attempt in 0..<2 {
-            do {
-                let proxy = try await proxy()
-                let result = try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<Data, Error>) in
-                    method(proxy, encoded) { data, errorMessage in
-                        if let data {
-                            continuation.resume(returning: data)
-                        } else {
-                            continuation.resume(
-                                throwing: CurrentError.modelUnavailable(
-                                    errorMessage
-                                        ?? "The context worker returned no data."
+        return try await withTaskCancellationHandler {
+            var lastError: Error?
+            for attempt in 0..<2 {
+                try Task.checkCancellation()
+                do {
+                    let proxy = try await proxy()
+                    let result = try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<Data, Error>) in
+                        method(proxy, encoded) { data, errorMessage in
+                            if let data {
+                                continuation.resume(returning: data)
+                            } else {
+                                continuation.resume(
+                                    throwing: CurrentError.modelUnavailable(
+                                        errorMessage
+                                            ?? "The context worker returned no data."
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
+                    try Task.checkCancellation()
+                    consecutiveFailures = 0
+                    return result
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if Task.isCancelled { throw CancellationError() }
+                    lastError = error
+                    invalidate()
+                    if attempt == 0 { continue }
                 }
-                consecutiveFailures = 0
-                return result
-            } catch {
-                lastError = error
-                invalidate()
-                if attempt == 0 { continue }
+            }
+            consecutiveFailures += 1
+            onStateChange?(.degraded)
+            throw lastError ?? CurrentError.modelUnavailable(
+                "The context worker is unavailable."
+            )
+        } onCancel: { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.cancel(requestID: requestID)
             }
         }
-        consecutiveFailures += 1
-        onStateChange?(.degraded)
-        throw lastError ?? CurrentError.modelUnavailable(
-            "The context worker is unavailable."
-        )
     }
 
     private func proxy() async throws -> ContextWorkerXPCProtocol {
@@ -224,7 +426,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
     }
 }
 
-public actor XPCVisionOCRProvider: OCRProviding {
+public actor XPCVisionOCRProvider: InteractiveOCRProviding {
     private let client: ContextWorkerClient
 
     public init(client: ContextWorkerClient) {
@@ -238,6 +440,89 @@ public actor XPCVisionOCRProvider: OCRProviding {
             try ContextWorkerImagePayload(image: image)
         }.value
         return try await client.recognizeText(image: payload)
+    }
+
+    public func recognizeTextInteractively(
+        in image: CGImage
+    ) async throws -> [ContextTextBlock] {
+        let payload = try await Task.detached(priority: .userInitiated) {
+            try ContextWorkerImagePayload(image: image)
+        }.value
+        return try await client.recognizeText(
+            image: payload,
+            priority: .interactive
+        )
+    }
+}
+
+public actor XPCGemmaPromptProvider: PromptResponseGenerating {
+    private let client: ContextWorkerClient
+    private let snapshot: URL
+
+    public init(
+        client: ContextWorkerClient,
+        snapshot: URL = GemmaModelLocations.current.snapshot
+    ) {
+        self.client = client
+        self.snapshot = snapshot
+    }
+
+    public func generatePromptDisposition(
+        _ envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        try await client.generatePrompt(snapshot: snapshot, envelope: envelope)
+    }
+}
+
+public actor GemmaVoiceIntentRouter: VoiceIntentRoutingProviding {
+    private let client: ContextWorkerClient
+    private let snapshot: URL
+    private var enabled = false
+
+    public init(
+        client: ContextWorkerClient,
+        snapshot: URL = GemmaModelLocations.current.snapshot
+    ) {
+        self.client = client
+        self.snapshot = snapshot
+    }
+
+    public func isAvailable() -> Bool {
+        GemmaModelValidator.isComplete()
+    }
+
+    public func setEnabled(_ enabled: Bool) async {
+        self.enabled = enabled
+        guard isAvailable() else { return }
+        try? await client.setIntentRoutingEnabled(enabled, snapshot: snapshot)
+    }
+
+    public func prepare(
+        sessionID: UUID,
+        context: IntentRoutingContext
+    ) async {
+        guard enabled || isAvailable() else { return }
+        try? await client.setIntentRoutingEnabled(true, snapshot: snapshot)
+    }
+
+    public func classify(
+        _ request: IntentRoutingRequest,
+        sessionID: UUID
+    ) async throws -> IntentDecision {
+        guard isAvailable() else {
+            throw CurrentError.modelUnavailable(
+                "Gemma intent routing is unavailable."
+            )
+        }
+        return try await client.classifyIntent(
+            snapshot: snapshot,
+            request: request,
+            requestID: sessionID
+        )
+    }
+
+    public func cancel(sessionID: UUID) async {
+        await client.cancel(requestID: sessionID)
     }
 }
 

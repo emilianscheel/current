@@ -18,13 +18,16 @@ public final class DictationCoordinator {
     public let shortcut: ShortcutMonitor
     public let vocabulary: LearnedVocabularyStore
     public let intelligence: any LocalIntelligenceProviding
+    public let intentRouter: any VoiceIntentRoutingProviding
     public let contextRepository: ContextRepository?
+    public let promptContextPreparer: (any PromptContextPreparing)?
     public var onPhaseChange: ((DictationPhase) -> Void)?
     public var onPartialTranscriptionChange: ((String) -> Void)?
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
     public var onTextCommitted: ((ContextCaptureTarget) -> Void)?
     public var onMonitoringChange: ((Bool) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
+    private var transcriptProcessingTask: Task<Void, Never>?
 
     public init(
         settings: SettingsStore = .shared,
@@ -34,7 +37,9 @@ public final class DictationCoordinator {
         shortcut: ShortcutMonitor = ShortcutMonitor(),
         vocabulary: LearnedVocabularyStore = LearnedVocabularyStore(),
         intelligence: any LocalIntelligenceProviding = AppleFoundationModelProvider(),
-        contextRepository: ContextRepository? = nil
+        intentRouter: any VoiceIntentRoutingProviding = AppleVoiceIntentRouter(),
+        contextRepository: ContextRepository? = nil,
+        promptContextPreparer: (any PromptContextPreparing)? = nil
     ) {
         self.settings = settings
         self.model = model
@@ -43,7 +48,9 @@ public final class DictationCoordinator {
         self.shortcut = shortcut
         self.vocabulary = vocabulary
         self.intelligence = intelligence
+        self.intentRouter = intentRouter
         self.contextRepository = contextRepository
+        self.promptContextPreparer = promptContextPreparer
         self.audio.selectedDeviceID = settings.inputDeviceID
         shortcut.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in self?.handleShortcut(event) }
@@ -60,6 +67,7 @@ public final class DictationCoordinator {
         shortcut.fallbackPreset = settings.fallbackShortcut
         do {
             try shortcut.start()
+            Task { await intentRouter.setEnabled(true) }
             setPhase(.idle)
             onMonitoringChange?(true)
         } catch {
@@ -72,6 +80,7 @@ public final class DictationCoordinator {
         cancel()
         setPhase(.paused)
         onMonitoringChange?(false)
+        Task { await intentRouter.setEnabled(false) }
     }
 
     public func toggleEnabled() {
@@ -130,12 +139,18 @@ public final class DictationCoordinator {
 
     public func cancel() {
         guard currentSession != nil else { return }
+        let sessionID = currentSession?.id
         maximumDurationTask?.cancel()
+        transcriptProcessingTask?.cancel()
+        transcriptProcessingTask = nil
         currentSession = nil
         audio.cancel()
         partialTranscription = ""
         onPartialTranscriptionChange?("")
         Task { await model.transcription.stopPartialTranscription() }
+        if let sessionID {
+            Task { await intentRouter.cancel(sessionID: sessionID) }
+        }
         insertion.clearTarget()
         setPhase(.cancelled)
         scheduleIdle()
@@ -168,6 +183,12 @@ public final class DictationCoordinator {
             let session = DictationSession()
             if phase != .armed { insertion.captureTarget() }
             currentSession = session
+            Task { [intentRouter, context = insertion.currentContext] in
+                await intentRouter.prepare(
+                    sessionID: session.id,
+                    context: IntentRoutingContext(context: context)
+                )
+            }
             try audio.start()
             let transcription = model.transcription
             audio.setSampleHandler { samples in
@@ -199,48 +220,68 @@ public final class DictationCoordinator {
         let samples = audio.stop()
         let minimumSamples = Int(settings.minimumRecordingDuration * 16_000)
         guard samples.count >= minimumSamples else {
-            currentSession = nil
-            insertion.clearTarget()
             fail(CurrentError.recordingTooShort)
             return
         }
         setPhase(.transcribing)
         let context = insertion.currentContext
+        let captureTarget = insertion.contextCaptureTarget
         let vocabularyEntries = vocabulary.entries
-        Task { [weak self, transcription = model.transcription] in
+        transcriptProcessingTask?.cancel()
+        transcriptProcessingTask = Task {
+            [weak self, transcription = model.transcription] in
             do {
                 await transcription.stopPartialTranscription()
                 let rawText = try await transcription.transcribe(samples)
                 guard let self, self.currentSession?.id == session.id else { return }
                 self.setPhase(.classifying)
-                let decision = await self.intelligence.classifyIntent(
-                    VoiceInteractionRequest(
+                let decision = try await self.intentRouter.classify(
+                    IntentRoutingRequest(
                         transcript: rawText,
                         context: context
-                    )
+                    ),
+                    sessionID: session.id
                 )
                 guard self.currentSession?.id == session.id else { return }
                 let text: String
-                if decision.effectiveIntent == .prompt {
-                    self.setPhase(.generating)
+                switch decision.intent {
+                case .prompt:
                     let envelope: PromptContextEnvelope
-                    if let contextRepository = self.contextRepository {
+                    self.setPhase(.gatheringContext)
+                    if let preparer = self.promptContextPreparer {
+                        envelope = try await preparer.prepare(
+                            instruction: rawText,
+                            focusedContext: context,
+                            target: captureTarget,
+                            continuousContextEnabled:
+                                self.settings.continuousContextEnabled
+                        )
+                    } else if self.settings.continuousContextEnabled,
+                              let contextRepository = self.contextRepository {
                         envelope = await contextRepository.promptContext(
                             instruction: rawText,
-                            focusedContext: context
+                            focusedContext: context,
+                            target: captureTarget
                         )
                     } else {
                         envelope = PromptContextEnvelope(
                             instruction: rawText,
                             focusedContext: context,
-                            targetApplicationContext: "",
-                            otherVisibleApplicationContexts: []
+                            sections: []
                         )
                     }
-                    text = try await self.intelligence
-                        .generatePromptResponse(envelope)
-                        .text
-                } else {
+                    try Task.checkCancellation()
+                    guard self.currentSession?.id == session.id else { return }
+                    self.setPhase(.generating)
+                    let disposition = try await self.intelligence
+                        .generatePromptDisposition(envelope)
+                    switch disposition {
+                    case let .generated(response):
+                        text = response.text
+                    case .insufficientContext:
+                        throw CurrentError.insufficientPromptContext
+                    }
+                case .direct:
                     let deterministic = DeterministicRefiner.refine(
                         rawText,
                         context: context,
@@ -251,9 +292,13 @@ public final class DictationCoordinator {
                         context: context
                     )
                     text = refinement.text
+                case .uncertain:
+                    throw CurrentError.intentClassificationFailed(
+                        "The local models were uncertain."
+                    )
                 }
                 guard self.currentSession?.id == session.id else { return }
-                if decision.effectiveIntent == .direct,
+                if decision.intent == .direct,
                    let selection = context.selectedText,
                    let learned = Self.learnedCorrection(
                        from: selection,
@@ -266,7 +311,6 @@ public final class DictationCoordinator {
                 }
                 self.setPhase(.inserting)
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
-                let captureTarget = self.insertion.contextCaptureTarget
                 let result = try await self.insertion.insert(
                     text,
                     context: context,
@@ -286,23 +330,31 @@ public final class DictationCoordinator {
                     self.onTextCommitted?(captureTarget)
                 }
                 self.currentSession = nil
+                self.transcriptProcessingTask = nil
                 if result == .copied { self.errorMessage = "Copied — paste manually." }
                 self.setPhase(result == .copied ? .error : .success)
                 self.scheduleIdle()
+            } catch is CancellationError {
+                return
             } catch {
                 guard let self, self.currentSession?.id == session.id else { return }
                 self.currentSession = nil
+                self.transcriptProcessingTask = nil
                 self.fail(error)
             }
         }
     }
 
     private func fail(_ error: Error) {
+        let sessionID = currentSession?.id
         audio.cancel()
         partialTranscription = ""
         onPartialTranscriptionChange?("")
         Task { await model.transcription.stopPartialTranscription() }
         currentSession = nil
+        if let sessionID {
+            Task { await intentRouter.cancel(sessionID: sessionID) }
+        }
         insertion.clearTarget()
         errorMessage = error.localizedDescription
         setPhase(.error)
@@ -363,16 +415,6 @@ public final class DictationCoordinator {
             previous = current
         }
         return previous.last ?? 0
-    }
-
-    nonisolated public static func looksLikeUnsupportedEditInstruction(
-        _ text: String
-    ) -> Bool {
-        let normalized = text.lowercased()
-        return [
-            "fix grammar", "make it shorter", "shorten", "rewrite", "translate",
-            "make professional", "make casual", "abbreviate", "summarize",
-        ].contains { normalized.contains($0) }
     }
 
     private func setPhase(_ phase: DictationPhase) {

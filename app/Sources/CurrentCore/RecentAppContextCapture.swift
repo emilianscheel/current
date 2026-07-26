@@ -506,7 +506,7 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
         let wasProcessing = backgroundState == .processing
         schedulerTask?.cancel()
         if wasProcessing {
-            await worker?.cancelAll()
+            await worker?.cancelBackgroundWork()
         }
         armScheduler()
     }
@@ -519,12 +519,50 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
             schedulerTask?.cancel()
             schedulerTask = nil
             if wasProcessing {
-                await worker?.cancelAll()
+                await worker?.cancelBackgroundWork()
             }
         } else {
             backgroundState = .waitingForIdle
             lastUserInputAt = Date()
             armScheduler()
+        }
+    }
+
+    public func refreshForPrompt(
+        target: ContextCaptureTarget
+    ) async throws -> ContextObservation? {
+        guard !isExcluded(target),
+              let application = NSRunningApplication(
+                  processIdentifier: target.processIdentifier
+              ),
+              !application.isTerminated,
+              !application.isHidden,
+              Self.isPinnedWindowAvailable(target) else {
+            return nil
+        }
+        await worker?.cancelBackgroundWork()
+        if target.windowIdentifier != nil, target.windowTitle == nil {
+            guard CGPreflightScreenCaptureAccess() else { return nil }
+            return try await captureWindow(
+                target,
+                priority: .interactive,
+                deduplicateImage: false
+            )
+        }
+        let decision = await accessibility.refreshCoverage(for: target)
+        try Task.checkCancellation()
+        switch decision {
+        case let .accessibility(observation):
+            return observation
+        case .screenshotFallback:
+            guard CGPreflightScreenCaptureAccess() else { return nil }
+            return try await captureWindow(
+                target,
+                priority: .interactive,
+                deduplicateImage: false
+            )
+        case .unavailable:
+            return nil
         }
     }
 
@@ -633,7 +671,9 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
     }
 
     private func captureWindow(
-        _ target: ContextCaptureTarget
+        _ target: ContextCaptureTarget,
+        priority: ContextWorkerRequestPriority = .background,
+        deduplicateImage: Bool = true
     ) async throws -> ContextObservation? {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
@@ -673,13 +713,22 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
             PerceptualImageHasher.hash(image)
         }.value
         let hashKey = "\(application.processID):\(window.windowID)"
-        if let hash, let previous = imageHashes[hashKey],
+        if deduplicateImage,
+           let hash, let previous = imageHashes[hashKey],
            PerceptualImageHasher.isVisuallyEquivalent(previous, hash) {
             imageHashes[hashKey] = hash
             return nil
         }
         if let hash { imageHashes[hashKey] = hash }
-        let blocks = try await ocr.recognizeText(in: image)
+        let blocks: [ContextTextBlock]
+        if priority == .interactive,
+           let interactiveOCR = ocr as? any InteractiveOCRProviding {
+            blocks = try await interactiveOCR.recognizeTextInteractively(
+                in: image
+            )
+        } else {
+            blocks = try await ocr.recognizeText(in: image)
+        }
         try Task.checkCancellation()
         guard !blocks.isEmpty else { return nil }
         return ContextObservation(
@@ -727,6 +776,22 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
             processIdentifier: target.processIdentifier,
             bundleIdentifier: target.bundleIdentifier
         )
+    }
+
+    private nonisolated static func isPinnedWindowAvailable(
+        _ target: ContextCaptureTarget
+    ) -> Bool {
+        guard let identifier = target.windowIdentifier else { return true }
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        return windows.contains { window in
+            (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+                == identifier
+                && (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                    == target.processIdentifier
+        }
     }
 
     private static func configuration(

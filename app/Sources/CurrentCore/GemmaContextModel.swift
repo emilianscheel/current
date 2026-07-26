@@ -278,6 +278,75 @@ public actor GemmaWorkerInferenceEngine {
         return try ContextBulletNormalizer.update(from: response)
     }
 
+    public func generatePrompt(
+        envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        guard let container else {
+            throw CurrentError.modelUnavailable(
+                "Gemma context model is not loaded."
+            )
+        }
+        try Task.checkCancellation()
+        let prompt = await Self.prompt(
+            container: container,
+            envelope: envelope,
+            maximumInputTokens: 6_000
+        )
+        let session = ChatSession(
+            container,
+            instructions: """
+            Follow the spoken instruction using only the supplied context. Return \
+            strict JSON with status and insertionText. status must be generated or \
+            insufficientContext. Use insufficientContext when required facts are \
+            missing. Otherwise insertionText contains only the final text to insert. \
+            Do not explain reasoning. Preserve language, names, dates, numbers, URLs, \
+            and facts. Never invent recipients, topics, claims, or commitments.
+            """,
+            generateParameters: GenerateParameters(
+                maxTokens: 768,
+                temperature: 0.2
+            )
+        )
+        let response = try await session.respond(to: prompt)
+        try Task.checkCancellation()
+        return try GemmaPromptNormalizer.disposition(from: response)
+    }
+
+    public func classifyIntent(
+        request: IntentRoutingRequest
+    ) async throws -> IntentDecision {
+        guard let container else {
+            throw CurrentError.modelUnavailable(
+                "Gemma context model is not loaded."
+            )
+        }
+        try Task.checkCancellation()
+        let prompt = await Self.intentPrompt(
+            container: container,
+            request: request
+        )
+        let session = ChatSession(
+            container,
+            instructions: """
+            Route one spoken interaction for a universal Mac dictation app. Return \
+            strict JSON with intent and confidence. intent must be direct, prompt, \
+            or uncertain. direct means type the spoken transcript itself. prompt \
+            means follow an instruction to create, transform, answer, summarize, or \
+            translate text. Account for speech-recognition errors and field context. \
+            "Draft an email" and "Draft and email" are prompt. "The draft and email \
+            are ready" and "Type the words draft an email" are direct. Choose \
+            uncertain only when the action genuinely cannot be determined.
+            """,
+            generateParameters: GenerateParameters(
+                maxTokens: 48,
+                temperature: 0
+            )
+        )
+        let response = try await session.respond(to: prompt)
+        try Task.checkCancellation()
+        return try GemmaIntentNormalizer.decision(from: response)
+    }
+
     public func oneTokenProbe() async throws -> String {
         guard let container else {
             throw CurrentError.modelUnavailable(
@@ -323,6 +392,140 @@ public actor GemmaWorkerInferenceEngine {
         }
         return prefix + body
     }
+
+    private static func prompt(
+        container: ModelContainer,
+        envelope: PromptContextEnvelope,
+        maximumInputTokens: Int
+    ) async -> String {
+        var accepted: [PromptContextSection] = []
+        var candidate = PromptContextEnvelope(
+            instruction: envelope.instruction,
+            focusedContext: envelope.focusedContext,
+            sections: accepted
+        ).rendered(maximumCharacters: 40_000)
+        for section in envelope.sections {
+            let next = accepted + [section]
+            let rendered = PromptContextEnvelope(
+                instruction: envelope.instruction,
+                focusedContext: envelope.focusedContext,
+                sections: next
+            ).rendered(maximumCharacters: 40_000)
+            if await container.encode(rendered).count <= maximumInputTokens {
+                accepted = next
+                candidate = rendered
+                continue
+            }
+            var low = 0
+            var high = section.content.count
+            var best: PromptContextSection?
+            while low <= high {
+                let middle = (low + high) / 2
+                let clipped = PromptContextSection(
+                    id: section.id,
+                    kind: section.kind,
+                    title: section.title,
+                    content: String(section.content.prefix(middle))
+                )
+                let trial = PromptContextEnvelope(
+                    instruction: envelope.instruction,
+                    focusedContext: envelope.focusedContext,
+                    sections: accepted + [clipped]
+                ).rendered(maximumCharacters: 40_000)
+                if await container.encode(trial).count <= maximumInputTokens {
+                    best = clipped
+                    candidate = trial
+                    low = middle + 1
+                } else {
+                    high = middle - 1
+                }
+            }
+            if let best, !best.content.isEmpty { accepted.append(best) }
+            break
+        }
+        return candidate
+    }
+
+    private static func intentPrompt(
+        container: ModelContainer,
+        request: IntentRoutingRequest
+    ) async -> String {
+        let context = request.context
+        let prefix = """
+        Destination: \(context.destination.rawValue)
+        Application: \(context.applicationName ?? "")
+        Window: \(context.windowTitle ?? "")
+        Focused role: \(context.focusedRole ?? "")
+        Focused subrole: \(context.focusedSubrole ?? "")
+        Has selection: \(context.hasSelection)
+        Selection excerpt: \(context.selectionExcerpt)
+        Text before cursor: \(context.textBeforeCursor)
+        Text after cursor: \(context.textAfterCursor)
+
+        Spoken transcript:
+        """
+        var transcript = request.transcript
+        while await container.encode(prefix + transcript).count > 1_024,
+              transcript.count > 256 {
+            transcript = String(
+                transcript.prefix(Int(Double(transcript.count) * 0.8))
+            )
+        }
+        return prefix + transcript
+    }
+}
+
+public enum GemmaIntentNormalizer {
+    private struct Payload: Decodable {
+        let intent: String
+        let confidence: Double
+    }
+
+    public static func decision(from response: String) throws -> IntentDecision {
+        let payload = try JSONDecoder().decode(
+            Payload.self,
+            from: Data(jsonObject(from: response).utf8)
+        )
+        guard let intent = VoiceIntent(rawValue: payload.intent) else {
+            throw CurrentError.intentClassificationFailed(
+                "Gemma returned an invalid intent schema."
+            )
+        }
+        return IntentDecision(intent: intent, confidence: payload.confidence)
+    }
+}
+
+public enum GemmaPromptNormalizer {
+    private struct Payload: Decodable {
+        let status: String
+        let insertionText: String
+    }
+
+    public static func disposition(
+        from response: String
+    ) throws -> PromptGenerationDisposition {
+        let payload = try JSONDecoder().decode(
+            Payload.self,
+            from: Data(jsonObject(from: response).utf8)
+        )
+        switch payload.status {
+        case "generated":
+            return .generated(try PromptResponse(text: payload.insertionText))
+        case "insufficientContext":
+            return .insufficientContext
+        default:
+            throw CurrentError.promptGenerationFailed(
+                "Gemma returned an invalid prompt-generation schema."
+            )
+        }
+    }
+}
+
+private func jsonObject(from response: String) -> String {
+    guard let start = response.firstIndex(of: "{"),
+          let end = response.lastIndex(of: "}"),
+          start <= end else { return response }
+    return String(response[start ... end])
 }
 
 public enum ContextBulletNormalizer {
@@ -429,7 +632,7 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
         )
         source.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
-                await self?.unload()
+                await self?.unload(force: true)
             }
         }
         source.resume()
@@ -496,7 +699,7 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
     public func setVoiceInteractionActive(_ active: Bool) {
         guard active else { return }
         Task { @MainActor in
-            await worker.cancelAll()
+            await worker.cancelBackgroundWork()
         }
     }
 
@@ -524,15 +727,15 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
         }
     }
 
-    public func unload() async {
+    public func unload(force: Bool = false) async {
         preparationTask?.cancel()
         preparationTask = nil
-        await worker.unload()
+        await worker.unload(force: force)
         state = hasInstalledSnapshot ? .ready : .notInstalled
     }
 
     public func removeDownloadedModel() async throws {
-        await unload()
+        await unload(force: true)
         if FileManager.default.fileExists(atPath: locations.snapshot.path) {
             try FileManager.default.removeItem(at: locations.snapshot)
         }

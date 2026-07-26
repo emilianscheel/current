@@ -44,15 +44,17 @@ public actor ContextRepository {
         await accept(observation, scheduleProcessing: true)
     }
 
+    /// Adds foreground prompt context to the live index and the durable pending
+    /// queue, but deliberately leaves Gemma structuring to the background worker.
+    @discardableResult
+    public func acceptForPrompt(_ observation: ContextObservation) async -> Bool {
+        await accept(observation, scheduleProcessing: false)
+    }
+
     @discardableResult
     public func acceptAndProcess(
         _ observation: ContextObservation
     ) async -> Bool {
-        let accepted = await accept(
-            observation,
-            scheduleProcessing: false
-        )
-        guard accepted else { return false }
         let key = SessionKey(
             processIdentifier: observation.processIdentifier,
             dayIdentifier: Self.dayIdentifier(
@@ -60,6 +62,14 @@ public actor ContextRepository {
                 calendar: calendar
             )
         )
+        let accepted = await accept(
+            observation,
+            scheduleProcessing: false
+        )
+        // A foreground prompt refresh may already have queued this exact text.
+        // The later background job must still flush that retained observation.
+        guard accepted || liveContexts[key]?.pendingObservations.isEmpty == false
+        else { return false }
         processingTasks.removeValue(forKey: key)?.cancel()
         await processPending(for: key)
         return true
@@ -142,10 +152,16 @@ public actor ContextRepository {
 
     public func promptContext(
         instruction: String,
-        focusedContext: DictationContext
+        focusedContext: DictationContext,
+        target captureTarget: ContextCaptureTarget? = nil,
+        freshObservation: ContextObservation? = nil
     ) async -> PromptContextEnvelope {
         let live = snapshot()
         let target = live.first {
+            if let captureTarget {
+                return $0.session.processIdentifier
+                    == captureTarget.processIdentifier
+            }
             guard let bundle = focusedContext.bundleIdentifier else {
                 return $0.latestObservation?.isFrontmost == true
             }
@@ -156,40 +172,96 @@ public actor ContextRepository {
         } else {
             nil
         }
-        let targetContext = [
-            targetDocument?.markdown,
-            target?.visibleText,
-            target?.pendingObservations.map(Self.render).joined(separator: "\n\n"),
-        ]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\nLatest live observations:\n")
+        var sections: [PromptContextSection] = []
+        if let freshObservation {
+            sections.append(.init(
+                kind: .freshTargetObservation,
+                title: "Fresh target-window observation",
+                content: Self.render(freshObservation)
+            ))
+        }
+        if let document = targetDocument {
+            let current = ContextStore.section(
+                named: "Current state",
+                in: document.markdown
+            )
+            if !current.isEmpty {
+                sections.append(.init(
+                    kind: .targetCurrentState,
+                    title: "Target application current state",
+                    content: current
+                ))
+            }
+            let activity = Self.recentActivity(
+                ContextStore.section(named: "Activity", in: document.markdown),
+                maximumEntries: 3
+            )
+            if !activity.isEmpty {
+                sections.append(.init(
+                    kind: .targetRecentActivity,
+                    title: "Newest target application activity",
+                    content: activity
+                ))
+            }
+        }
+        // Pending live observations are newer than the structured document and
+        // must survive even if the foreground refresh was a normalized duplicate.
+        if freshObservation == nil,
+           let latest = target?.pendingObservations.last ?? target?.latestObservation {
+            sections.append(.init(
+                kind: .freshTargetObservation,
+                title: "Latest target-window observation",
+                content: Self.render(latest)
+            ))
+        }
 
-        var otherContexts: [String] = []
         for context in live where context.session.sessionID != target?.session.sessionID {
             let document = await store.appSessionDocument(
                 sessionID: context.session.sessionID
             )
+            let app = "\(context.session.applicationName) (\(context.session.bundleIdentifier ?? "unknown bundle"))"
             let currentState = document.map {
                 ContextStore.section(named: "Current state", in: $0.markdown)
+            } ?? ""
+            if !currentState.isEmpty {
+                sections.append(.init(
+                    kind: .otherApplicationCurrentState,
+                    title: "Other recent app current state — \(app)",
+                    content: currentState
+                ))
             }
-            otherContexts.append(
-                [
-                    "\(context.session.applicationName) (\(context.session.bundleIdentifier ?? "unknown bundle"))",
-                    currentState,
-                    context.visibleText,
-                ]
-                    .compactMap { $0 }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n")
+        }
+        for context in live where context.session.sessionID != target?.session.sessionID {
+            guard let document = await store.appSessionDocument(
+                sessionID: context.session.sessionID
+            ) else { continue }
+            let activity = Self.recentActivity(
+                ContextStore.section(named: "Activity", in: document.markdown),
+                maximumEntries: 1
             )
+            if !activity.isEmpty {
+                sections.append(.init(
+                    kind: .otherApplicationActivity,
+                    title: "Other recent app activity — \(context.session.applicationName)",
+                    content: activity
+                ))
+            }
         }
         return PromptContextEnvelope(
             instruction: instruction,
             focusedContext: focusedContext,
-            targetApplicationContext: targetContext,
-            otherVisibleApplicationContexts: otherContexts
+            sections: sections
         )
+    }
+
+    private nonisolated static func recentActivity(
+        _ markdown: String,
+        maximumEntries: Int
+    ) -> String {
+        guard !markdown.isEmpty else { return "" }
+        let entries = markdown.components(separatedBy: "\n### ")
+        return entries.suffix(maximumEntries).joined(separator: "\n### ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func applicationTerminated(

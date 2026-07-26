@@ -3,16 +3,20 @@ import CoreGraphics
 import Testing
 @testable import CurrentCore
 
+private let modelRoutingCorpus: [(String, VoiceIntent)] = [
+    ("Draft an email", .prompt),
+    ("Draft and email", .prompt),
+    ("Please write a proper response here", .prompt),
+    ("Schreib eine höfliche Antwort", .prompt),
+    ("The draft and email are ready", .direct),
+    ("Type the words draft an email", .direct),
+]
+
 private actor StubIntelligence:
     LocalIntelligenceProviding,
     ContextStructuringProviding
 {
     private(set) var updateCalls = 0
-
-    func classifyIntent(_ request: VoiceInteractionRequest) async -> IntentDecision {
-        ConservativeIntentClassifier.classify(request.transcript)
-            ?? IntentDecision(intent: .uncertain, confidence: 0)
-    }
 
     func refineDictation(
         _ deterministic: RefinementResult,
@@ -34,33 +38,394 @@ private actor StubIntelligence:
         )
     }
 
-    func generatePromptResponse(
+    func generatePromptDisposition(
         _ envelope: PromptContextEnvelope
-    ) async throws -> PromptResponse {
-        try PromptResponse(text: "Generated response")
+    ) async throws -> PromptGenerationDisposition {
+        .generated(try PromptResponse(text: "Generated response"))
     }
 }
 
-@Test func automaticIntentClassificationIsConservative() {
-    #expect(
-        ConservativeIntentClassifier.classify(
-            "Write a proper response email here"
-        )?.intent == .prompt
+private struct FailingPromptIntelligence: LocalIntelligenceProviding {
+    func refineDictation(
+        _ deterministic: RefinementResult,
+        context: DictationContext
+    ) async -> RefinementResult {
+        deterministic
+    }
+
+    func generatePromptDisposition(
+        _ envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        throw CurrentError.promptGenerationFailed("Primary unavailable")
+    }
+}
+
+private struct FixedPromptGenerator: PromptResponseGenerating {
+    let disposition: PromptGenerationDisposition
+
+    init(text: String) throws {
+        disposition = .generated(try PromptResponse(text: text))
+    }
+
+    init(disposition: PromptGenerationDisposition) {
+        self.disposition = disposition
+    }
+
+    func generatePromptDisposition(
+        _ envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        disposition
+    }
+}
+
+private actor FixedIntentRouter: VoiceIntentRoutingProviding {
+    let decision: IntentDecision?
+    private(set) var classifyCount = 0
+    private(set) var prepareCount = 0
+    private(set) var cancelCount = 0
+
+    init(_ intent: VoiceIntent?) {
+        decision = intent.map { IntentDecision(intent: $0, confidence: 0.9) }
+    }
+
+    func isAvailable() async -> Bool { decision != nil }
+    func setEnabled(_ enabled: Bool) async {}
+    func prepare(sessionID: UUID, context: IntentRoutingContext) async {
+        prepareCount += 1
+    }
+    func classify(
+        _ request: IntentRoutingRequest,
+        sessionID: UUID
+    ) async throws -> IntentDecision {
+        classifyCount += 1
+        guard let decision else {
+            throw CurrentError.modelUnavailable("Router unavailable")
+        }
+        return decision
+    }
+    func cancel(sessionID: UUID) async { cancelCount += 1 }
+}
+
+private struct PromptOnlyIntelligence: LocalIntelligenceProviding {
+    let generator: any PromptResponseGenerating
+
+    func refineDictation(
+        _ deterministic: RefinementResult,
+        context: DictationContext
+    ) async -> RefinementResult {
+        deterministic
+    }
+
+    func generatePromptDisposition(
+        _ envelope: PromptContextEnvelope
+    ) async throws -> PromptGenerationDisposition {
+        try await generator.generatePromptDisposition(envelope)
+    }
+}
+
+private actor PromptScreenStub: ScreenContextProviding {
+    let observation: ContextObservation?
+    private(set) var refreshCount = 0
+    private(set) var activityCount = 0
+
+    init(observation: ContextObservation?) {
+        self.observation = observation
+    }
+
+    func start() async throws {}
+    func stop() async {}
+    func scheduleCapture(
+        trigger: ContextCaptureTrigger,
+        target: ContextCaptureTarget?
+    ) async {}
+    func recordActivity(_ activity: RecentApplicationActivity) async {
+        activityCount += 1
+    }
+    func setForegroundInteractionActive(_ active: Bool) async {}
+    func refreshForPrompt(
+        target: ContextCaptureTarget
+    ) async throws -> ContextObservation? {
+        refreshCount += 1
+        return observation
+    }
+}
+
+@Test func routingRequestBoundsFocusedContextWithoutScreenCapture() {
+    let request = IntentRoutingRequest(
+        transcript: String(repeating: "spoken ", count: 2_000),
+        context: DictationContext(
+            selectedText: String(repeating: "selected ", count: 2_000),
+            textBeforeCursor: String(repeating: "before ", count: 500),
+            textAfterCursor: String(repeating: "after ", count: 500)
+        )
     )
-    #expect(
-        ConservativeIntentClassifier.classify(
-            "Schreib eine höfliche Antwort"
-        )?.intent == .prompt
+    #expect(request.transcript.count <= IntentRoutingRequest.maximumTranscriptCharacters)
+    #expect(request.context.selectionExcerpt.count <= IntentRoutingContext.maximumSelectionCharacters)
+    #expect(request.context.textBeforeCursor.count <= IntentRoutingContext.maximumNearbyCharacters)
+    #expect(request.context.textAfterCursor.count <= IntentRoutingContext.maximumNearbyCharacters)
+}
+
+@Test func uncertainAppleRouteFallsBackToGemmaExactlyOnce() async throws {
+    let apple = FixedIntentRouter(.uncertain)
+    let gemma = FixedIntentRouter(.prompt)
+    let router = HybridVoiceIntentRouter(primary: apple, fallback: gemma)
+    let sessionID = UUID()
+    let decision = try await router.classify(
+        IntentRoutingRequest(transcript: "Draft and email", context: .empty),
+        sessionID: sessionID
     )
-    #expect(
-        ConservativeIntentClassifier.classify(
-            "I will send the response tomorrow"
-        ) == nil
+    #expect(decision.intent == .prompt)
+    #expect(await apple.classifyCount == 1)
+    #expect(await gemma.classifyCount == 1)
+    #expect(await router.diagnostics.backend == .gemma4)
+}
+
+@Test func directAppleRouteDoesNotCallGemma() async throws {
+    let apple = FixedIntentRouter(.direct)
+    let gemma = FixedIntentRouter(.prompt)
+    let router = HybridVoiceIntentRouter(primary: apple, fallback: gemma)
+    let decision = try await router.classify(
+        IntentRoutingRequest(
+            transcript: "The draft and email are ready",
+            context: .empty
+        ),
+        sessionID: UUID()
     )
-    #expect(
-        IntentDecision(intent: .uncertain, confidence: 0.3).effectiveIntent
-            == .direct
+    #expect(decision.intent == .direct)
+    #expect(await gemma.classifyCount == 0)
+    #expect(await router.diagnostics.backend == .appleFoundationModel)
+}
+
+@Test func dualUncertainRoutingFailsInsteadOfDefaultingToDirect() async {
+    let router = HybridVoiceIntentRouter(
+        primary: FixedIntentRouter(.uncertain),
+        fallback: FixedIntentRouter(.uncertain)
     )
+    do {
+        _ = try await router.classify(
+            IntentRoutingRequest(transcript: "Ambiguous words", context: .empty),
+            sessionID: UUID()
+        )
+        Issue.record("Expected routing failure")
+    } catch let error as CurrentError {
+        guard case .intentClassificationFailed = error else {
+            Issue.record("Unexpected error: \(error)")
+            return
+        }
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test func hybridPromptGenerationFallsBackToGemmaAndTracksOnlyBackend() async throws {
+    let provider = HybridLocalIntelligenceProvider(
+        primary: FailingPromptIntelligence(),
+        fallback: try FixedPromptGenerator(text: "Hello from Gemma")
+    )
+    let disposition = try await provider.generatePromptDisposition(
+        PromptContextEnvelope(
+            instruction: "Draft a friendly email to Alex about Tuesday",
+            focusedContext: .empty,
+            sections: []
+        )
+    )
+    #expect(disposition.response?.text == "Hello from Gemma")
+    #expect(await provider.lastSuccessfulBackend == .gemma4)
+}
+
+@Test func modelReportedInsufficientContextDoesNotFallThrough() async throws {
+    let primary = FixedPromptGenerator(disposition: .insufficientContext)
+    let typedProvider = HybridLocalIntelligenceProvider(
+        primary: PromptOnlyIntelligence(generator: primary),
+        fallback: try FixedPromptGenerator(text: "Must not be used")
+    )
+    let disposition = try await typedProvider.generatePromptDisposition(
+        PromptContextEnvelope(
+            instruction: "Draft and email",
+            focusedContext: .empty,
+            sections: []
+        )
+    )
+    #expect(disposition == .insufficientContext)
+    #expect(await typedProvider.lastSuccessfulBackend == .appleFoundationModel)
+}
+
+@Test func structuredPromptEnvelopeIsCodableAndKeepsFreshContextFirst() throws {
+    let envelope = PromptContextEnvelope(
+        instruction: "Reply to this",
+        focusedContext: DictationContext(selectedText: "Selected"),
+        sections: [
+            .init(
+                kind: .freshTargetObservation,
+                title: "Fresh target-window observation",
+                content: "NEW THREAD"
+            ),
+            .init(
+                kind: .targetCurrentState,
+                title: "Target application current state",
+                content: "OLDER STATE"
+            ),
+            .init(
+                kind: .otherApplicationActivity,
+                title: "Other activity",
+                content: String(repeating: "noise ", count: 1_000)
+            ),
+        ]
+    )
+    let decoded = try JSONDecoder().decode(
+        PromptContextEnvelope.self,
+        from: JSONEncoder().encode(envelope)
+    )
+    let rendered = decoded.rendered(maximumCharacters: 320)
+    #expect(decoded == envelope)
+    #expect(rendered.contains("Reply to this"))
+    #expect(rendered.contains("Selected"))
+    #expect(rendered.contains("NEW THREAD"))
+    #expect(rendered.firstRange(of: "NEW THREAD")!.lowerBound
+        < rendered.firstRange(of: "OLDER STATE")!.lowerBound)
+}
+
+@Test func contextWorkerInteractiveRequestsAreVersionedAndCodable() throws {
+    let request = ContextWorkerPromptRequest(
+        modelSnapshotPath: "/tmp/gemma",
+        envelope: PromptContextEnvelope(
+            instruction: "Compose a response",
+            focusedContext: .empty,
+            sections: []
+        )
+    )
+    let decoded = try JSONDecoder().decode(
+        ContextWorkerPromptRequest.self,
+        from: JSONEncoder().encode(request)
+    )
+    #expect(ContextWorkerProtocolVersion.current == 3)
+    #expect(decoded.requestID == request.requestID)
+    #expect(decoded.priority == .interactive)
+    #expect(DictationPhase.gatheringContext.displayName == "Reading context…")
+
+    let intent = ContextWorkerIntentRequest(
+        requestID: UUID(),
+        modelSnapshotPath: "/tmp/gemma",
+        routingRequest: IntentRoutingRequest(
+            transcript: "Draft an email",
+            context: .empty
+        )
+    )
+    let decodedIntent = try JSONDecoder().decode(
+        ContextWorkerIntentRequest.self,
+        from: JSONEncoder().encode(intent)
+    )
+    #expect(decodedIntent.requestID == intent.requestID)
+    #expect(decodedIntent.priority == .voiceRouting)
+}
+
+@Test func gemmaTypedRoutingAndPromptSchemasAreStrict() throws {
+    let decision = try GemmaIntentNormalizer.decision(
+        from: #"prefix {"intent":"prompt","confidence":0.91} suffix"#
+    )
+    #expect(decision == IntentDecision(intent: .prompt, confidence: 0.91))
+    #expect(throws: (any Error).self) {
+        try GemmaIntentNormalizer.decision(
+            from: #"{"intent":"instruction","confidence":1}"#
+        )
+    }
+
+    let generated = try GemmaPromptNormalizer.disposition(
+        from: #"{"status":"generated","insertionText":"Hello Alex"}"#
+    )
+    #expect(generated.response?.text == "Hello Alex")
+    let insufficient = try GemmaPromptNormalizer.disposition(
+        from: #"{"status":"insufficientContext","insertionText":""}"#
+    )
+    #expect(insufficient == .insufficientContext)
+    #expect(throws: (any Error).self) {
+        try GemmaPromptNormalizer.disposition(
+            from: #"{"status":"maybe","insertionText":"unsafe"}"#
+        )
+    }
+}
+
+@Test func modelRoutingEvaluationCorpusIsExplicitlyModelOwned() {
+    #expect(modelRoutingCorpus.count == 6)
+    // This remains data only: no production keyword classifier exists.
+}
+
+@Test func appleIntentRouterPassesEvaluationCorpusWhenGated() async throws {
+    guard ProcessInfo.processInfo.environment[
+        "CURRENT_RUN_INTENT_ROUTER_INTEGRATION"
+    ] == "1" else { return }
+    let router = AppleVoiceIntentRouter()
+    guard await router.isAvailable() else { return }
+    for (transcript, expected) in modelRoutingCorpus {
+        let sessionID = UUID()
+        let context = IntentRoutingContext(context: .empty)
+        await router.prepare(sessionID: sessionID, context: context)
+        let decision = try await router.classify(
+            IntentRoutingRequest(transcript: transcript, context: .empty),
+            sessionID: sessionID
+        )
+        #expect(decision.intent == expected)
+    }
+}
+
+@MainActor
+@Test func promptContextPreparationObeysContinuousContextSetting() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-prompt-context-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let repository = ContextRepository(
+        store: store,
+        structurer: StubIntelligence()
+    )
+    let target = ContextCaptureTarget(
+        processIdentifier: 8123,
+        bundleIdentifier: "com.example.Mail",
+        applicationName: "Mail",
+        windowIdentifier: 45,
+        windowTitle: "Message"
+    )
+    let fresh = ContextObservation(
+        processIdentifier: target.processIdentifier,
+        bundleIdentifier: target.bundleIdentifier,
+        applicationName: target.applicationName,
+        windowIdentifier: target.windowIdentifier,
+        windowTitle: target.windowTitle,
+        isFrontmost: true,
+        blocks: [
+            ContextTextBlock(
+                text: "Alex asks whether Tuesday at 10 works.",
+                source: .accessibility
+            ),
+        ]
+    )
+    let screen = PromptScreenStub(observation: fresh)
+    let preparer = LivePromptContextPreparer(
+        repository: repository,
+        screenContext: screen
+    )
+
+    let disabled = try await preparer.prepare(
+        instruction: "Draft an email",
+        focusedContext: .empty,
+        target: target,
+        continuousContextEnabled: false
+    )
+    #expect(disabled.sections.isEmpty)
+    #expect(await screen.refreshCount == 0)
+
+    let enabled = try await preparer.prepare(
+        instruction: "Draft an email",
+        focusedContext: .empty,
+        target: target,
+        continuousContextEnabled: true
+    )
+    #expect(enabled.sections.first?.kind == .freshTargetObservation)
+    #expect(enabled.sections.first?.content.contains("Tuesday at 10") == true)
+    #expect(await screen.refreshCount == 1)
+    #expect(await screen.activityCount == 1)
 }
 
 @Test func promptEnvelopeKeepsTargetContextAheadOfOtherApps() {

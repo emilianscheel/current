@@ -335,7 +335,6 @@ private struct UsageStatisticsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     overviewCards
-                    historyToolbar
                     dailyCharts
                     if let error = model.monitor.lastPersistenceError {
                         Label(error, systemImage: "exclamationmark.triangle")
@@ -344,6 +343,19 @@ private struct UsageStatisticsView: View {
                     }
                 }
                 .padding(24)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Picker("History", selection: $model.selectedRange) {
+                    ForEach(DailyHistoryRange.allCases) { range in
+                        Text(range.title).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+                .accessibilityLabel("History range")
             }
         }
     }
@@ -403,23 +415,6 @@ private struct UsageStatisticsView: View {
             }
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private var historyToolbar: some View {
-        HStack {
-            Text("Daily averages")
-                .font(.headline)
-            Spacer()
-            Picker("History", selection: $model.selectedRange) {
-                ForEach(DailyHistoryRange.allCases) { range in
-                    Text(range.title).tag(range)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 190)
-            .accessibilityLabel("History range")
-        }
     }
 
     private var dailyCharts: some View {

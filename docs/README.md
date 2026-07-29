@@ -159,7 +159,9 @@ It never calls `tccutil`, resets UserDefaults, or removes model data.
 
 macOS TCC permissions are tied to the responsible code’s signing identity, bundle identifier, and location. Rebuilding with ad-hoc signatures commonly makes macOS treat each build as a new app.
 
-The script therefore prefers an existing **Apple Development** identity, including a Personal Team identity. If none exists, it creates a long-lived **Current Local Development** certificate in the login Keychain and limits its trust purpose to code signing. The first setup can display a Keychain confirmation. Later builds reuse that identity.
+The script therefore prefers an existing **Apple Development** identity, including a Personal Team identity, after matching it by SHA-1 and confirming its code-signing status with a required OCSP check. Revoked or unverifiable Apple identities are skipped before compilation so Gatekeeper cannot discover the failure only after installation and move the app to Trash.
+
+If no Apple Development identity passes that check, the script reuses or creates a long-lived **Current Local Development** certificate in the login Keychain and limits its trust purpose to code signing. The first setup can display a Keychain confirmation. Later builds reuse that identity. Revoked Apple certificates are left untouched in Keychain.
 
 Changing the signing identity, `local.Current` bundle identifier, or installation path requires granting permissions once again. The script intentionally does not hide or work around that macOS security behavior.
 

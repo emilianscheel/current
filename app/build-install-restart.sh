@@ -44,6 +44,7 @@ fi
 
 command -v swift >/dev/null || { print -u2 "Swift is required."; exit 1; }
 command -v codesign >/dev/null || { print -u2 "codesign is required."; exit 1; }
+command -v openssl >/dev/null || { print -u2 "OpenSSL is required."; exit 1; }
 
 if ! $ASSEMBLE_ONLY; then
   CHIP_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip:/{print $2; exit}')"
@@ -66,28 +67,64 @@ typeset -a CODESIGN_KEYCHAIN_ARGS
 export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache"
 
-find_identity() {
-  local apple local_identity
-  # Use the certificate's unique SHA-1 identity instead of its display name.
-  # Keychain can contain multiple Apple Development certificates with the same
-  # label, which makes `codesign --sign "Apple Development: …"` ambiguous.
-  apple="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development:/{print $2; exit}')"
-  if [[ -n "$apple" ]]; then print -r -- "$apple"; return; fi
-  local_identity="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Current Local Development"/{print $2; exit}')"
-  print -r -- "$local_identity"
+find_usable_apple_identity() {
+  local identity_line identity_hash identity_name certificate_dir certificate_list certificate_file certificate_hash verification_error
+  while IFS= read -r identity_line; do
+    if [[ ! "$identity_line" =~ '^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"(Apple Development:[^"]+)"' ]]; then
+      continue
+    fi
+    identity_hash="${match[1]:u}"
+    identity_name="${match[2]}"
+    certificate_dir="$(mktemp -d "${TMPDIR%/}/current-identity.XXXXXX")"
+    certificate_list="$certificate_dir/certificates.pem"
+    security find-certificate -a -c "$identity_name" -p "$KEYCHAIN_PATH" > "$certificate_list"
+    awk -v output_dir="$certificate_dir" '
+      /-----BEGIN CERTIFICATE-----/ {
+        certificate_index += 1
+        output_file = sprintf("%s/certificate-%03d.pem", output_dir, certificate_index)
+      }
+      certificate_index > 0 { print > output_file }
+    ' "$certificate_list"
+
+    for certificate_file in "$certificate_dir"/certificate-*.pem(N); do
+      certificate_hash="$(openssl x509 -in "$certificate_file" -noout -fingerprint -sha1 2>/dev/null | sed 's/^.*=//; s/://g' | tr '[:lower:]' '[:upper:]')"
+      [[ "$certificate_hash" == "$identity_hash" ]] || continue
+      if verification_error="$(security verify-cert -c "$certificate_file" -k "$KEYCHAIN_PATH" -p codeSign -R ocsp -R require -q 2>&1)"; then
+        rm -rf "$certificate_dir"
+        print -r -- "$identity_hash"
+        return 0
+      fi
+      print -u2 "Skipping Apple Development identity $identity_hash ($identity_name): required OCSP code-signing validation failed."
+      if [[ -n "$verification_error" ]]; then
+        print -u2 -- "$verification_error"
+      fi
+      break
+    done
+    rm -rf "$certificate_dir"
+  done < <(security find-identity -v -p codesigning "$KEYCHAIN_PATH" 2>/dev/null)
+}
+
+find_local_identity() {
+  security find-identity -v -p codesigning "$KEYCHAIN_PATH" 2>/dev/null \
+    | awk '/"Current Local Development"/{print $2; exit}'
 }
 
 create_local_identity() {
   local certificate_dir certificate_password
+  typeset -a pkcs12_compatibility_args
   certificate_dir="$(mktemp -d "${TMPDIR%/}/current-signing.XXXXXX")"
   certificate_password="$(uuidgen)"
   trap '[[ -n "${certificate_dir:-}" ]] && rm -rf "$certificate_dir"' EXIT
-  print "No Apple Development identity found. Creating the persistent Current Local Development identity…"
+  print "No usable Apple Development identity found. Creating the persistent Current Local Development identity…"
   openssl req -new -newkey rsa:2048 -nodes -x509 -days 3650 \
     -subj "/CN=Current Local Development/O=Current Local Development/OU=Local Code Signing" \
     -addext "keyUsage=digitalSignature" -addext "extendedKeyUsage=codeSigning" \
     -keyout "$certificate_dir/key.pem" -out "$certificate_dir/cert.pem" >/dev/null 2>&1
-  openssl pkcs12 -export -legacy -inkey "$certificate_dir/key.pem" -in "$certificate_dir/cert.pem" \
+  pkcs12_compatibility_args=()
+  if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+    pkcs12_compatibility_args=(-legacy)
+  fi
+  openssl pkcs12 -export "${pkcs12_compatibility_args[@]}" -inkey "$certificate_dir/key.pem" -in "$certificate_dir/cert.pem" \
     -out "$certificate_dir/identity.p12" -passout "pass:$certificate_password" >/dev/null 2>&1
   security import "$certificate_dir/identity.p12" -k "$KEYCHAIN_PATH" -P "$certificate_password" -T /usr/bin/codesign >/dev/null
   security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN_PATH" "$certificate_dir/cert.pem"
@@ -103,12 +140,16 @@ else
   INSTALL_DIR="$USER_HOME_DIR/Applications"
   INSTALL_APP="$INSTALL_DIR/Current.app"
   PREVIOUS_APP="$INSTALL_DIR/Current.previous.app"
-  KEYCHAIN_PATH="$(security default-keychain -d user | tr -d '"')"
+  KEYCHAIN_PATH="$(security default-keychain -d user | awk -F'"' 'NF >= 2 { print $2; exit }')"
+  [[ -n "$KEYCHAIN_PATH" && "$KEYCHAIN_PATH" == /* ]] || { print -u2 "Could not resolve the default user Keychain."; exit 1; }
   CODESIGN_KEYCHAIN_ARGS=(--keychain "$KEYCHAIN_PATH")
-  SIGNING_IDENTITY="$(find_identity)"
+  SIGNING_IDENTITY="$(find_usable_apple_identity)"
+  if [[ -z "$SIGNING_IDENTITY" ]]; then
+    SIGNING_IDENTITY="$(find_local_identity)"
+  fi
   if [[ -z "$SIGNING_IDENTITY" ]]; then
     create_local_identity
-    SIGNING_IDENTITY="$(find_identity)"
+    SIGNING_IDENTITY="$(find_local_identity)"
   fi
   [[ -n "$SIGNING_IDENTITY" ]] || { print -u2 "Unable to create a valid code-signing identity. Open Keychain Access and trust Current Local Development for code signing."; exit 1; }
 fi

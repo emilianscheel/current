@@ -119,7 +119,8 @@ app/Sources/CurrentCore/         Capture, shortcut, model, insertion, settings, 
 app/Sources/Current/             App lifecycle, menu, onboarding, settings, notch overlay
 app/Sources/CurrentRelauncher/   Permission-restart helper
 app/Packaging/                   Info.plist and signing entitlements
-app/Assets/                      Editable SVG artwork and deterministic app-icon renditions
+app/AppIcon.icon/                Adaptive layered app-icon source
+app/Assets/                      Editable SVG artwork and legacy app-icon renditions
 app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion tests
 app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
 ```
@@ -149,7 +150,7 @@ The script:
 1. Validates arm64, macOS 26+, Swift, and code-signing tools. Local installation additionally requires M3-or-newer hardware and 16 GiB of memory; assembly mode leaves runtime hardware validation to the packaged app.
 2. Runs the test suite.
 3. Builds optimized arm64 executables.
-4. Deterministically renders the app icon and assembles `Current.app`.
+4. Compiles the Icon Composer source into adaptive and standalone app-icon resources, then assembles `Current.app`.
 5. Signs with Hardened Runtime.
 6. Gracefully stops the old copy, installs to `~/Applications/Current.app`, verifies the signature, and relaunches it.
 

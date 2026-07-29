@@ -60,7 +60,8 @@ if ! $ASSEMBLE_ONLY; then
 fi
 
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
-ICONSET="$PROJECT_DIR/.build/AppIcon.iconset"
+ICON_BUILD_DIR="$PROJECT_DIR/.build/AppIcon-assets"
+ICON_PARTIAL_INFO_PLIST="$ICON_BUILD_DIR/partial-info.plist"
 XCODE_DERIVED_DATA="$PROJECT_DIR/.build/xcode-derived"
 BUILD_VERSION="${APP_VERSION:-$(date -u +%Y%m%d%H%M%S)}"
 typeset -a CODESIGN_KEYCHAIN_ARGS
@@ -185,21 +186,39 @@ if [[ ! -f "$MLX_DEFAULT_LIBRARY" ]]; then
   exit 1
 fi
 
-print "Creating the app icon from icon.png…"
-rm -rf "$ICONSET"
-mkdir -p "$ICONSET"
-for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" icon.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  retina_size=$((size * 2))
-  sips -z "$retina_size" "$retina_size" icon.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$PROJECT_DIR/.build/AppIcon.icns"
+print "Compiling the adaptive app icon with Xcode…"
+rm -rf "$ICON_BUILD_DIR"
+mkdir -p "$ICON_BUILD_DIR"
+xcrun actool \
+  --compile "$ICON_BUILD_DIR" \
+  --output-format human-readable-text \
+  --warnings \
+  --errors \
+  --notices \
+  --output-partial-info-plist "$ICON_PARTIAL_INFO_PLIST" \
+  --app-icon AppIcon \
+  --platform macosx \
+  --minimum-deployment-target 26.0 \
+  --target-device mac \
+  --standalone-icon-behavior all \
+  "$PROJECT_DIR/AppIcon.icon"
+[[ -f "$ICON_BUILD_DIR/Assets.car" ]] || { print -u2 "App icon compilation did not produce Assets.car."; exit 1; }
+[[ -f "$ICON_BUILD_DIR/AppIcon.icns" ]] || { print -u2 "App icon compilation did not produce AppIcon.icns."; exit 1; }
+[[ -f "$ICON_PARTIAL_INFO_PLIST" ]] || { print -u2 "App icon compilation did not produce bundle metadata."; exit 1; }
 
 rm -rf "$STAGE_APP"
 WORKER_BUNDLE="$STAGE_APP/Contents/XPCServices/CurrentContextWorker.xpc"
 mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Helpers" "$STAGE_APP/Contents/Resources" \
   "$WORKER_BUNDLE/Contents/MacOS" "$WORKER_BUNDLE/Contents/Resources"
 cp Packaging/Info.plist "$STAGE_APP/Contents/Info.plist"
+for ICON_KEY in CFBundleIconFile CFBundleIconName; do
+  ICON_VALUE="$(plutil -extract "$ICON_KEY" raw "$ICON_PARTIAL_INFO_PLIST")"
+  if plutil -extract "$ICON_KEY" raw "$STAGE_APP/Contents/Info.plist" >/dev/null 2>&1; then
+    plutil -replace "$ICON_KEY" -string "$ICON_VALUE" "$STAGE_APP/Contents/Info.plist"
+  else
+    plutil -insert "$ICON_KEY" -string "$ICON_VALUE" "$STAGE_APP/Contents/Info.plist"
+  fi
+done
 if [[ -n "$APP_VERSION" ]]; then
   plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$STAGE_APP/Contents/Info.plist"
 fi
@@ -210,7 +229,7 @@ cp "$BIN_DIR/Current" "$STAGE_APP/Contents/MacOS/Current"
 cp "$BIN_DIR/CurrentRelauncher" "$STAGE_APP/Contents/Helpers/CurrentRelauncher"
 cp Packaging/ContextWorker-Info.plist "$WORKER_BUNDLE/Contents/Info.plist"
 cp "$BIN_DIR/CurrentContextWorker" "$WORKER_BUNDLE/Contents/MacOS/CurrentContextWorker"
-cp "$PROJECT_DIR/.build/AppIcon.icns" "$STAGE_APP/Contents/Resources/AppIcon.icns"
+cp "$ICON_BUILD_DIR/AppIcon.icns" "$ICON_BUILD_DIR/Assets.car" "$STAGE_APP/Contents/Resources/"
 cp Sources/Current/Resources/model-manifest.json Sources/Current/Resources/Privacy.md Licenses/NOTICE.md "$STAGE_APP/Contents/Resources/"
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do cp -R "$resource_bundle" "$STAGE_APP/Contents/Resources/"; done
 cp -R "$MLX_RESOURCE_BUNDLE" "$STAGE_APP/Contents/Resources/"

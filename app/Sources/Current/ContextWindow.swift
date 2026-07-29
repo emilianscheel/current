@@ -377,7 +377,9 @@ private struct ContextManagementView: View {
                     max: 340
                 )
         } detail: {
-            CurrentWindowBackground {
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                    .ignoresSafeArea()
                 detail
                     .frame(minWidth: 520)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

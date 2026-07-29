@@ -68,6 +68,36 @@ typeset -a CODESIGN_KEYCHAIN_ARGS
 export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache"
 
+patch_fluid_audio_manifest() {
+  local manifest benchmark exclusion
+  manifest="$PROJECT_DIR/.build/checkouts/FluidAudio/Package.swift"
+  benchmark="$PROJECT_DIR/.build/checkouts/FluidAudio/Sources/FluidAudio/ASR/Parakeet/Unified/benchmark.md"
+  exclusion='            exclude: ["ASR/Parakeet/Unified/benchmark.md"]'
+
+  [[ -f "$manifest" && -f "$benchmark" ]] || {
+    print -u2 "FluidAudio 0.15.5 did not resolve with the expected layout."
+    exit 1
+  }
+  if grep -Fqx "$exclusion" "$manifest"; then
+    return
+  fi
+  if ! grep -Fqx '            path: "Sources/FluidAudio"' "$manifest"; then
+    print -u2 "FluidAudio's package manifest changed; refusing to apply the benchmark exclusion automatically."
+    exit 1
+  fi
+
+  # FluidAudio 0.15.5 ships this documentation file inside its library target
+  # without declaring it. Correct the resolved manifest until upstream includes
+  # the exclusion in a release, so every SwiftPM build is warning-free.
+  /usr/bin/perl -0pi -e \
+    's/            path: "Sources\/FluidAudio"\n/            path: "Sources\/FluidAudio",\n            exclude: ["ASR\/Parakeet\/Unified\/benchmark.md"]\n/' \
+    "$manifest"
+  grep -Fqx "$exclusion" "$manifest" || {
+    print -u2 "Failed to exclude FluidAudio's benchmark documentation from its library target."
+    exit 1
+  }
+}
+
 find_usable_apple_identity() {
   local identity_line identity_hash identity_name certificate_dir certificate_list certificate_file certificate_hash verification_error
   while IFS= read -r identity_line; do
@@ -155,6 +185,10 @@ else
   [[ -n "$SIGNING_IDENTITY" ]] || { print -u2 "Unable to create a valid code-signing identity. Open Keychain Access and trust Current Local Development for code signing."; exit 1; }
 fi
 print "Signing with identity: $SIGNING_IDENTITY"
+
+print "Resolving dependencies…"
+swift package resolve
+patch_fluid_audio_manifest
 
 print "Running tests…"
 swift test --disable-sandbox

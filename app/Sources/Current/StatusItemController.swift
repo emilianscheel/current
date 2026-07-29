@@ -87,13 +87,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func openContext() { runtime.context.show() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
     @objc private func openOnboarding() { runtime.onboarding.show() }
-    @objc private func openAbout() {
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Current",
-            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Private, on-device multilingual dictation with local daily context.\nFluidAudio / MLX Swift — Apache 2.0\nParakeet TDT 0.6B v3 — CC BY 4.0\nGemma 4 E2B 4-bit — Gemma Terms of Use")
-        ])
-        NSApp.activate(ignoringOtherApps: true)
-    }
+    @objc private func openAbout() { runtime.about.show() }
     @objc private func quit() { NSApp.terminate(nil) }
 }

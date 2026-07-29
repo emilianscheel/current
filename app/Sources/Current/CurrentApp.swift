@@ -67,6 +67,7 @@ final class AppRuntime {
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
     @ObservationIgnored lazy var context = ContextWindowController(runtime: self, store: contextStore)
+    @ObservationIgnored lazy var about = AboutWindowController(runtime: self)
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
     @ObservationIgnored private var phaseUpdateGeneration = UUID()
 

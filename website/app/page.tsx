@@ -46,12 +46,6 @@ export default function Home() {
             GitHub
           </a>
         </div>
-
-        <p className="mt-5 max-w-xl text-balance text-xs leading-relaxed text-[#6e6e73] sm:text-sm">
-          requires macOS 26, an M3 or newer chip, and 16 GB of memory. current
-          is not notarized; after the first blocked launch, choose Open Anyway
-          in System Settings → Privacy &amp; Security.
-        </p>
       </section>
     </main>
   );

@@ -32,6 +32,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add("Copy Last Transcription", to: menu, action: #selector(copyLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
         add("Undo Last Insertion", to: menu, action: #selector(undoLast), enabled: runtime.coordinator.insertion.canUndoLastInsertion)
         add("Context…", to: menu, action: #selector(openContext))
+        add("Usage Statistics…", to: menu, action: #selector(openUsageStatistics))
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
         add(speechModelTitle, to: menu, enabled: false)
@@ -85,6 +86,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func copyLast() { runtime.coordinator.copyLastTranscription() }
     @objc private func undoLast() { runtime.coordinator.undoLastInsertion() }
     @objc private func openContext() { runtime.context.show() }
+    @objc private func openUsageStatistics() { runtime.usage.show() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() { runtime.about.show() }

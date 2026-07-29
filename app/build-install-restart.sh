@@ -168,7 +168,7 @@ if ! xcrun --sdk macosx metal --version >/dev/null 2>&1; then
   exit 1
 fi
 
-print "Compiling MLX Metal resources with Xcode…"
+print "Compiling MLX Metal resources with Xcode (this can take a few minutes on the first build)…"
 xcodebuild \
   -quiet \
   -scheme Current \
@@ -178,7 +178,20 @@ xcodebuild \
   -skipPackagePluginValidation \
   -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO \
-  build
+  build &
+XCODEBUILD_PID=$!
+XCODEBUILD_SECONDS=0
+while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
+  sleep 1
+  (( XCODEBUILD_SECONDS += 1 ))
+  if (( XCODEBUILD_SECONDS % 10 == 0 )) && kill -0 "$XCODEBUILD_PID" 2>/dev/null; then
+    print "Still compiling MLX Metal resources (${XCODEBUILD_SECONDS}s elapsed)…"
+  fi
+done
+if ! wait "$XCODEBUILD_PID"; then
+  print -u2 "Xcode failed to compile MLX's Metal resources."
+  exit 1
+fi
 MLX_RESOURCE_BUNDLE="$XCODE_DERIVED_DATA/Build/Products/Release/mlx-swift_Cmlx.bundle"
 MLX_DEFAULT_LIBRARY="$MLX_RESOURCE_BUNDLE/Contents/Resources/default.metallib"
 if [[ ! -f "$MLX_DEFAULT_LIBRARY" ]]; then

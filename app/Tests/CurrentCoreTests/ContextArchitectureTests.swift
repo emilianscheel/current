@@ -298,7 +298,7 @@ private actor PromptScreenStub: ScreenContextProviding {
         ContextWorkerPromptRequest.self,
         from: JSONEncoder().encode(request)
     )
-    #expect(ContextWorkerProtocolVersion.current == 3)
+    #expect(ContextWorkerProtocolVersion.current == 4)
     #expect(decoded.requestID == request.requestID)
     #expect(decoded.priority == .interactive)
     #expect(DictationPhase.gatheringContext.displayName == "Reading context…")

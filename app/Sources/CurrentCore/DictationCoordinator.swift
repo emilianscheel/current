@@ -23,6 +23,7 @@ public final class DictationCoordinator {
     public let promptContextPreparer: (any PromptContextPreparing)?
     public var onPhaseChange: ((DictationPhase) -> Void)?
     public var onPartialTranscriptionChange: ((String) -> Void)?
+    public var onTranscriptionCompleted: ((Date) -> Void)?
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
     public var onTextCommitted: ((ContextCaptureTarget) -> Void)?
     public var onMonitoringChange: ((Bool) -> Void)?
@@ -320,6 +321,7 @@ public final class DictationCoordinator {
                 self.lastTranscription = text
                 self.partialTranscription = ""
                 self.onPartialTranscriptionChange?("")
+                self.onTranscriptionCompleted?(Date())
                 if Self.shouldRecordContext(
                     targetProcessIdentifier: targetProcessIdentifier,
                     currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier

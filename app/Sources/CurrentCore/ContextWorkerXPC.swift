@@ -2,12 +2,12 @@ import CoreGraphics
 import Foundation
 
 public enum ContextWorkerProtocolVersion {
-    public static let current = 3
+    public static let current = 4
     public static let serviceName = "local.Current.ContextWorker"
 }
 
 @objc public protocol ContextWorkerXPCProtocol {
-    func handshake(withReply reply: @escaping (Int) -> Void)
+    func handshake(withReply reply: @escaping (Int, Int32) -> Void)
     func recognizeText(
         _ requestData: Data,
         withReply reply: @escaping (Data?, String?) -> Void
@@ -143,6 +143,7 @@ public struct ContextWorkerPromptRequest: Codable, Sendable {
 @MainActor
 public final class ContextWorkerClient: @unchecked Sendable {
     public var onStateChange: (@MainActor (ContextBackgroundState) -> Void)?
+    public private(set) var processIdentifier: pid_t?
 
     private var connection: NSXPCConnection?
     private var handshakeComplete = false
@@ -317,6 +318,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
         connection?.invalidate()
         connection = nil
         handshakeComplete = false
+        processIdentifier = nil
         onStateChange?(.idle)
     }
 
@@ -386,6 +388,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
             connection.interruptionHandler = { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.handshakeComplete = false
+                    self?.processIdentifier = nil
                     self?.onStateChange?(.degraded)
                 }
             }
@@ -393,6 +396,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
                 Task { @MainActor [weak self] in
                     self?.connection = nil
                     self?.handshakeComplete = false
+                    self?.processIdentifier = nil
                 }
             }
             connection.resume()
@@ -403,6 +407,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
                   [weak self] _ in
                   Task { @MainActor [weak self] in
                       self?.handshakeComplete = false
+                      self?.processIdentifier = nil
                       self?.onStateChange?(.degraded)
                   }
               }) as? ContextWorkerXPCProtocol else {
@@ -411,15 +416,20 @@ public final class ContextWorkerClient: @unchecked Sendable {
             )
         }
         if !handshakeComplete {
-            let version = await withCheckedContinuation { continuation in
-                proxy.handshake { continuation.resume(returning: $0) }
+            let handshake = await withCheckedContinuation { continuation in
+                proxy.handshake { version, processIdentifier in
+                    continuation.resume(
+                        returning: (version, processIdentifier)
+                    )
+                }
             }
-            guard version == ContextWorkerProtocolVersion.current else {
+            guard handshake.0 == ContextWorkerProtocolVersion.current else {
                 invalidate()
                 throw CurrentError.modelUnavailable(
                     "The context worker version does not match Current."
                 )
             }
+            processIdentifier = pid_t(handshake.1)
             handshakeComplete = true
         }
         return proxy

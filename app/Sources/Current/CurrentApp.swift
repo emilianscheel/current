@@ -67,6 +67,12 @@ final class AppRuntime {
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
     @ObservationIgnored lazy var context = ContextWindowController(runtime: self, store: contextStore)
+    @ObservationIgnored lazy var usageMonitor = UsageMetricsMonitor(
+        worker: contextWorker
+    )
+    @ObservationIgnored lazy var usage = UsageStatisticsWindowController(
+        runtime: self
+    )
     @ObservationIgnored lazy var about = AboutWindowController(runtime: self)
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
     @ObservationIgnored private var phaseUpdateGeneration = UUID()
@@ -104,6 +110,9 @@ final class AppRuntime {
         }
         coordinator.onSuccessfulTranscription = { [weak self] text, date in
             self?.context.append(text, at: date)
+        }
+        coordinator.onTranscriptionCompleted = { [weak self] date in
+            self?.usageMonitor.recordSuccessfulTranscription(at: date)
         }
         coordinator.shortcut.onKeyboardActivity = { [weak self] in
             Task { @MainActor [weak self] in
@@ -201,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.runtime = runtime
         runtime.applyDockPolicy()
         statusController = StatusItemController(runtime: runtime)
+        runtime.usageMonitor.start()
         runtime.model.prepareIfNeeded()
         runtime.contextModel.prepareIfNeeded()
 
@@ -230,8 +240,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isFinishingTermination = true
         runtime.context.flush()
         Task {
-            await runtime.screenContext.stop()
             runtime.coordinator.stopMonitoring()
+            await runtime.usageMonitor.stop()
+            await runtime.screenContext.stop()
             await runtime.contextWorker.unload(force: true)
             sender.reply(toApplicationShouldTerminate: true)
         }

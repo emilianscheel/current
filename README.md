@@ -1,4 +1,4 @@
-<a href="https://current-mac.vercel.app"><img src="./app/icon.png" alt="current" width="48px"/></a>
+<a href="https://current-mac.vercel.app"><img src="./website/public/current-icon.png" alt="current" width="48px"/></a>
 
 # current
 

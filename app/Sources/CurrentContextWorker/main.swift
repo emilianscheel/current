@@ -47,8 +47,11 @@ private final class ContextWorkerService: NSObject,
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var jobs: [UUID: PendingJob] = [:]
 
-    func handshake(withReply reply: @escaping (Int) -> Void) {
-        reply(ContextWorkerProtocolVersion.current)
+    func handshake(withReply reply: @escaping (Int, Int32) -> Void) {
+        reply(
+            ContextWorkerProtocolVersion.current,
+            ProcessInfo.processInfo.processIdentifier
+        )
     }
 
     func recognizeText(

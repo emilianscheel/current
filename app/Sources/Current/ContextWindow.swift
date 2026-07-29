@@ -40,6 +40,7 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
                 .miniaturizable,
             ]
             window.titlebarAppearsTransparent = false
+            window.titlebarSeparatorStyle = .none
             window.titleVisibility = .visible
             window.setContentSize(NSSize(width: 1_000, height: 680))
             window.minSize = NSSize(width: 760, height: 520)

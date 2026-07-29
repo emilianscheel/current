@@ -349,61 +349,58 @@ private struct UsageStatisticsView: View {
     }
 
     private var overviewCards: some View {
-        GroupBox {
-            LazyVGrid(columns: cardColumns, spacing: 10) {
+        LazyVGrid(columns: cardColumns, spacing: 10) {
+            metricCard(
+                title: "Battery",
+                value: batteryValue,
+                detail: model.battery.statusDescription,
+                symbol: batterySymbol
+            )
+            metricCard(
+                title: "CPU",
+                value: model.monitor.today?.averageCPUPercent.map {
+                    String(format: "%.1f%%", $0)
+                } ?? "Estimating…",
+                detail: model.monitor.today.flatMap { record in
+                    record.averageCPUPercent.map { _ in
+                        "Peak \(String(format: "%.1f%%", record.cpuPeakPercent)) today"
+                    }
+                } ?? "Today’s average",
+                symbol: "cpu"
+            )
+            metricCard(
+                title: "Memory",
+                value: model.monitor.today?.averageMemoryBytes.map {
+                    formatBytes(Int64(clamping: $0))
+                } ?? "Estimating…",
+                detail: model.monitor.today.flatMap { record in
+                    record.averageMemoryBytes.map { _ in
+                        "Peak \(formatBytes(Int64(clamping: record.memoryPeakBytes))) today"
+                    }
+                } ?? "Today’s average",
+                symbol: "memorychip"
+            )
+            metricCard(
+                title: "Transcriptions",
+                value: "\(model.monitor.today?.successfulTranscriptions ?? 0)",
+                detail: "Successfully transcribed today",
+                symbol: "text.bubble"
+            )
+            metricCard(
+                title: "Total Storage",
+                value: storageValue,
+                detail: storageUpdatedText,
+                symbol: "internaldrive",
+                showsRefresh: true
+            )
+            ForEach(StorageUsageCategory.allCases) { category in
                 metricCard(
-                    title: "Battery",
-                    value: batteryValue,
-                    detail: model.battery.statusDescription,
-                    symbol: batterySymbol
+                    title: category.displayName,
+                    value: storageValue(for: category),
+                    detail: "Stored on this Mac",
+                    symbol: storageSymbol(for: category)
                 )
-                metricCard(
-                    title: "CPU",
-                    value: model.monitor.today?.averageCPUPercent.map {
-                        String(format: "%.1f%%", $0)
-                    } ?? "Estimating…",
-                    detail: model.monitor.today.flatMap { record in
-                        record.averageCPUPercent.map { _ in
-                            "Peak \(String(format: "%.1f%%", record.cpuPeakPercent)) today"
-                        }
-                    } ?? "Today’s average",
-                    symbol: "cpu"
-                )
-                metricCard(
-                    title: "Memory",
-                    value: model.monitor.today?.averageMemoryBytes.map {
-                        formatBytes(Int64(clamping: $0))
-                    } ?? "Estimating…",
-                    detail: model.monitor.today.flatMap { record in
-                        record.averageMemoryBytes.map { _ in
-                            "Peak \(formatBytes(Int64(clamping: record.memoryPeakBytes))) today"
-                        }
-                    } ?? "Today’s average",
-                    symbol: "memorychip"
-                )
-                metricCard(
-                    title: "Transcriptions",
-                    value: "\(model.monitor.today?.successfulTranscriptions ?? 0)",
-                    detail: "Successfully transcribed today",
-                    symbol: "text.bubble"
-                )
-                metricCard(
-                    title: "Total Storage",
-                    value: storageValue,
-                    detail: storageUpdatedText,
-                    symbol: "internaldrive",
-                    showsRefresh: true
-                )
-                ForEach(StorageUsageCategory.allCases) { category in
-                    metricCard(
-                        title: category.displayName,
-                        value: storageValue(for: category),
-                        detail: "Stored on this Mac",
-                        symbol: storageSymbol(for: category)
-                    )
-                }
             }
-            .padding(2)
         }
         .frame(maxWidth: .infinity)
     }

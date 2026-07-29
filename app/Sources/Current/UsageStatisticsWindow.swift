@@ -354,7 +354,7 @@ private struct UsageStatisticsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 190)
+                .fixedSize(horizontal: true, vertical: false)
                 .accessibilityLabel("History range")
             }
         }

@@ -67,10 +67,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func refreshPermissions() {
-        let previous = permissions
         permissions = runtime.permissions.snapshot()
-        guard window?.isVisible == true else { return }
-        if previous != permissions { autoAdvanceIfPossible() }
     }
 
     func request(_ kind: PermissionKind) {
@@ -121,10 +118,6 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
     }
 
-    private func autoAdvanceIfPossible() {
-        if let destination = OnboardingFlow.automaticDestination(from: step, permissions: permissions) { setStep(destination) }
-    }
-
     private func setStep(_ step: OnboardingStep) {
         withAnimation(.snappy) { self.step = step }
         runtime.settings.onboardingStep = step
@@ -155,46 +148,25 @@ struct OnboardingView: View {
 
     @ViewBuilder private var content: some View {
         if !runtime.hardware.isSupported {
-            StepLayout(symbol: "macbook", title: "This Mac isn’t supported", text: runtime.hardware.reason) {
-                Text("Current is optimized for M3-or-newer MacBooks with at least 16 GB of unified memory.")
-                    .foregroundStyle(.secondary)
-            }
+            StepLayout(symbol: "macbook", title: "This Mac isn’t supported") { EmptyView() }
         } else {
             switch controller.step {
             case .welcome:
-                StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.", text: "Hold fn, speak naturally, then release to type into the app you were using.") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        FeatureRow(symbol: "lock.shield", text: "Audio and transcription stay on this Mac")
-                        FeatureRow(symbol: "waveform", text: "Multilingual Parakeet runs on the Neural Engine")
-                        FeatureRow(
-                            symbol: "memorychip",
-                            text: "Gemma 4 structures app context locally with MLX and Metal"
-                        )
-                        FeatureRow(symbol: "arrow.down.circle", text: modelSummary)
-                    }
-                }
+                StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.") { EmptyView() }
             case .microphone: permissionStep(.microphone)
             case .accessibility: permissionStep(.accessibility)
             case .screenRecording: permissionStep(.screenRecording)
             case .inputMonitoring: permissionStep(.inputMonitoring)
             case .restart:
-                StepLayout(symbol: "arrow.clockwise.circle", title: "One quick restart", text: "macOS activates Screen Recording and Input Monitoring after Current restarts. Your model download and onboarding place are preserved.") {
+                StepLayout(symbol: "arrow.clockwise.circle", title: "One quick restart") {
                     Button("Restart Current") { controller.restart() }.buttonStyle(.borderedProminent).controlSize(.large)
                 }
             case .model:
-                StepLayout(symbol: "cpu", title: "Preparing on-device models", text: "Current downloads speech recognition and context structuring concurrently. Downloads use the network during setup; both models run locally afterward.") {
-                    VStack(spacing: 16) {
-                        modelProgress
-                        Text(
-                            "MLX Swift is Apache 2.0 licensed. Gemma is provided under Google’s Gemma Terms of Use."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    }
+                StepLayout(symbol: "cpu", title: "Preparing on-device models") {
+                    modelProgress
                 }
             case .practice:
-                StepLayout(symbol: "text.cursor", title: "Try it here", text: "Click the field, hold fn, say a short sentence, and release.") {
+                StepLayout(symbol: "text.cursor", title: "Try it here") {
                     TextEditor(text: $controller.practiceText)
                         .font(.title3).scrollContentBackground(.hidden).padding(12)
                         .frame(height: 120)
@@ -205,30 +177,34 @@ struct OnboardingView: View {
                         }
                 }
             case .preferences:
-                StepLayout(symbol: "checkmark.circle", title: "Ready when you are", text: "Choose two useful defaults. You can change these later in Settings.") {
+                StepLayout(symbol: "checkmark.circle", title: "Ready when you are") {
                     VStack(alignment: .leading) {
                         Toggle("Launch Current at login", isOn: $runtime.settings.launchAtLogin)
                         Toggle("Play quiet start and stop sounds", isOn: $runtime.settings.soundsEnabled)
                     }.toggleStyle(.switch).frame(maxWidth: 360)
                 }
             case .complete:
-                StepLayout(symbol: "checkmark.seal.fill", title: "Current is ready", text: "Current now lives in the menu bar. Hold fn in any editable field to dictate.") { EmptyView() }
+                StepLayout(symbol: "checkmark.seal.fill", title: "Current is ready") { EmptyView() }
             }
         }
     }
 
     private func permissionStep(_ kind: PermissionKind) -> some View {
-        StepLayout(symbol: permissionSymbol(kind), title: "Allow \(kind.title)", text: kind.explanation) {
+        StepLayout(symbol: permissionSymbol(kind), title: "Allow \(kind.title)") {
             VStack(spacing: 12) {
                 Label(controller.permissions[kind].isGranted ? "Granted" : "Waiting for permission", systemImage: controller.permissions[kind].isGranted ? "checkmark.circle.fill" : "circle.dotted")
                     .foregroundStyle(controller.permissions[kind].isGranted ? .green : .secondary)
-                Button(controller.permissions[kind] == .notDetermined ? "Continue" : "Allow \(kind.title)") {
-                    controller.request(kind)
-                }.buttonStyle(.borderedProminent).controlSize(.large)
-                if kind == .inputMonitoring, controller.requestedInputMonitoring {
+                if !controller.permissions[kind].isGranted {
+                    Button(controller.permissions[kind] == .notDetermined ? "Continue" : "Allow \(kind.title)") {
+                        controller.request(kind)
+                    }.buttonStyle(.borderedProminent).controlSize(.large)
+                }
+                if kind == .inputMonitoring, controller.requestedInputMonitoring,
+                   !controller.permissions[kind].isGranted {
                     Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
                 }
-                if kind == .screenRecording, controller.requestedScreenRecording {
+                if kind == .screenRecording, controller.requestedScreenRecording,
+                   !controller.permissions[kind].isGranted {
                     Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
                 }
             }
@@ -279,14 +255,13 @@ struct OnboardingView: View {
         }
     }
 
-    private var modelSummary: String {
-        runtime.model.state.isReady && runtime.contextModel.state.isReady
-            ? "Both local models are ready"
-            : "Both model downloads start automatically"
-    }
     private var showNext: Bool {
         switch controller.step {
-        case .microphone, .accessibility, .screenRecording, .inputMonitoring, .restart: false
+        case .microphone: controller.permissions.microphone.isGranted
+        case .accessibility: controller.permissions.accessibility.isGranted
+        case .screenRecording: controller.permissions.screenRecording.isGranted
+        case .inputMonitoring: controller.permissions.inputMonitoring.isGranted
+        case .restart: false
         case .model:
             runtime.model.state.isReady
                 && runtime.contextModel.state.isReady
@@ -306,9 +281,9 @@ struct OnboardingView: View {
 }
 
 private struct StepLayout<Content: View>: View {
-    let symbol: String; let title: String; let text: String; @ViewBuilder let content: Content
-    init(symbol: String, title: String, text: String, @ViewBuilder content: () -> Content) {
-        self.symbol = symbol; self.title = title; self.text = text; self.content = content()
+    let symbol: String; let title: String; @ViewBuilder let content: Content
+    init(symbol: String, title: String, @ViewBuilder content: () -> Content) {
+        self.symbol = symbol; self.title = title; self.content = content()
     }
     var body: some View {
         VStack(spacing: 20) {
@@ -317,13 +292,7 @@ private struct StepLayout<Content: View>: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.gray)
             Text(title).font(.system(size: 30, weight: .semibold, design: .rounded))
-            Text(text).font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
             content.padding(.top, 8)
         }
     }
-}
-
-private struct FeatureRow: View {
-    let symbol: String; let text: String
-    var body: some View { Label(text, systemImage: symbol).foregroundStyle(.secondary) }
 }

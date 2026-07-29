@@ -1,8 +1,40 @@
 @import "tailwindcss";
 
 :root {
+  color-scheme: light dark;
   --background: #ffffff;
   --foreground: #000000;
+  --secondary-foreground: #6e6e73;
+  --primary-button-background: #000000;
+  --primary-button-foreground: #ffffff;
+  --primary-button-border: #000000;
+  --primary-button-hover: #333333;
+  --primary-button-active: #4d4d4d;
+  --secondary-button-background: #ffffff;
+  --secondary-button-foreground: #000000;
+  --secondary-button-border: #000000;
+  --secondary-button-hover: rgb(0 0 0 / 0.06);
+  --secondary-button-active: rgb(0 0 0 / 0.11);
+  --focus-ring: #000000;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #000000;
+    --foreground: #f5f5f7;
+    --secondary-foreground: #a1a1a6;
+    --primary-button-background: #f5f5f7;
+    --primary-button-foreground: #000000;
+    --primary-button-border: #f5f5f7;
+    --primary-button-hover: #dedee0;
+    --primary-button-active: #c7c7ca;
+    --secondary-button-background: #000000;
+    --secondary-button-foreground: #f5f5f7;
+    --secondary-button-border: #f5f5f7;
+    --secondary-button-hover: rgb(255 255 255 / 0.1);
+    --secondary-button-active: rgb(255 255 255 / 0.16);
+    --focus-ring: #f5f5f7;
+  }
 }
 
 @theme inline {

@@ -5,6 +5,11 @@
 Current uses FluidAudio, Copyright FluidInference contributors, under the Apache License 2.0.
 Source: https://github.com/FluidInference/FluidAudio
 
+## ConfettiSwiftUI
+
+Current uses ConfettiSwiftUI for the onboarding completion particle effect. ConfettiSwiftUI is Copyright Simon Bachmann and contributors and is distributed under the MIT License.
+Source: https://github.com/simibac/ConfettiSwiftUI
+
 ## Parakeet TDT 0.6B v3 Multilingual Core ML
 
 The on-device speech model is FluidInference/parakeet-tdt-0.6b-v3-coreml, based on NVIDIA Parakeet TDT 0.6B v3, and is distributed under Creative Commons Attribution 4.0 International (CC BY 4.0).

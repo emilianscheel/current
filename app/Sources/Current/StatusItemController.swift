@@ -21,7 +21,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let permissions = runtime.permissions.snapshot()
+        let permissions = runtime.effectivePermissionSnapshot()
         let onboardingTitle = MenuBarPresentation.onboardingActionTitle(
             completed: runtime.settings.onboardingComplete,
             permissions: permissions,
@@ -35,11 +35,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         if onboardingTitle != nil {
             add(
-                permissions.allGranted(
-                    contextWorkerEnabled: runtime.settings.contextWorkerEnabled
-                )
-                    ? "Permissions: Ready"
-                    : "Permissions: Action needed",
+                permissionStatusTitle(permissions),
                 to: menu,
                 symbol: permissions.allGranted(
                     contextWorkerEnabled: runtime.settings.contextWorkerEnabled
@@ -52,7 +48,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             captureTitle,
             to: menu,
             action: #selector(toggleCapture),
-            symbol: runtime.coordinator.phase == .recording ? "stop.circle" : "waveform"
+            symbol: runtime.coordinator.phase == .recording ? "stop.circle" : "waveform",
+            enabled: !runtime.inputMonitoringRestartRequired
         )
         add(
             "Paste Last Transcription",
@@ -100,7 +97,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 : "Enable Context Worker",
             to: menu,
             action: #selector(toggleContextWorker),
-            symbol: "brain"
+            symbol: runtime.settings.contextWorkerEnabled
+                ? "stop.circle"
+                : "checkmark.circle"
         )
         addModel(
             "Parakeet TDT v3 Multilingual",
@@ -130,6 +129,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return "Resume and Start Dictation"
         }
         return "Start Dictation"
+    }
+
+    private func permissionStatusTitle(
+        _ permissions: PermissionSnapshot
+    ) -> String {
+        if runtime.inputMonitoringRestartRequired {
+            return "Permissions: Restart required"
+        }
+        return permissions.allGranted(
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+        ) ? "Permissions: Ready" : "Permissions: Action needed"
     }
 
     private func add(

@@ -1,4 +1,5 @@
 import CoreAudio
+import CoreGraphics
 import Foundation
 import Testing
 @testable import CurrentCore
@@ -462,6 +463,50 @@ private struct DictationEvaluationFixture: Decodable {
     let snapshot = PermissionSnapshot(microphone: .granted, accessibility: .denied, inputMonitoring: .granted)
     #expect(snapshot.firstMissing == .accessibility)
     #expect(!snapshot.allGranted)
+}
+
+@Test func permissionSnapshotReportsEveryRuntimeTransition() {
+    let granted = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
+    let revoked = PermissionSnapshot(
+        microphone: .denied,
+        accessibility: .denied,
+        screenRecording: .denied,
+        inputMonitoring: .denied
+    )
+    #expect(
+        revoked.revokedPermissions(since: granted)
+            == PermissionKind.allCases
+    )
+    #expect(
+        granted.restoredPermissions(since: revoked)
+            == PermissionKind.allCases
+    )
+    #expect(granted.revokedPermissions(since: granted).isEmpty)
+}
+
+@Test func shortcutEventTapDistinguishesTimeoutFromPermissionLoss() {
+    #expect(
+        ShortcutMonitor.disableAction(for: .tapDisabledByTimeout)
+            == .reenable
+    )
+    #expect(
+        ShortcutMonitor.disableAction(for: .tapDisabledByUserInput)
+            == .permissionLost
+    )
+    #expect(ShortcutMonitor.disableAction(for: .keyDown) == .none)
+}
+
+@Test func contextProcessingRetryBackoffIsBounded() {
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 1) == 30)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 2) == 60)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 3) == 120)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 4) == 300)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 20) == 300)
 }
 
 @Test func modelIntegrityDetectsMutation() throws {

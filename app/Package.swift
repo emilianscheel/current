@@ -16,6 +16,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
         .package(
+            url: "https://github.com/simibac/ConfettiSwiftUI.git",
+            exact: "3.0.0"
+        ),
+        .package(
             url: "https://github.com/ml-explore/mlx-swift-lm.git",
             exact: "3.31.4"
         ),
@@ -49,7 +53,13 @@ let package = Package(
         .systemLibrary(name: "CSQLite"),
         .executableTarget(
             name: "Current",
-            dependencies: ["CurrentCore"],
+            dependencies: [
+                "CurrentCore",
+                .product(
+                    name: "ConfettiSwiftUI",
+                    package: "ConfettiSwiftUI"
+                ),
+            ],
             resources: [.process("Resources")]
         ),
         .executableTarget(name: "CurrentRelauncher"),

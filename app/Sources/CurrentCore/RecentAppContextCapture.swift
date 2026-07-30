@@ -401,6 +401,7 @@ public final class AccessibilityContextSource: AccessibilityContextProviding {
 @Observable
 public final class ScreenContextCoordinator: ScreenContextProviding {
     public private(set) var backgroundState: ContextBackgroundState = .idle
+    public private(set) var missingPermission: PermissionKind?
 
     private static let maximumCaptureLongEdge = 1_600
     private static let workerIdleLifetime: Duration = .seconds(5 * 60)
@@ -450,15 +451,28 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
             }
         }
         worker?.onStateChange = { [weak self] state in
-            if state == .degraded { self?.backgroundState = .degraded }
+            if state == .degraded, self?.missingPermission == nil {
+                self?.backgroundState = .degraded
+            }
         }
     }
 
     public func start() async throws {
         guard !isRunning else { return }
+        guard AXIsProcessTrusted() else {
+            await suspendForPermissionLoss(.accessibility)
+            throw CurrentError.permissionMissing(.accessibility)
+        }
         guard CGPreflightScreenCaptureAccess() else {
+            await suspendForPermissionLoss(.screenRecording)
             throw CurrentError.permissionMissing(.screenRecording)
         }
+        guard CGPreflightListenEventAccess() else {
+            await suspendForPermissionLoss(.inputMonitoring)
+            throw CurrentError.permissionMissing(.inputMonitoring)
+        }
+        missingPermission = nil
+        await repository.resumeBackgroundProcessing()
         isRunning = true
         isSleeping = false
         accessibility.start()
@@ -477,6 +491,18 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
     /// Stops scheduling and cancels only background work. Interactive requests
     /// already in flight are deliberately left alone and can finish safely.
     public func suspendBackgroundCapture() async {
+        missingPermission = nil
+        await suspendBackgroundCapture(state: .idle)
+    }
+
+    public func suspendForPermissionLoss(_ permission: PermissionKind) async {
+        missingPermission = permission
+        await suspendBackgroundCapture(state: .permissionRequired)
+    }
+
+    private func suspendBackgroundCapture(
+        state: ContextBackgroundState
+    ) async {
         isRunning = false
         schedulerTask?.cancel()
         schedulerTask = nil
@@ -484,8 +510,9 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
         workerIdleTask = nil
         accessibility.stop()
         removeNotifications()
+        await repository.suspendBackgroundProcessing()
         await worker?.cancelBackgroundWork()
-        backgroundState = .idle
+        backgroundState = state
     }
 
     public func scheduleCapture(
@@ -521,6 +548,7 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
 
     public func setForegroundInteractionActive(_ active: Bool) async {
         foregroundInteractionActive = active
+        guard isRunning else { return }
         if active {
             let wasProcessing = backgroundState == .processing
             backgroundState = .suspendedDuringDictation

@@ -1,7 +1,13 @@
 import AppKit
+import ConfettiSwiftUI
 import CurrentCore
 import Observation
 import SwiftUI
+
+enum OnboardingNavigationDirection {
+    case forward
+    case backward
+}
 
 @MainActor
 @Observable
@@ -24,6 +30,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     var practiceText = ""
     var requestedInputMonitoring = false
     var requestedScreenRecording = false
+    var navigationDirection = OnboardingNavigationDirection.forward
+    var completionCelebration = 0
+    private var hasCelebratedCompletion = false
 
     init(runtime: AppRuntime) {
         self.runtime = runtime
@@ -92,12 +101,21 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func refreshPermissions() {
-        permissions = runtime.permissions.snapshot()
+        permissions = runtime.effectivePermissionSnapshot()
+    }
+
+    func requireInputMonitoringRestart() {
+        requestedInputMonitoring = true
+        refreshPermissions()
     }
 
     func request(_ kind: PermissionKind) {
         if kind == .inputMonitoring { requestedInputMonitoring = true }
         if kind == .screenRecording { requestedScreenRecording = true }
+        if kind != .microphone {
+            openSettings(kind)
+            return
+        }
         Task {
             _ = await runtime.permissions.request(kind)
             refreshPermissions()
@@ -116,7 +134,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             direction: 1,
             contextWorkerEnabled: runtime.settings.contextWorkerEnabled
         ) else { return }
-        setStep(next)
+        setStep(next, direction: .forward)
     }
 
     func back() {
@@ -125,7 +143,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             direction: -1,
             contextWorkerEnabled: runtime.settings.contextWorkerEnabled
         ) else { return }
-        setStep(previous)
+        setStep(previous, direction: .backward)
     }
 
     func restart() {
@@ -165,9 +183,21 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    private func setStep(_ step: OnboardingStep) {
+    private func setStep(
+        _ step: OnboardingStep,
+        direction: OnboardingNavigationDirection
+    ) {
         permissionGuidance.dismiss()
-        withAnimation(.snappy) { self.step = step }
+        navigationDirection = direction
+        let shouldCelebrate = self.step == .preferences
+            && step == .complete
+            && !hasCelebratedCompletion
+            && !runtime.settings.onboardingComplete
+        self.step = step
+        if shouldCelebrate {
+            hasCelebratedCompletion = true
+            completionCelebration += 1
+        }
         runtime.settings.onboardingStep = step
     }
 
@@ -176,15 +206,30 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 struct OnboardingView: View {
     @Bindable var controller: OnboardingController
     @Bindable var runtime: AppRuntime
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             Color.white
                 .ignoresSafeArea()
             VStack(spacing: 0) {
-                Group { content }
+                ZStack {
+                    content
+                        .id(controller.step)
+                        .transition(pageTransition)
+                        .padding(40)
+                    if !reduceMotion {
+                        CompletionConfetti(
+                            trigger: controller.completionCelebration
+                        )
+                            .opacity(controller.step == .complete ? 1 : 0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(40)
+                    .clipped()
+                    .animation(pageAnimation, value: controller.step)
                 Divider().opacity(0.5)
                 HStack {
                     if controller.step != .welcome { Button("Back") { controller.back() }.buttonStyle(.plain) }
@@ -298,32 +343,78 @@ struct OnboardingView: View {
     }
 
     private func permissionStep(_ kind: PermissionKind) -> some View {
-        StepLayout(symbol: permissionSymbol(kind), title: kind.title) {
+        let isGranted = controller.permissions[kind].isGranted
+        return StepLayout(symbol: permissionSymbol(kind), title: kind.title) {
             VStack(spacing: 0) {
-                Label(controller.permissions[kind].isGranted ? "Granted" : "Waiting for permission", systemImage: controller.permissions[kind].isGranted ? "checkmark.circle.fill" : "circle.dotted")
-                    .foregroundStyle(controller.permissions[kind].isGranted ? .green : .secondary)
-                if !controller.permissions[kind].isGranted {
+                Group {
+                    if isGranted {
+                        Label("Granted", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .transition(permissionStatusTransition)
+                    } else {
+                        Label("Waiting for permission", systemImage: "circle.dotted")
+                            .foregroundStyle(.secondary)
+                            .transition(permissionStatusTransition)
+                    }
+                }
+                .id(isGranted)
+                if !isGranted {
                     Button(controller.permissions[kind] == .notDetermined ? "Continue" : "Allow \(kind.title)") {
                         controller.request(kind)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .padding(.top, 28)
+                    .transition(permissionControlTransition)
                 }
                 if kind == .inputMonitoring, controller.requestedInputMonitoring,
-                   !controller.permissions[kind].isGranted {
+                   !isGranted {
                     Button("I enabled it — Restart Current") { controller.restart() }
                         .buttonStyle(.bordered)
                         .padding(.top, 12)
+                        .transition(permissionControlTransition)
                 }
                 if kind == .screenRecording, controller.requestedScreenRecording,
-                   !controller.permissions[kind].isGranted {
+                   !isGranted {
                     Button("I enabled it — Restart Current") { controller.restart() }
                         .buttonStyle(.bordered)
                         .padding(.top, 12)
+                        .transition(permissionControlTransition)
                 }
             }
+            .animation(
+                reduceMotion ? .easeOut(duration: 0.16) : .snappy,
+                value: isGranted
+            )
         }
+    }
+
+    private var pageAnimation: Animation {
+        reduceMotion ? .easeOut(duration: 0.16) : .snappy(duration: 0.38)
+    }
+
+    private var pageTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let insertionEdge: Edge = controller.navigationDirection == .forward
+            ? .trailing : .leading
+        let removalEdge: Edge = controller.navigationDirection == .forward
+            ? .leading : .trailing
+        return .asymmetric(
+            insertion: .opacity.combined(with: .move(edge: insertionEdge)),
+            removal: .opacity.combined(with: .move(edge: removalEdge))
+        )
+    }
+
+    private var permissionStatusTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .scale(scale: 0.96))
+    }
+
+    private var permissionControlTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .move(edge: .bottom))
     }
 
     @ViewBuilder private var modelProgress: some View {
@@ -396,6 +487,60 @@ struct OnboardingView: View {
         case .screenRecording: "rectangle.dashed.badge.record"
         case .inputMonitoring: "keyboard"
         }
+    }
+}
+
+private struct CompletionConfetti: View {
+    let trigger: Int
+    @State private var leftTrigger = 0
+    @State private var rightTrigger = 0
+
+    var body: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .frame(width: 1, height: 1)
+                .confettiCannon(
+                    trigger: $leftTrigger,
+                    num: 70,
+                    colors: confettiColors,
+                    confettiSize: 9,
+                    rainHeight: geometry.size.height * 1.15,
+                    openingAngle: .degrees(18),
+                    closingAngle: .degrees(78),
+                    radius: geometry.size.width * 0.72,
+                    hapticFeedback: false
+                )
+                .position(x: 0, y: geometry.size.height)
+
+            Color.clear
+                .frame(width: 1, height: 1)
+                .confettiCannon(
+                    trigger: $rightTrigger,
+                    num: 70,
+                    colors: confettiColors,
+                    confettiSize: 9,
+                    rainHeight: geometry.size.height * 1.15,
+                    openingAngle: .degrees(102),
+                    closingAngle: .degrees(162),
+                    radius: geometry.size.width * 0.72,
+                    hapticFeedback: false
+                )
+                .position(
+                    x: geometry.size.width,
+                    y: geometry.size.height
+                )
+        }
+        .task(id: trigger) {
+            guard trigger > 0 else { return }
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            leftTrigger += 1
+            rightTrigger += 1
+        }
+    }
+
+    private var confettiColors: [Color] {
+        [.blue, .cyan, .green, .orange, .pink, .purple, .yellow]
     }
 }
 

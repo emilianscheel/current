@@ -229,6 +229,10 @@ private final class ContextWorkerService: NSObject,
         reply: ReplyBox,
         operation: @escaping @Sendable () async throws -> Data
     ) {
+        // A reconnect may resend a request whose original reply was lost.
+        // Cancel the tracked operation first so the expensive work cannot be
+        // queued or executed twice under the same identifier.
+        cancelJobs { $0 == requestID }
         if priority != .background {
             cancelBackgroundJobs()
         }

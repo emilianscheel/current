@@ -30,13 +30,8 @@ public final class PermissionManager: PermissionManaging {
             if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
                 _ = await AVCaptureDevice.requestAccess(for: .audio)
             }
-        case .accessibility:
-            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-        case .screenRecording:
-            _ = CGRequestScreenCaptureAccess()
-        case .inputMonitoring:
-            _ = CGRequestListenEventAccess()
+        case .accessibility, .screenRecording, .inputMonitoring:
+            break
         }
         try? await Task.sleep(for: .milliseconds(250))
         return snapshot()[kind]

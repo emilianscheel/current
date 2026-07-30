@@ -90,6 +90,9 @@ final class AppRuntime {
     @ObservationIgnored private var phaseUpdateGeneration = UUID()
     @ObservationIgnored private var promptMemoryPressureSource:
         DispatchSourceMemoryPressure?
+    @ObservationIgnored private var permissionMonitorTask: Task<Void, Never>?
+    @ObservationIgnored private var lastPermissionSnapshot: PermissionSnapshot?
+    private(set) var inputMonitoringRestartRequired = false
 
     init() {
         contextStore.reload()
@@ -171,6 +174,11 @@ final class AppRuntime {
                 ))
             }
         }
+        coordinator.shortcut.onPermissionLoss = { [weak self] permission in
+            Task { @MainActor [weak self] in
+                await self?.handlePermissionLoss(permission)
+            }
+        }
         coordinator.onTextCommitted = { [weak self] target in
             Task { @MainActor [weak self] in
                 await self?.screenContext.scheduleCapture(
@@ -183,17 +191,115 @@ final class AppRuntime {
             guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if active,
-                   self.settings.contextWorkerEnabled,
-                   self.settings.continuousContextEnabled,
-                   self.permissions.snapshot().screenRecording.isGranted {
-                    self.contextModel.prepareIfNeeded()
-                    try? await self.screenContext.start()
+                if active {
+                    await self.reconcileContinuousContext(
+                        snapshot: self.permissions.snapshot()
+                    )
                 } else {
-                    await self.screenContext.stop()
+                    if self.inputMonitoringRestartRequired {
+                        await self.screenContext.suspendForPermissionLoss(
+                            .inputMonitoring
+                        )
+                    } else {
+                        await self.screenContext.suspendBackgroundCapture()
+                    }
                     await self.contextModel.unload()
                 }
             }
+        }
+    }
+
+    func startPermissionMonitoring() {
+        guard permissionMonitorTask == nil else { return }
+        let initial = permissions.snapshot()
+        lastPermissionSnapshot = initial
+        permissionMonitorTask = Task { @MainActor [weak self] in
+            await self?.refreshPermissionState(force: true)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                await self?.refreshPermissionState()
+            }
+        }
+    }
+
+    func stopPermissionMonitoring() {
+        permissionMonitorTask?.cancel()
+        permissionMonitorTask = nil
+    }
+
+    func effectivePermissionSnapshot() -> PermissionSnapshot {
+        var snapshot = permissions.snapshot()
+        if inputMonitoringRestartRequired {
+            snapshot.inputMonitoring = .denied
+        }
+        return snapshot
+    }
+
+    func refreshPermissionState(force: Bool = false) async {
+        let current = permissions.snapshot()
+        let previous = lastPermissionSnapshot
+        guard force || previous != current else { return }
+        lastPermissionSnapshot = current
+
+        let revoked = previous.map {
+            current.revokedPermissions(since: $0)
+        } ?? []
+        let restored = previous.map {
+            current.restoredPermissions(since: $0)
+        } ?? []
+        if revoked.contains(.microphone) {
+            coordinator.cancel()
+        }
+        if revoked.contains(.inputMonitoring) {
+            await handlePermissionLoss(.inputMonitoring)
+        }
+        if restored.contains(.inputMonitoring) {
+            inputMonitoringRestartRequired = true
+            onboarding.requireInputMonitoringRestart()
+        }
+
+        if !current.accessibility.isGranted {
+            await screenContext.suspendForPermissionLoss(.accessibility)
+        } else if !current.screenRecording.isGranted {
+            await screenContext.suspendForPermissionLoss(.screenRecording)
+        } else if !current.inputMonitoring.isGranted
+                    || inputMonitoringRestartRequired {
+            await screenContext.suspendForPermissionLoss(.inputMonitoring)
+        } else {
+            await reconcileContinuousContext(snapshot: current)
+        }
+    }
+
+    private func handlePermissionLoss(_ permission: PermissionKind) async {
+        guard permission == .inputMonitoring else { return }
+        if !inputMonitoringRestartRequired {
+            inputMonitoringRestartRequired = true
+            onboarding.requireInputMonitoringRestart()
+            coordinator.stopMonitoring()
+        }
+        await screenContext.suspendForPermissionLoss(.inputMonitoring)
+    }
+
+    private func reconcileContinuousContext(
+        snapshot: PermissionSnapshot
+    ) async {
+        guard settings.contextWorkerEnabled,
+              settings.isEnabled,
+              settings.continuousContextEnabled else {
+            await screenContext.suspendBackgroundCapture()
+            return
+        }
+        if !snapshot.accessibility.isGranted {
+            await screenContext.suspendForPermissionLoss(.accessibility)
+        } else if !snapshot.screenRecording.isGranted {
+            await screenContext.suspendForPermissionLoss(.screenRecording)
+        } else if !snapshot.inputMonitoring.isGranted
+                    || inputMonitoringRestartRequired {
+            await screenContext.suspendForPermissionLoss(.inputMonitoring)
+        } else {
+            contextModel.prepareIfNeeded()
+            try? await screenContext.start()
         }
     }
 
@@ -219,16 +325,10 @@ final class AppRuntime {
     func applyContinuousContextPreference() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.settings.contextWorkerEnabled,
-               self.settings.isEnabled,
-               self.settings.continuousContextEnabled,
-               self.permissions.snapshot().screenRecording.isGranted {
-                self.contextModel.prepareIfNeeded()
-                try? await self.screenContext.start()
-            } else {
-                await self.screenContext.suspendBackgroundCapture()
-                await self.finishDeferredContextWorkerDisableIfNeeded()
-            }
+            await self.reconcileContinuousContext(
+                snapshot: self.permissions.snapshot()
+            )
+            await self.finishDeferredContextWorkerDisableIfNeeded()
         }
     }
 
@@ -295,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.runtime = runtime
         runtime.applyDockPolicy()
         statusController = StatusItemController(runtime: runtime)
+        runtime.startPermissionMonitoring()
         runtime.usageMonitor.start()
         runtime.model.prepareIfNeeded()
         if runtime.settings.contextWorkerEnabled {
@@ -320,6 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         runtime?.onboarding.refreshPermissions()
+        Task { await runtime?.refreshPermissionState(force: true) }
     }
 
     func applicationShouldTerminate(
@@ -329,6 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
         isFinishingTermination = true
+        runtime.stopPermissionMonitoring()
         runtime.context.flush()
         Task {
             runtime.coordinator.stopMonitoring()

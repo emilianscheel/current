@@ -153,6 +153,22 @@ public struct PermissionSnapshot: Sendable, Equatable {
         PermissionKind.allCases.first { !self[$0].isGranted }
     }
 
+    public func revokedPermissions(
+        since previous: PermissionSnapshot
+    ) -> [PermissionKind] {
+        PermissionKind.allCases.filter {
+            previous[$0].isGranted && !self[$0].isGranted
+        }
+    }
+
+    public func restoredPermissions(
+        since previous: PermissionSnapshot
+    ) -> [PermissionKind] {
+        PermissionKind.allCases.filter {
+            !previous[$0].isGranted && self[$0].isGranted
+        }
+    }
+
     public func allGranted(contextWorkerEnabled: Bool) -> Bool {
         requiredPermissions(contextWorkerEnabled: contextWorkerEnabled)
             .allSatisfy { self[$0].isGranted }

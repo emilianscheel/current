@@ -48,6 +48,40 @@ private actor StubIntelligence:
     }
 }
 
+private actor BlockingContextStructurer: ContextStructuringProviding {
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var callCount = 0
+    private(set) var maximumConcurrentCalls = 0
+    private var activeCalls = 0
+
+    func updateContextDocument(
+        currentState: String,
+        observations: [ContextObservation]
+    ) async throws -> ContextDocumentUpdate {
+        callCount += 1
+        activeCalls += 1
+        maximumConcurrentCalls = max(maximumConcurrentCalls, activeCalls)
+        if callCount == 1 {
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        }
+        activeCalls -= 1
+        let text = observations.flatMap(\.blocks).map(\.text)
+            .joined(separator: "\n")
+        return ContextDocumentUpdate(
+            changed: true,
+            currentStateMarkdown: text,
+            activityEntryMarkdown: text
+        )
+    }
+
+    func releaseFirstCall() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 private struct FailingPromptIntelligence: LocalIntelligenceProviding {
     func refineDictation(
         _ deterministic: RefinementResult,
@@ -117,6 +151,11 @@ private final class TestXPCReplyBox<Callback>: @unchecked Sendable {
 private final class BackgroundReplyContextWorker: NSObject,
     ContextWorkerXPCProtocol, @unchecked Sendable
 {
+    private let lock = NSLock()
+    private var structureCallCount = 0
+
+    var structureCalls: Int { lock.withLock { structureCallCount } }
+
     func handshake(withReply reply: @escaping (Int, Int32) -> Void) {
         let box = TestXPCReplyBox(reply)
         DispatchQueue.global().async {
@@ -141,6 +180,7 @@ private final class BackgroundReplyContextWorker: NSObject,
     }
 
     func structureContext(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
+        lock.withLock { structureCallCount += 1 }
         reply(nil)
     }
     func generatePrompt(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
@@ -162,11 +202,17 @@ private final class TestXPCListenerDelegate: NSObject,
     NSXPCListenerDelegate, @unchecked Sendable
 {
     private let worker = BackgroundReplyContextWorker()
+    private let lock = NSLock()
+    private var acceptedConnectionCount = 0
+
+    var structureCalls: Int { worker.structureCalls }
+    var acceptedConnections: Int { lock.withLock { acceptedConnectionCount } }
 
     func listener(
         _ listener: NSXPCListener,
         shouldAcceptNewConnection connection: NSXPCConnection
     ) -> Bool {
+        lock.withLock { acceptedConnectionCount += 1 }
         connection.exportedInterface = NSXPCInterface(
             with: ContextWorkerXPCProtocol.self
         )
@@ -415,6 +461,33 @@ private actor PromptScreenStub: ScreenContextProviding {
     let blocks = try await client.recognizeText(image: image)
     #expect(blocks.isEmpty)
     await client.unload(force: true)
+    withExtendedLifetime(delegate) {}
+}
+
+@MainActor
+@Test func contextWorkerRetriesDisconnectOnlyOnce() async throws {
+    let listener = NSXPCListener.anonymous()
+    let delegate = TestXPCListenerDelegate()
+    listener.delegate = delegate
+    listener.resume()
+    defer { listener.invalidate() }
+
+    let endpoint = listener.endpoint
+    let client = ContextWorkerClient(connectionFactory: {
+        NSXPCConnection(listenerEndpoint: endpoint)
+    })
+    do {
+        _ = try await client.structure(
+            snapshot: URL(fileURLWithPath: "/tmp/gemma"),
+            currentState: "",
+            observations: []
+        )
+        Issue.record("Expected the worker to reject its empty reply")
+    } catch {
+        #expect(delegate.structureCalls == 2)
+        #expect(delegate.acceptedConnections == 2)
+    }
+    client.invalidate()
     withExtendedLifetime(delegate) {}
 }
 
@@ -1216,6 +1289,68 @@ private actor PromptScreenStub: ScreenContextProviding {
         ))
     )
     #expect((await repository.snapshot()).isEmpty)
+}
+
+@MainActor
+@Test func repositorySerializesContextStructuringAcrossApplications() async {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-serialization-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let structurer = BlockingContextStructurer()
+    let repository = ContextRepository(store: store, structurer: structurer)
+    func observation(_ processIdentifier: pid_t) -> ContextObservation {
+        ContextObservation(
+            processIdentifier: processIdentifier,
+            bundleIdentifier: "example.\(processIdentifier)",
+            applicationName: "App \(processIdentifier)",
+            blocks: [.init(text: "Visible text", source: .accessibility)]
+        )
+    }
+
+    let first = Task {
+        await repository.acceptAndProcess(observation(9_001))
+    }
+    while await structurer.callCount == 0 { await Task.yield() }
+    let second = Task {
+        await repository.acceptAndProcess(observation(9_002))
+    }
+    _ = await second.value
+
+    #expect(await structurer.callCount == 1)
+    #expect(await structurer.maximumConcurrentCalls == 1)
+    await structurer.releaseFirstCall()
+    _ = await first.value
+    await repository.suspendBackgroundProcessing()
+}
+
+@MainActor
+@Test func repositoryPreservesPendingContextWhileSuspended() async {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-suspension-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(directory: root)
+    store.reload()
+    let structurer = StubIntelligence()
+    let repository = ContextRepository(store: store, structurer: structurer)
+    let observation = ContextObservation(
+        processIdentifier: 9_101,
+        bundleIdentifier: "example.suspended",
+        applicationName: "Suspended",
+        blocks: [.init(text: "Pending text", source: .accessibility)]
+    )
+
+    await repository.suspendBackgroundProcessing()
+    #expect(await repository.acceptAndProcess(observation))
+    #expect(await structurer.updateCalls == 0)
+    #expect(await repository.snapshot().first?.pendingObservations.count == 1)
+
+    await repository.resumeBackgroundProcessing()
+    #expect(await repository.acceptAndProcess(observation))
+    #expect(await structurer.updateCalls == 1)
 }
 
 @Test func perceptualHashUsesTheConfiguredChangeTolerance() {

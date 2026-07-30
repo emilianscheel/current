@@ -28,7 +28,11 @@ struct SettingsView: View {
         .onChange(of: runtime.settings.showDockIcon) { _, _ in runtime.applyDockPolicy() }
         .onChange(of: runtime.settings.launchAtLogin) { _, _ in runtime.applyLaunchAtLogin() }
         .onChange(of: runtime.settings.isEnabled) { _, enabled in
-            enabled ? runtime.coordinator.startMonitoring() : runtime.coordinator.stopMonitoring()
+            if enabled, !runtime.inputMonitoringRestartRequired {
+                runtime.coordinator.startMonitoring()
+            } else {
+                runtime.coordinator.stopMonitoring()
+            }
         }
         .onChange(of: runtime.settings.inputDeviceID) { _, device in runtime.coordinator.audio.selectedDeviceID = device }
         .onChange(of: runtime.settings.continuousContextEnabled) { _, enabled in
@@ -177,6 +181,8 @@ struct SettingsView: View {
         case .waitingForIdle: "Waiting for idle"
         case .processing: "Processing"
         case .suspendedDuringDictation: "Suspended during dictation"
+        case .permissionRequired:
+            "Paused: \(runtime.screenContext.missingPermission?.title ?? "permission") required"
         case .deferredForPower: "Deferred for power or thermal pressure"
         case .degraded: "Degraded"
         }

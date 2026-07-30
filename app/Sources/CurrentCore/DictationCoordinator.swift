@@ -5,6 +5,11 @@ import Observation
 @MainActor
 @Observable
 public final class DictationCoordinator {
+    public enum ExecutionMode: Sendable, Equatable {
+        case fast
+        case rich
+    }
+
     private struct PendingPromptBypass {
         let session: DictationSession
         let rawText: String
@@ -17,6 +22,7 @@ public final class DictationCoordinator {
     public private(set) var lastTranscription = ""
     public private(set) var partialTranscription = ""
     public private(set) var errorMessage: String?
+    public private(set) var currentExecutionMode: ExecutionMode?
 
     public let settings: SettingsStore
     public let model: ModelManager
@@ -82,7 +88,9 @@ public final class DictationCoordinator {
         shortcut.fallbackPreset = settings.fallbackShortcut
         do {
             try shortcut.start()
-            Task { await intentRouter.setEnabled(true) }
+            Task {
+                await intentRouter.setEnabled(settings.contextWorkerEnabled)
+            }
             setPhase(.idle)
             onMonitoringChange?(true)
         } catch {
@@ -161,6 +169,7 @@ public final class DictationCoordinator {
         transcriptProcessingTask?.cancel()
         transcriptProcessingTask = nil
         currentSession = nil
+        currentExecutionMode = nil
         audio.cancel()
         partialTranscription = ""
         onPartialTranscriptionChange?("")
@@ -200,13 +209,18 @@ public final class DictationCoordinator {
             processingGeneration = UUID()
             clearPromptBypass()
             let session = DictationSession()
+            let executionMode: ExecutionMode = settings.contextWorkerEnabled
+                ? .rich : .fast
             if phase != .armed { insertion.captureTarget() }
             currentSession = session
-            Task { [intentRouter, context = insertion.currentContext] in
-                await intentRouter.prepare(
-                    sessionID: session.id,
-                    context: IntentRoutingContext(context: context)
-                )
+            currentExecutionMode = executionMode
+            if executionMode == .rich {
+                Task { [intentRouter, context = insertion.currentContext] in
+                    await intentRouter.prepare(
+                        sessionID: session.id,
+                        context: IntentRoutingContext(context: context)
+                    )
+                }
             }
             try audio.start()
             let transcription = model.transcription
@@ -214,7 +228,9 @@ public final class DictationCoordinator {
                 Task { await transcription.consumePartialSamples(samples) }
             }
             Task { [weak self] in
-                await transcription.prewarmRefinement()
+                if executionMode == .rich {
+                    await transcription.prewarmRefinement()
+                }
                 await transcription.startPartialTranscription { [weak self] preview in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentSession?.id == session.id else { return }
@@ -234,7 +250,8 @@ public final class DictationCoordinator {
     }
 
     private func stopAndTranscribe() {
-        guard let session = currentSession else { return }
+        guard let session = currentSession,
+              let executionMode = currentExecutionMode else { return }
         maximumDurationTask?.cancel()
         let samples = audio.stop()
         let minimumSamples = Int(settings.minimumRecordingDuration * 16_000)
@@ -256,100 +273,112 @@ public final class DictationCoordinator {
                 await transcription.stopPartialTranscription()
                 let rawText = try await transcription.transcribe(samples)
                 guard let self, self.currentSession?.id == session.id else { return }
-                self.setPhase(.classifying)
-                let decision = try await self.intentRouter.classify(
-                    IntentRoutingRequest(
-                        transcript: rawText,
-                        context: context
-                    ),
-                    sessionID: session.id
-                )
-                guard self.isCurrent(sessionID: session.id, generation: generation) else {
-                    return
-                }
                 let text: String
-                switch decision.intent {
-                case .prompt:
-                    let envelope: PromptContextEnvelope
-                    self.pendingPromptBypass = PendingPromptBypass(
-                        session: session,
-                        rawText: rawText,
-                        context: context,
-                        captureTarget: captureTarget
-                    )
-                    self.shortcut.setReturnInterceptionEnabled(true)
-                    self.setPhase(.gatheringContext)
-                    if let preparer = self.promptContextPreparer {
-                        envelope = try await preparer.prepare(
-                            instruction: rawText,
-                            focusedContext: context,
-                            target: captureTarget,
-                            continuousContextEnabled:
-                                self.settings.continuousContextEnabled
-                        )
-                    } else if let contextRepository = self.contextRepository {
-                        envelope = await contextRepository.promptContext(
-                            instruction: rawText,
-                            focusedContext: context,
-                            target: captureTarget,
-                            includeApplicationContext:
-                                self.settings.continuousContextEnabled
-                        )
-                    } else {
-                        envelope = PromptContextEnvelope(
-                            instruction: rawText,
-                            focusedContext: context,
-                            sections: []
-                        )
-                    }
-                    if self.shortcut.consumeReturnInterceptionRequest() {
-                        self.insertRawTranscriptionIfPending()
-                        return
-                    }
-                    try Task.checkCancellation()
-                    guard self.isCurrent(
-                        sessionID: session.id,
-                        generation: generation
-                    ) else { return }
-                    self.setPhase(.generating)
-                    let disposition = try await self.intelligence
-                        .generatePromptDisposition(envelope)
-                    if self.shortcut.consumeReturnInterceptionRequest() {
-                        self.insertRawTranscriptionIfPending()
-                        return
-                    }
-                    try Task.checkCancellation()
-                    guard self.isCurrent(
-                        sessionID: session.id,
-                        generation: generation
-                    ) else { return }
-                    switch disposition {
-                    case let .generated(response):
-                        text = response.text
-                    case .insufficientContext:
-                        throw CurrentError.insufficientPromptContext
-                    }
-                case .direct:
+                let directDictation: Bool
+                if executionMode == .fast {
                     self.clearPromptBypass()
-                    let deterministic = DeterministicRefiner.refine(
+                    text = DeterministicRefiner.refine(
                         rawText,
                         context: context,
                         vocabulary: vocabularyEntries
+                    ).text
+                    directDictation = true
+                } else {
+                    self.setPhase(.classifying)
+                    let decision = try await self.intentRouter.classify(
+                        IntentRoutingRequest(
+                            transcript: rawText,
+                            context: context
+                        ),
+                        sessionID: session.id
                     )
-                    let refinement = await self.intelligence.refineDictation(
-                        deterministic,
-                        context: context
-                    )
-                    text = refinement.text
-                case .uncertain:
-                    throw CurrentError.intentClassificationFailed(
-                        "The local models were uncertain."
-                    )
+                    guard self.isCurrent(
+                        sessionID: session.id,
+                        generation: generation
+                    ) else { return }
+                    directDictation = decision.intent == .direct
+                    switch decision.intent {
+                    case .prompt:
+                        let envelope: PromptContextEnvelope
+                        self.pendingPromptBypass = PendingPromptBypass(
+                            session: session,
+                            rawText: rawText,
+                            context: context,
+                            captureTarget: captureTarget
+                        )
+                        self.shortcut.setReturnInterceptionEnabled(true)
+                        self.setPhase(.gatheringContext)
+                        if let preparer = self.promptContextPreparer {
+                            envelope = try await preparer.prepare(
+                                instruction: rawText,
+                                focusedContext: context,
+                                target: captureTarget,
+                                continuousContextEnabled:
+                                    self.settings.continuousContextEnabled
+                            )
+                        } else if let contextRepository = self.contextRepository {
+                            envelope = await contextRepository.promptContext(
+                                instruction: rawText,
+                                focusedContext: context,
+                                target: captureTarget,
+                                includeApplicationContext:
+                                    self.settings.continuousContextEnabled
+                            )
+                        } else {
+                            envelope = PromptContextEnvelope(
+                                instruction: rawText,
+                                focusedContext: context,
+                                sections: []
+                            )
+                        }
+                        if self.shortcut.consumeReturnInterceptionRequest() {
+                            self.insertRawTranscriptionIfPending()
+                            return
+                        }
+                        try Task.checkCancellation()
+                        guard self.isCurrent(
+                            sessionID: session.id,
+                            generation: generation
+                        ) else { return }
+                        self.setPhase(.generating)
+                        let disposition = try await self.intelligence
+                            .generatePromptDisposition(envelope)
+                        if self.shortcut.consumeReturnInterceptionRequest() {
+                            self.insertRawTranscriptionIfPending()
+                            return
+                        }
+                        try Task.checkCancellation()
+                        guard self.isCurrent(
+                            sessionID: session.id,
+                            generation: generation
+                        ) else { return }
+                        switch disposition {
+                        case let .generated(response): text = response.text
+                        case .insufficientContext:
+                            throw CurrentError.insufficientPromptContext
+                        }
+                    case .direct:
+                        self.clearPromptBypass()
+                        let deterministic = DeterministicRefiner.refine(
+                            rawText,
+                            context: context,
+                            vocabulary: vocabularyEntries
+                        )
+                        let refinement = await self.intelligence.refineDictation(
+                            deterministic,
+                            context: context
+                        )
+                        text = refinement.text
+                    case .uncertain:
+                        throw CurrentError.intentClassificationFailed(
+                            "The local models were uncertain."
+                        )
+                    }
                 }
                 guard self.isCurrent(sessionID: session.id, generation: generation) else {
                     return
                 }
-                if decision.intent == .direct,
+                if directDictation,
                    let selection = context.selectedText,
                    let learned = Self.learnedCorrection(
                        from: selection,
@@ -476,6 +505,7 @@ public final class DictationCoordinator {
             onTextCommitted?(captureTarget)
         }
         currentSession = nil
+        currentExecutionMode = nil
         transcriptProcessingTask = nil
         if result == .copied { errorMessage = "Copied — paste manually." }
         setPhase(result == .copied ? .error : .success)
@@ -491,6 +521,7 @@ public final class DictationCoordinator {
         onPartialTranscriptionChange?("")
         Task { await model.transcription.stopPartialTranscription() }
         currentSession = nil
+        currentExecutionMode = nil
         if let sessionID {
             Task { await intentRouter.cancel(sessionID: sessionID) }
         }

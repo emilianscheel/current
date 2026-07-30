@@ -467,6 +467,16 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
     }
 
     public func stop() async {
+        await suspendBackgroundCapture()
+        await worker?.cancelAll()
+        await worker?.unload()
+        await repository.stop()
+        backgroundState = .idle
+    }
+
+    /// Stops scheduling and cancels only background work. Interactive requests
+    /// already in flight are deliberately left alone and can finish safely.
+    public func suspendBackgroundCapture() async {
         isRunning = false
         schedulerTask?.cancel()
         schedulerTask = nil
@@ -474,9 +484,7 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
         workerIdleTask = nil
         accessibility.stop()
         removeNotifications()
-        await worker?.cancelAll()
-        await worker?.unload()
-        await repository.stop()
+        await worker?.cancelBackgroundWork()
         backgroundState = .idle
     }
 

@@ -24,12 +24,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let permissions = runtime.permissions.snapshot()
         let onboardingTitle = MenuBarPresentation.onboardingActionTitle(
             completed: runtime.settings.onboardingComplete,
-            permissions: permissions
+            permissions: permissions,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
         )
         add(runtime.coordinator.phase.displayName, to: menu, enabled: false)
         if onboardingTitle != nil {
             add(
-                permissions.allGranted
+                permissions.allGranted(
+                    contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+                )
                     ? "Permissions: Ready"
                     : "Permissions: Action needed",
                 to: menu,
@@ -48,6 +51,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
+        let contextWorkerItem = add(
+            "Context Worker",
+            to: menu,
+            action: #selector(toggleContextWorker)
+        )
+        contextWorkerItem.state = runtime.settings.contextWorkerEnabled
+            ? .on : .off
         addModel(
             "Parakeet TDT v3 Multilingual",
             category: "Speech model",
@@ -58,6 +68,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             "Gemma 4 E2B 4-bit",
             category: "Context model",
             state: runtime.contextModel.state,
+            statusOverride: runtime.settings.contextWorkerEnabled
+                ? nil : "Disabled",
             to: menu
         )
         add("About Current", to: menu, action: #selector(openAbout))
@@ -76,20 +88,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return "Start Dictation"
     }
 
-    private func add(_ title: String, to menu: NSMenu, action: Selector? = nil, key: String = "", enabled: Bool = true) {
+    @discardableResult
+    private func add(_ title: String, to menu: NSMenu, action: Selector? = nil, key: String = "", enabled: Bool = true) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         item.isEnabled = enabled
         menu.addItem(item)
+        return item
     }
 
     private func addModel(
         _ title: String,
         category: String,
         state: ModelState,
+        statusOverride: String? = nil,
         to menu: NSMenu
     ) {
-        let status = MenuBarPresentation.modelStatusTitle(for: state)
+        let status = statusOverride
+            ?? MenuBarPresentation.modelStatusTitle(for: state)
         let subtitle = "\(category) · \(status)"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -104,6 +120,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func openContext() { runtime.context.show() }
     @objc private func openUsageStatistics() { runtime.usage.show() }
     @objc private func toggleEnabled() { runtime.coordinator.toggleEnabled() }
+    @objc private func toggleContextWorker() {
+        runtime.setContextWorkerEnabled(!runtime.settings.contextWorkerEnabled)
+    }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() { runtime.about.show() }
     @objc private func quit() { NSApp.terminate(nil) }

@@ -6,20 +6,21 @@ import Vision
 private final class ContextWorkerService: NSObject,
     ContextWorkerXPCProtocol, @unchecked Sendable {
     private final class ReplyBox: @unchecked Sendable {
-        let callback: (Data?, String?) -> Void
+        let callback: (Data?) -> Void
         private let lock = NSLock()
         private var didReply = false
-        init(_ callback: @escaping (Data?, String?) -> Void) {
+        init(_ callback: @escaping (Data?) -> Void) {
             self.callback = callback
         }
 
-        func send(_ data: Data?, _ error: String?) {
+        func send(_ result: ContextWorkerReply) {
             let shouldSend = lock.withLock {
                 guard !didReply else { return false }
                 didReply = true
                 return true
             }
-            if shouldSend { callback(data, error) }
+            guard shouldSend else { return }
+            callback(try? JSONEncoder().encode(result))
         }
     }
 
@@ -56,7 +57,7 @@ private final class ContextWorkerService: NSObject,
 
     func recognizeText(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     ) {
         do {
             let request = try JSONDecoder().decode(
@@ -74,13 +75,13 @@ private final class ContextWorkerService: NSObject,
             return try JSONEncoder().encode(blocks)
             }
         } catch {
-            reply(nil, error.localizedDescription)
+            ReplyBox(reply).send(.failure(error.localizedDescription))
         }
     }
 
     func structureContext(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     ) {
         do {
             let request = try JSONDecoder().decode(
@@ -102,13 +103,13 @@ private final class ContextWorkerService: NSObject,
             return try JSONEncoder().encode(update)
             }
         } catch {
-            reply(nil, error.localizedDescription)
+            ReplyBox(reply).send(.failure(error.localizedDescription))
         }
     }
 
     func generatePrompt(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     ) {
         do {
             let request = try JSONDecoder().decode(
@@ -129,13 +130,13 @@ private final class ContextWorkerService: NSObject,
                 return try JSONEncoder().encode(response)
             }
         } catch {
-            reply(nil, error.localizedDescription)
+            ReplyBox(reply).send(.failure(error.localizedDescription))
         }
     }
 
     func prepareIntentModel(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     ) {
         do {
             let request = try JSONDecoder().decode(
@@ -153,13 +154,13 @@ private final class ContextWorkerService: NSObject,
                 return try JSONEncoder().encode(true)
             }
         } catch {
-            reply(nil, error.localizedDescription)
+            ReplyBox(reply).send(.failure(error.localizedDescription))
         }
     }
 
     func classifyIntent(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     ) {
         do {
             let request = try JSONDecoder().decode(
@@ -181,7 +182,7 @@ private final class ContextWorkerService: NSObject,
                 return try JSONEncoder().encode(decision)
             }
         } catch {
-            reply(nil, error.localizedDescription)
+            ReplyBox(reply).send(.failure(error.localizedDescription))
         }
     }
 
@@ -211,11 +212,15 @@ private final class ContextWorkerService: NSObject,
     func unload(withReply reply: @escaping () -> Void) {
         cancelAll {}
         let reply = VoidReplyBox(reply)
-        let task = Task { [gemma] in
+        let taskID = UUID()
+        let task = Task { [weak self, gemma] in
             await gemma.unload()
             reply.callback()
+            self?.lock.withLock {
+                self?.tasks.removeValue(forKey: taskID)
+            }
         }
-        lock.withLock { tasks[UUID()] = task }
+        lock.withLock { tasks[taskID] = task }
     }
 
     private func enqueue(
@@ -229,7 +234,7 @@ private final class ContextWorkerService: NSObject,
         }
         let queued = BlockOperation { [weak self] in
             guard let self else {
-                reply.send(nil, "The context worker operation was cancelled.")
+                reply.send(.cancelled)
                 return
             }
             let semaphore = DispatchSemaphore(value: 0)
@@ -241,9 +246,11 @@ private final class ContextWorkerService: NSObject,
                 do {
                     let result = try await operation()
                     try Task.checkCancellation()
-                    reply.send(result, nil)
+                    reply.send(.success(result))
+                } catch is CancellationError {
+                    reply.send(.cancelled)
                 } catch {
-                    reply.send(nil, error.localizedDescription)
+                    reply.send(.failure(error.localizedDescription))
                 }
             }
             lock.withLock { tasks[requestID] = task }
@@ -286,7 +293,7 @@ private final class ContextWorkerService: NSObject,
         for (operation, reply, task) in cancelled {
             operation.cancel()
             task?.cancel()
-            reply.send(nil, "The context worker operation was cancelled.")
+            reply.send(.cancelled)
         }
     }
 

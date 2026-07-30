@@ -761,6 +761,68 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(restored.onboardingStep == .inputMonitoring)
 }
 
+@MainActor
+@Test func contextWorkerModeDefaultsOnAndPersistsWithoutChangingContextPreference() {
+    let suiteName = "CurrentContextWorkerMode.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let first = SettingsStore(defaults: defaults)
+    #expect(first.contextWorkerEnabled)
+    first.continuousContextEnabled = true
+    first.contextWorkerEnabled = false
+
+    let restored = SettingsStore(defaults: defaults)
+    #expect(!restored.contextWorkerEnabled)
+    #expect(restored.continuousContextEnabled)
+}
+
+@Test func fastModeOnboardingSkipsScreenRecordingAndGemmaRequirement() {
+    let fastPermissions = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .denied,
+        inputMonitoring: .granted
+    )
+    #expect(fastPermissions.allGranted(contextWorkerEnabled: false))
+    #expect(!fastPermissions.allGranted(contextWorkerEnabled: true))
+    #expect(
+        OnboardingFlow.automaticDestination(
+            from: .accessibility,
+            permissions: fastPermissions,
+            contextWorkerEnabled: false
+        ) == .inputMonitoring
+    )
+    #expect(
+        OnboardingFlow.initialStep(
+            saved: .screenRecording,
+            completed: false,
+            permissions: fastPermissions,
+            modelInstalled: true,
+            contextWorkerEnabled: false
+        ) == .inputMonitoring
+    )
+    #expect(
+        MenuBarPresentation.onboardingActionTitle(
+            completed: true,
+            permissions: fastPermissions,
+            contextWorkerEnabled: false
+        ) == nil
+    )
+}
+
+@Test func contextWorkerReplyRoundTripsTypedOutcomes() throws {
+    let replies: [ContextWorkerReply] = [
+        .success(Data([1, 2, 3])),
+        .cancelled,
+        .failure("model failed"),
+    ]
+    for reply in replies {
+        let encoded = try JSONEncoder().encode(reply)
+        #expect(try JSONDecoder().decode(ContextWorkerReply.self, from: encoded) == reply)
+    }
+}
+
 private func contextTestCalendar(timeZoneID: String) -> Calendar {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: timeZoneID)!

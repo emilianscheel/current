@@ -1,6 +1,7 @@
 import AppKit
 import CurrentCore
 import Observation
+import OSLog
 import ServiceManagement
 import SwiftUI
 
@@ -24,6 +25,10 @@ struct CurrentApp: App {
 @MainActor
 @Observable
 final class AppRuntime {
+    @ObservationIgnored private static let logger = Logger(
+        subsystem: "com.emilianscheel.current",
+        category: "ContextWorkerMode"
+    )
     var settings = SettingsStore.shared
     let permissions = PermissionManager()
     let model = ModelManager()
@@ -90,6 +95,7 @@ final class AppRuntime {
                 await self.screenContext.setForegroundInteractionActive(
                     interactionActive
                 )
+                await self.finishDeferredContextWorkerDisableIfNeeded()
                 guard self.phaseUpdateGeneration == generation else { return }
                 self.overlay.show(
                     phase: phase,
@@ -156,6 +162,7 @@ final class AppRuntime {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if active,
+                   self.settings.contextWorkerEnabled,
                    self.settings.continuousContextEnabled,
                    self.permissions.snapshot().screenRecording.isGranted {
                     self.contextModel.prepareIfNeeded()
@@ -166,6 +173,51 @@ final class AppRuntime {
                 }
             }
         }
+    }
+
+    func setContextWorkerEnabled(_ enabled: Bool) {
+        guard settings.contextWorkerEnabled != enabled else { return }
+        settings.contextWorkerEnabled = enabled
+        Task { @MainActor [weak self] in
+            await self?.applyContextWorkerMode(enabled)
+        }
+    }
+
+    func applyContinuousContextPreference() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.settings.contextWorkerEnabled,
+               self.settings.isEnabled,
+               self.settings.continuousContextEnabled,
+               self.permissions.snapshot().screenRecording.isGranted {
+                self.contextModel.prepareIfNeeded()
+                try? await self.screenContext.start()
+            } else {
+                await self.screenContext.suspendBackgroundCapture()
+                await self.finishDeferredContextWorkerDisableIfNeeded()
+            }
+        }
+    }
+
+    private func applyContextWorkerMode(_ enabled: Bool) async {
+        Self.logger.notice(
+            "Context worker mode changed to \(enabled ? "rich" : "fast", privacy: .public)"
+        )
+        if enabled {
+            contextModel.prepareIfNeeded()
+            await intentRouter.setEnabled(settings.isEnabled)
+            applyContinuousContextPreference()
+            return
+        }
+        await screenContext.suspendBackgroundCapture()
+        await finishDeferredContextWorkerDisableIfNeeded()
+    }
+
+    private func finishDeferredContextWorkerDisableIfNeeded() async {
+        guard !settings.contextWorkerEnabled,
+              coordinator.currentExecutionMode != .rich else { return }
+        await intentRouter.setEnabled(false)
+        await contextModel.unload(force: true)
     }
 
     func setAuxiliaryWindow(_ id: UUID, visible: Bool) {
@@ -212,14 +264,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController = StatusItemController(runtime: runtime)
         runtime.usageMonitor.start()
         runtime.model.prepareIfNeeded()
-        runtime.contextModel.prepareIfNeeded()
+        if runtime.settings.contextWorkerEnabled {
+            runtime.contextModel.prepareIfNeeded()
+        }
 
         if runtime.hardware.isSupported {
             if runtime.permissions.snapshot().inputMonitoring.isGranted { runtime.coordinator.startMonitoring() }
             if !runtime.settings.onboardingComplete
-                || !runtime.permissions.snapshot().allGranted
+                || !runtime.permissions.snapshot().allGranted(
+                    contextWorkerEnabled:
+                        runtime.settings.contextWorkerEnabled
+                )
                 || !runtime.model.hasInstalledSnapshot
-                || !runtime.contextModel.hasInstalledSnapshot {
+                || (runtime.settings.contextWorkerEnabled
+                    && !runtime.contextModel.hasInstalledSnapshot) {
                 runtime.onboarding.show()
             }
         } else {

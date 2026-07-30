@@ -106,6 +106,73 @@ private actor FixedIntentRouter: VoiceIntentRoutingProviding {
     func cancel(sessionID: UUID) async { cancelCount += 1 }
 }
 
+private final class TestXPCReplyBox<Callback>: @unchecked Sendable {
+    let callback: Callback
+    init(_ callback: Callback) { self.callback = callback }
+}
+
+private final class BackgroundReplyContextWorker: NSObject,
+    ContextWorkerXPCProtocol, @unchecked Sendable
+{
+    func handshake(withReply reply: @escaping (Int, Int32) -> Void) {
+        let box = TestXPCReplyBox(reply)
+        DispatchQueue.global().async {
+            box.callback(
+                ContextWorkerProtocolVersion.current,
+                ProcessInfo.processInfo.processIdentifier
+            )
+        }
+    }
+
+    func recognizeText(
+        _ requestData: Data,
+        withReply reply: @escaping (Data?) -> Void
+    ) {
+        let payload = try! JSONEncoder().encode(
+            ContextWorkerReply.success(try! JSONEncoder().encode(
+                [ContextTextBlock]()
+            ))
+        )
+        let box = TestXPCReplyBox(reply)
+        DispatchQueue.global().async { box.callback(payload) }
+    }
+
+    func structureContext(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
+        reply(nil)
+    }
+    func generatePrompt(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
+        reply(nil)
+    }
+    func prepareIntentModel(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
+        reply(nil)
+    }
+    func classifyIntent(_ data: Data, withReply reply: @escaping (Data?) -> Void) {
+        reply(nil)
+    }
+    func cancelRequest(_ data: Data, withReply reply: @escaping () -> Void) { reply() }
+    func cancelBackgroundWork(withReply reply: @escaping () -> Void) { reply() }
+    func cancelAll(withReply reply: @escaping () -> Void) { reply() }
+    func unload(withReply reply: @escaping () -> Void) { reply() }
+}
+
+private final class TestXPCListenerDelegate: NSObject,
+    NSXPCListenerDelegate, @unchecked Sendable
+{
+    private let worker = BackgroundReplyContextWorker()
+
+    func listener(
+        _ listener: NSXPCListener,
+        shouldAcceptNewConnection connection: NSXPCConnection
+    ) -> Bool {
+        connection.exportedInterface = NSXPCInterface(
+            with: ContextWorkerXPCProtocol.self
+        )
+        connection.exportedObject = worker
+        connection.resume()
+        return true
+    }
+}
+
 private struct PromptOnlyIntelligence: LocalIntelligenceProviding {
     let generator: any PromptResponseGenerating
 
@@ -298,7 +365,7 @@ private actor PromptScreenStub: ScreenContextProviding {
         ContextWorkerPromptRequest.self,
         from: JSONEncoder().encode(request)
     )
-    #expect(ContextWorkerProtocolVersion.current == 4)
+    #expect(ContextWorkerProtocolVersion.current == 5)
     #expect(decoded.requestID == request.requestID)
     #expect(decoded.priority == .interactive)
     #expect(DictationPhase.gatheringContext.displayName == "Reading context…")
@@ -317,6 +384,31 @@ private actor PromptScreenStub: ScreenContextProviding {
     )
     #expect(decodedIntent.requestID == intent.requestID)
     #expect(decodedIntent.priority == .voiceRouting)
+}
+
+@MainActor
+@Test func contextWorkerSafelyAcceptsRepliesFromBackgroundXPCQueues() async throws {
+    let listener = NSXPCListener.anonymous()
+    let delegate = TestXPCListenerDelegate()
+    listener.delegate = delegate
+    listener.resume()
+    defer { listener.invalidate() }
+
+    let endpoint = listener.endpoint
+    let client = ContextWorkerClient(connectionFactory: {
+        NSXPCConnection(listenerEndpoint: endpoint)
+    })
+    let image = try ContextWorkerImagePayload(
+        bgraData: Data([0, 0, 0, 255]),
+        width: 1,
+        height: 1,
+        bytesPerRow: 4
+    )
+
+    let blocks = try await client.recognizeText(image: image)
+    #expect(blocks.isEmpty)
+    await client.unload(force: true)
+    withExtendedLifetime(delegate) {}
 }
 
 @Test func gemmaTypedRoutingAndPromptSchemasAreStrict() throws {

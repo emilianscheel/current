@@ -1,8 +1,9 @@
 import CoreGraphics
 import Foundation
+import OSLog
 
 public enum ContextWorkerProtocolVersion {
-    public static let current = 4
+    public static let current = 5
     public static let serviceName = "com.emilianscheel.current.ContextWorker"
 }
 
@@ -10,28 +11,34 @@ public enum ContextWorkerProtocolVersion {
     func handshake(withReply reply: @escaping (Int, Int32) -> Void)
     func recognizeText(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     )
     func structureContext(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     )
     func generatePrompt(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     )
     func prepareIntentModel(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     )
     func classifyIntent(
         _ requestData: Data,
-        withReply reply: @escaping (Data?, String?) -> Void
+        withReply reply: @escaping (Data?) -> Void
     )
     func cancelRequest(_ requestData: Data, withReply reply: @escaping () -> Void)
     func cancelBackgroundWork(withReply reply: @escaping () -> Void)
     func cancelAll(withReply reply: @escaping () -> Void)
     func unload(withReply reply: @escaping () -> Void)
+}
+
+public enum ContextWorkerReply: Codable, Sendable, Equatable {
+    case success(Data)
+    case cancelled
+    case failure(String)
 }
 
 public enum ContextWorkerRequestPriority: String, Codable, Sendable, Equatable {
@@ -140,18 +147,99 @@ public struct ContextWorkerPromptRequest: Codable, Sendable {
     }
 }
 
+private enum ContextWorkerTransportError: LocalizedError, Sendable {
+    case disconnected(String)
+    case timeout(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .disconnected(let message): message
+        case .timeout(let operation):
+            "The context worker timed out while performing \(operation)."
+        }
+    }
+}
+
+private final class ContextWorkerCompletionGate<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var timeoutTask: Task<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resume(with result: sending Result<Value, Error>) -> Bool {
+        let (continuation, timeoutTask) = lock.withLock {
+            let current = self.continuation
+            self.continuation = nil
+            let timeout = self.timeoutTask
+            self.timeoutTask = nil
+            return (current, timeout)
+        }
+        guard let continuation else { return false }
+        timeoutTask?.cancel()
+        continuation.resume(with: result)
+        return true
+    }
+
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        let shouldCancel = lock.withLock {
+            guard continuation != nil else { return true }
+            timeoutTask = task
+            return false
+        }
+        if shouldCancel { task.cancel() }
+    }
+}
+
+private final class ContextWorkerPendingInvocation: @unchecked Sendable {
+    let requestID: UUID?
+    private let failClosure: @Sendable (Error) -> Void
+
+    init(
+        requestID: UUID?,
+        fail: @escaping @Sendable (Error) -> Void
+    ) {
+        self.requestID = requestID
+        failClosure = fail
+    }
+
+    func fail(_ error: Error) { failClosure(error) }
+}
+
 @MainActor
 public final class ContextWorkerClient: @unchecked Sendable {
     public var onStateChange: (@MainActor (ContextBackgroundState) -> Void)?
     public private(set) var processIdentifier: pid_t?
 
+    nonisolated private static let logger = Logger(
+        subsystem: "com.emilianscheel.current",
+        category: "ContextWorkerClient"
+    )
     private var connection: NSXPCConnection?
+    private var connectionGeneration: UUID?
     private var handshakeComplete = false
     private var consecutiveFailures = 0
     private var retainsGemmaForIntentRouting = false
     private var routingReleaseTask: Task<Void, Never>?
+    private var pendingInvocations: [UUID: ContextWorkerPendingInvocation] = [:]
+    private let connectionFactory: @MainActor () -> NSXPCConnection
 
-    public init() {}
+    public init() {
+        connectionFactory = {
+            NSXPCConnection(
+                serviceName: ContextWorkerProtocolVersion.serviceName
+            )
+        }
+    }
+
+    package init(
+        connectionFactory: @escaping @MainActor () -> NSXPCConnection
+    ) {
+        self.connectionFactory = connectionFactory
+    }
 
     public func recognizeText(
         image: ContextWorkerImagePayload,
@@ -162,6 +250,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
             priority: priority
         )
         let response = try await request(
+            operation: "ocr",
+            timeout: .seconds(30),
             method: { proxy, data, reply in
                 proxy.recognizeText(data, withReply: reply)
             },
@@ -185,6 +275,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
             observations: observations
         )
         let response = try await request(
+            operation: "structure",
+            timeout: .seconds(120),
             method: { proxy, data, reply in
                 proxy.structureContext(data, withReply: reply)
             },
@@ -206,6 +298,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
             envelope: envelope
         )
         let response = try await request(
+            operation: "prompt",
+            timeout: .seconds(120),
             method: { proxy, data, reply in
                 proxy.generatePrompt(data, withReply: reply)
             },
@@ -240,6 +334,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
             modelSnapshotPath: snapshot.path
         )
         _ = try await request(
+            operation: "prepare-intent",
+            timeout: .seconds(120),
             method: { proxy, data, reply in
                 proxy.prepareIntentModel(data, withReply: reply)
             },
@@ -259,6 +355,8 @@ public final class ContextWorkerClient: @unchecked Sendable {
             routingRequest: routingRequest
         )
         let response = try await request(
+            operation: "classify-intent",
+            timeout: .seconds(10),
             method: { proxy, data, reply in
                 proxy.classifyIntent(data, withReply: reply)
             },
@@ -269,64 +367,73 @@ public final class ContextWorkerClient: @unchecked Sendable {
     }
 
     public func cancel(requestID: UUID) async {
-        guard connection != nil, let proxy = try? await proxy(),
+        cancelPendingRequest(requestID)
+        guard connection != nil,
               let data = try? JSONEncoder().encode(
                   ContextWorkerCancellationRequest(requestID: requestID)
               ) else { return }
-        await withCheckedContinuation { continuation in
-            proxy.cancelRequest(data) { continuation.resume() }
-        }
+        _ = try? await performVoidInvocation(
+            operation: "cancel-request",
+            timeout: .seconds(5)
+        ) { proxy, reply in proxy.cancelRequest(data, withReply: reply) }
     }
 
     public func cancelBackgroundWork() async {
-        guard connection != nil, let proxy = try? await proxy() else { return }
-        await withCheckedContinuation { continuation in
-            proxy.cancelBackgroundWork { continuation.resume() }
-        }
+        guard connection != nil else { return }
+        _ = try? await performVoidInvocation(
+            operation: "cancel-background",
+            timeout: .seconds(5)
+        ) { proxy, reply in proxy.cancelBackgroundWork(withReply: reply) }
     }
 
     public func cancelAll() async {
         guard connection != nil else { return }
-        guard let proxy = try? await proxy() else { return }
-        await withCheckedContinuation { continuation in
-            proxy.cancelAll {
-                continuation.resume()
-            }
-        }
+        failAllPending(with: CancellationError())
+        guard (try? await proxy()) != nil else { return }
+        _ = try? await performVoidInvocation(
+            operation: "cancel-all",
+            timeout: .seconds(5)
+        ) { proxy, reply in proxy.cancelAll(withReply: reply) }
     }
 
     public func unload(force: Bool = false) async {
         guard force || !retainsGemmaForIntentRouting else { return }
         guard connection != nil else { return }
-        guard let proxy = try? await proxy() else {
+        guard (try? await proxy()) != nil else {
             invalidate()
             return
         }
-        await withCheckedContinuation { continuation in
-            proxy.unload {
-                continuation.resume()
-            }
-        }
+        _ = try? await performVoidInvocation(
+            operation: "unload",
+            timeout: .seconds(30)
+        ) { proxy, reply in proxy.unload(withReply: reply) }
         invalidate()
     }
 
     public func invalidate() {
         routingReleaseTask?.cancel()
         routingReleaseTask = nil
+        let error = ContextWorkerTransportError.disconnected(
+            "The context worker connection was closed."
+        )
+        failAllPending(with: error)
         connection?.invalidationHandler = nil
         connection?.interruptionHandler = nil
         connection?.invalidate()
         connection = nil
+        connectionGeneration = nil
         handshakeComplete = false
         processIdentifier = nil
         onStateChange?(.idle)
     }
 
     private func request<Payload: Encodable>(
+        operation: String,
+        timeout: Duration,
         method: @escaping (
             ContextWorkerXPCProtocol,
             Data,
-            @escaping (Data?, String?) -> Void
+            @escaping (Data?) -> Void
         ) -> Void,
         payload: Payload,
         requestID: UUID
@@ -337,32 +444,30 @@ public final class ContextWorkerClient: @unchecked Sendable {
             for attempt in 0..<2 {
                 try Task.checkCancellation()
                 do {
-                    let proxy = try await proxy()
-                    let result = try await withCheckedThrowingContinuation {
-                        (continuation: CheckedContinuation<Data, Error>) in
-                        method(proxy, encoded) { data, errorMessage in
-                            if let data {
-                                continuation.resume(returning: data)
-                            } else {
-                                continuation.resume(
-                                    throwing: CurrentError.modelUnavailable(
-                                        errorMessage
-                                            ?? "The context worker returned no data."
-                                    )
-                                )
-                            }
-                        }
+                    let result: Data = try await performInvocation(
+                        operation: operation,
+                        timeout: timeout,
+                        requestID: requestID
+                    ) { proxy, reply in
+                        method(proxy, encoded, reply)
                     }
                     try Task.checkCancellation()
                     consecutiveFailures = 0
                     return result
                 } catch is CancellationError {
                     throw CancellationError()
-                } catch {
+                } catch let error as ContextWorkerTransportError {
                     if Task.isCancelled { throw CancellationError() }
                     lastError = error
                     invalidate()
-                    if attempt == 0 { continue }
+                    if attempt == 0 {
+                        Self.logger.notice(
+                            "Retrying \(operation, privacy: .public) after a transport failure"
+                        )
+                        continue
+                    }
+                } catch {
+                    throw error
                 }
             }
             consecutiveFailures += 1
@@ -379,50 +484,44 @@ public final class ContextWorkerClient: @unchecked Sendable {
 
     private func proxy() async throws -> ContextWorkerXPCProtocol {
         if connection == nil {
-            let connection = NSXPCConnection(
-                serviceName: ContextWorkerProtocolVersion.serviceName
-            )
+            let generation = UUID()
+            let connection = connectionFactory()
             connection.remoteObjectInterface = NSXPCInterface(
                 with: ContextWorkerXPCProtocol.self
             )
-            connection.interruptionHandler = { [weak self] in
-                Task { @MainActor [weak self] in
-                    self?.handshakeComplete = false
-                    self?.processIdentifier = nil
-                    self?.onStateChange?(.degraded)
-                }
-            }
-            connection.invalidationHandler = { [weak self] in
-                Task { @MainActor [weak self] in
-                    self?.connection = nil
-                    self?.handshakeComplete = false
-                    self?.processIdentifier = nil
-                }
-            }
+            connection.interruptionHandler = Self.connectionEventHandler(
+                client: self,
+                generation: generation,
+                degraded: true
+            )
+            connection.invalidationHandler = Self.connectionEventHandler(
+                client: self,
+                generation: generation,
+                degraded: false
+            )
             connection.resume()
             self.connection = connection
+            connectionGeneration = generation
+            Self.logger.debug(
+                "Activated context worker connection \(generation.uuidString, privacy: .public)"
+            )
         }
-        guard let connection,
-              let proxy = connection.remoteObjectProxyWithErrorHandler({
-                  [weak self] _ in
-                  Task { @MainActor [weak self] in
-                      self?.handshakeComplete = false
-                      self?.processIdentifier = nil
-                      self?.onStateChange?(.degraded)
-                  }
-              }) as? ContextWorkerXPCProtocol else {
+        guard let connection, let generation = connectionGeneration,
+              let proxy = connection.remoteObjectProxyWithErrorHandler(
+                Self.proxyErrorHandler(
+                    client: self,
+                    generation: generation
+                )
+              ) as? ContextWorkerXPCProtocol else {
             throw CurrentError.modelUnavailable(
                 "Could not connect to the context worker."
             )
         }
         if !handshakeComplete {
-            let handshake = await withCheckedContinuation { continuation in
-                proxy.handshake { version, processIdentifier in
-                    continuation.resume(
-                        returning: (version, processIdentifier)
-                    )
-                }
-            }
+            let handshake: (Int, Int32) = try await performHandshake(
+                proxy: proxy,
+                generation: generation
+            )
             guard handshake.0 == ContextWorkerProtocolVersion.current else {
                 invalidate()
                 throw CurrentError.modelUnavailable(
@@ -433,6 +532,209 @@ public final class ContextWorkerClient: @unchecked Sendable {
             handshakeComplete = true
         }
         return proxy
+    }
+
+    private func performHandshake(
+        proxy: ContextWorkerXPCProtocol,
+        generation: UUID
+    ) async throws -> (Int, Int32) {
+        let invocationID = UUID()
+        defer { pendingInvocations.removeValue(forKey: invocationID) }
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = ContextWorkerCompletionGate(continuation)
+            pendingInvocations[invocationID] = ContextWorkerPendingInvocation(
+                requestID: nil,
+                fail: { error in gate.resume(with: .failure(error)) }
+            )
+            Self.scheduleTimeout(
+                .seconds(5),
+                operation: "handshake",
+                gate: gate
+            )
+            proxy.handshake(
+                withReply: Self.handshakeReplyHandler(
+                    gate: gate,
+                    client: self,
+                    generation: generation
+                )
+            )
+        }
+    }
+
+    private func performInvocation(
+        operation: String,
+        timeout: Duration,
+        requestID: UUID?,
+        invoke: (ContextWorkerXPCProtocol, @escaping (Data?) -> Void) -> Void
+    ) async throws -> Data {
+        let proxy = try await proxy()
+        let invocationID = UUID()
+        let start = ContinuousClock.now
+        defer { pendingInvocations.removeValue(forKey: invocationID) }
+        let result: Data = try await withCheckedThrowingContinuation {
+            continuation in
+            let gate = ContextWorkerCompletionGate(continuation)
+            pendingInvocations[invocationID] = ContextWorkerPendingInvocation(
+                requestID: requestID,
+                fail: { error in gate.resume(with: .failure(error)) }
+            )
+            Self.scheduleTimeout(timeout, operation: operation, gate: gate)
+            invoke(proxy, Self.replyHandler(gate: gate))
+        }
+        let elapsed = start.duration(to: .now)
+        Self.logger.debug(
+            "Completed \(operation, privacy: .public) in \(String(describing: elapsed), privacy: .public)"
+        )
+        return result
+    }
+
+    private func performVoidInvocation(
+        operation: String,
+        timeout: Duration,
+        invoke: (ContextWorkerXPCProtocol, @escaping () -> Void) -> Void
+    ) async throws {
+        let proxy = try await proxy()
+        let invocationID = UUID()
+        defer { pendingInvocations.removeValue(forKey: invocationID) }
+        try await withCheckedThrowingContinuation { continuation in
+            let gate = ContextWorkerCompletionGate<Void>(continuation)
+            pendingInvocations[invocationID] = ContextWorkerPendingInvocation(
+                requestID: nil,
+                fail: { error in gate.resume(with: .failure(error)) }
+            )
+            Self.scheduleTimeout(timeout, operation: operation, gate: gate)
+            invoke(proxy, Self.voidReplyHandler(gate: gate))
+        }
+    }
+
+    private func cancelPendingRequest(_ requestID: UUID) {
+        for invocation in pendingInvocations.values
+        where invocation.requestID == requestID {
+            invocation.fail(CancellationError())
+        }
+    }
+
+    private func failAllPending(with error: Error) {
+        let pending = pendingInvocations.values
+        pendingInvocations.removeAll()
+        for invocation in pending { invocation.fail(error) }
+    }
+
+    private func handleConnectionEvent(
+        generation: UUID,
+        degraded: Bool,
+        message: String
+    ) {
+        guard connectionGeneration == generation else { return }
+        let error = ContextWorkerTransportError.disconnected(message)
+        connection?.invalidationHandler = nil
+        connection?.interruptionHandler = nil
+        connection?.invalidate()
+        connection = nil
+        connectionGeneration = nil
+        handshakeComplete = false
+        processIdentifier = nil
+        failAllPending(with: error)
+        if degraded { onStateChange?(.degraded) }
+        Self.logger.error(
+            "Connection \(generation.uuidString, privacy: .public) failed: \(message, privacy: .public)"
+        )
+    }
+
+    nonisolated private static func connectionEventHandler(
+        client: ContextWorkerClient,
+        generation: UUID,
+        degraded: Bool
+    ) -> @Sendable () -> Void {
+        { [weak client] in
+            Task { @MainActor [weak client] in
+                client?.handleConnectionEvent(
+                    generation: generation,
+                    degraded: degraded,
+                    message: degraded
+                        ? "The context worker connection was interrupted."
+                        : "The context worker connection was invalidated."
+                )
+            }
+        }
+    }
+
+    nonisolated private static func proxyErrorHandler(
+        client: ContextWorkerClient,
+        generation: UUID
+    ) -> @Sendable (Error) -> Void {
+        { [weak client] error in
+            let message = error.localizedDescription
+            Task { @MainActor [weak client] in
+                client?.handleConnectionEvent(
+                    generation: generation,
+                    degraded: true,
+                    message: message
+                )
+            }
+        }
+    }
+
+    nonisolated private static func handshakeReplyHandler(
+        gate: ContextWorkerCompletionGate<(Int, Int32)>,
+        client: ContextWorkerClient,
+        generation: UUID
+    ) -> @Sendable (Int, Int32) -> Void {
+        { version, processIdentifier in
+            gate.resume(with: .success((version, processIdentifier)))
+        }
+    }
+
+    nonisolated private static func replyHandler(
+        gate: ContextWorkerCompletionGate<Data>
+    ) -> @Sendable (Data?) -> Void {
+        { data in
+            do {
+                guard let data else {
+                    throw ContextWorkerTransportError.disconnected(
+                        "The context worker returned no reply."
+                    )
+                }
+                switch try JSONDecoder().decode(
+                    ContextWorkerReply.self,
+                    from: data
+                ) {
+                case .success(let payload):
+                    gate.resume(with: .success(payload))
+                case .cancelled:
+                    gate.resume(with: .failure(CancellationError()))
+                case .failure(let message):
+                    gate.resume(with: .failure(
+                        CurrentError.modelUnavailable(message)
+                    ))
+                }
+            } catch {
+                gate.resume(with: .failure(error))
+            }
+        }
+    }
+
+    nonisolated private static func voidReplyHandler(
+        gate: ContextWorkerCompletionGate<Void>
+    ) -> @Sendable () -> Void {
+        { gate.resume(with: .success(())) }
+    }
+
+    nonisolated private static func scheduleTimeout<Value: Sendable>(
+        _ timeout: Duration,
+        operation: String,
+        gate: ContextWorkerCompletionGate<Value>
+    ) {
+        let task = Task.detached {
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            if gate.resume(with: .failure(
+                ContextWorkerTransportError.timeout(operation)
+            )) {
+                logger.error("Timed out \(operation, privacy: .public)")
+            }
+        }
+        gate.installTimeoutTask(task)
     }
 }
 

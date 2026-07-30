@@ -39,10 +39,13 @@ public enum MenuBarPresentation {
 
     package static func onboardingActionTitle(
         completed: Bool,
-        permissions: PermissionSnapshot
+        permissions: PermissionSnapshot,
+        contextWorkerEnabled: Bool = true
     ) -> String? {
         if !completed { return "Onboarding…" }
-        return permissions.allGranted ? nil : "Grant permissions…"
+        return permissions.allGranted(
+            contextWorkerEnabled: contextWorkerEnabled
+        ) ? nil : "Grant permissions…"
     }
 }
 
@@ -149,6 +152,24 @@ public struct PermissionSnapshot: Sendable, Equatable {
     public var firstMissing: PermissionKind? {
         PermissionKind.allCases.first { !self[$0].isGranted }
     }
+
+    public func allGranted(contextWorkerEnabled: Bool) -> Bool {
+        requiredPermissions(contextWorkerEnabled: contextWorkerEnabled)
+            .allSatisfy { self[$0].isGranted }
+    }
+
+    public func firstMissing(contextWorkerEnabled: Bool) -> PermissionKind? {
+        requiredPermissions(contextWorkerEnabled: contextWorkerEnabled)
+            .first { !self[$0].isGranted }
+    }
+
+    private func requiredPermissions(
+        contextWorkerEnabled: Bool
+    ) -> [PermissionKind] {
+        contextWorkerEnabled
+            ? [.microphone, .accessibility, .screenRecording, .inputMonitoring]
+            : [.microphone, .accessibility, .inputMonitoring]
+    }
 }
 
 public enum ModelState: Sendable, Equatable {
@@ -197,10 +218,15 @@ public enum OnboardingFlow {
         saved: OnboardingStep,
         completed: Bool,
         permissions: PermissionSnapshot,
-        modelInstalled: Bool
+        modelInstalled: Bool,
+        contextWorkerEnabled: Bool = true
     ) -> OnboardingStep {
+        let saved = !contextWorkerEnabled && saved == .screenRecording
+            ? OnboardingStep.inputMonitoring : saved
         if !completed, saved == .welcome { return .welcome }
-        if let missing = permissions.firstMissing {
+        if let missing = permissions.firstMissing(
+            contextWorkerEnabled: contextWorkerEnabled
+        ) {
             switch missing {
             case .microphone: return .microphone
             case .accessibility: return .accessibility
@@ -213,13 +239,33 @@ public enum OnboardingFlow {
         return completed ? .complete : saved
     }
 
-    public static func automaticDestination(from step: OnboardingStep, permissions: PermissionSnapshot) -> OnboardingStep? {
+    public static func automaticDestination(
+        from step: OnboardingStep,
+        permissions: PermissionSnapshot,
+        contextWorkerEnabled: Bool = true
+    ) -> OnboardingStep? {
         switch step {
         case .microphone where permissions.microphone.isGranted: .accessibility
-        case .accessibility where permissions.accessibility.isGranted: .screenRecording
+        case .accessibility where permissions.accessibility.isGranted:
+            contextWorkerEnabled ? .screenRecording : .inputMonitoring
         case .screenRecording where permissions.screenRecording.isGranted: .inputMonitoring
         case .inputMonitoring where permissions.inputMonitoring.isGranted: .restart
         default: nil
         }
+    }
+
+    public static func adjacentStep(
+        from step: OnboardingStep,
+        direction: Int,
+        contextWorkerEnabled: Bool
+    ) -> OnboardingStep? {
+        var steps = OnboardingStep.allCases
+        if !contextWorkerEnabled {
+            steps.removeAll { $0 == .screenRecording }
+        }
+        guard let index = steps.firstIndex(of: step) else { return nil }
+        let destination = index + direction
+        guard steps.indices.contains(destination) else { return nil }
+        return steps[destination]
     }
 }

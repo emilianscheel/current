@@ -38,7 +38,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             completed: runtime.settings.onboardingComplete,
             permissions: permissions,
             modelInstalled: runtime.model.hasInstalledSnapshot
-                && runtime.contextModel.hasInstalledSnapshot
+                && (!runtime.settings.contextWorkerEnabled
+                    || runtime.contextModel.hasInstalledSnapshot),
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
         )
         runtime.settings.onboardingStep = step
         if window == nil {
@@ -109,13 +111,21 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func next() {
-        guard let index = OnboardingStep.allCases.firstIndex(of: step), index + 1 < OnboardingStep.allCases.count else { return }
-        setStep(OnboardingStep.allCases[index + 1])
+        guard let next = OnboardingFlow.adjacentStep(
+            from: step,
+            direction: 1,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+        ) else { return }
+        setStep(next)
     }
 
     func back() {
-        guard let index = OnboardingStep.allCases.firstIndex(of: step), index > 0 else { return }
-        setStep(OnboardingStep.allCases[index - 1])
+        guard let previous = OnboardingFlow.adjacentStep(
+            from: step,
+            direction: -1,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+        ) else { return }
+        setStep(previous)
     }
 
     func restart() {
@@ -270,11 +280,13 @@ struct OnboardingView: View {
                 state: runtime.model.state,
                 retry: runtime.model.retry
             )
-            modelRow(
-                title: "Context structuring — Gemma 4 E2B 4-bit",
-                state: runtime.contextModel.state,
-                retry: runtime.contextModel.retry
-            )
+            if runtime.settings.contextWorkerEnabled {
+                modelRow(
+                    title: "Context structuring — Gemma 4 E2B 4-bit",
+                    state: runtime.contextModel.state,
+                    retry: runtime.contextModel.retry
+                )
+            }
         }
         .frame(maxWidth: 440)
     }
@@ -317,7 +329,8 @@ struct OnboardingView: View {
         case .restart: false
         case .model:
             runtime.model.state.isReady
-                && runtime.contextModel.state.isReady
+                && (!runtime.settings.contextWorkerEnabled
+                    || runtime.contextModel.state.isReady)
         default: true
         }
     }

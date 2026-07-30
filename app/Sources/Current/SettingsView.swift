@@ -32,17 +32,8 @@ struct SettingsView: View {
         }
         .onChange(of: runtime.settings.inputDeviceID) { _, device in runtime.coordinator.audio.selectedDeviceID = device }
         .onChange(of: runtime.settings.continuousContextEnabled) { _, enabled in
-            Task {
-                if enabled,
-                   runtime.settings.isEnabled,
-                   runtime.permissions.snapshot().screenRecording.isGranted {
-                    runtime.contextModel.prepareIfNeeded()
-                    try? await runtime.screenContext.start()
-                } else {
-                    await runtime.screenContext.stop()
-                    await runtime.contextModel.unload()
-                }
-            }
+            _ = enabled
+            runtime.applyContinuousContextPreference()
         }
     }
 
@@ -135,6 +126,11 @@ struct SettingsView: View {
                 "Keep per-app screen context",
                 isOn: $runtime.settings.continuousContextEnabled
             )
+            .disabled(!runtime.settings.contextWorkerEnabled)
+            if !runtime.settings.contextWorkerEnabled {
+                Text("Enable Context Worker from the menu bar to use contextual processing.")
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent(
                 "Background policy",
                 value: "Recently active apps only · one refresh every 10 seconds"
@@ -171,7 +167,8 @@ struct SettingsView: View {
     }
 
     private var contextWorkerState: String {
-        switch runtime.screenContext.backgroundState {
+        guard runtime.settings.contextWorkerEnabled else { return "Disabled" }
+        return switch runtime.screenContext.backgroundState {
         case .idle: "Idle"
         case .waitingForIdle: "Waiting for idle"
         case .processing: "Processing"

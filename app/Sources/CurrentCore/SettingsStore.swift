@@ -17,6 +17,7 @@ public final class SettingsStore {
     public var launchAtLogin: Bool { didSet { save(launchAtLogin, "launchAtLogin") } }
     public var soundsEnabled: Bool { didSet { save(soundsEnabled, "soundsEnabled") } }
     public var overlayEnabled: Bool { didSet { save(overlayEnabled, "overlayEnabled") } }
+    public var contextWorkerEnabled: Bool { didSet { save(contextWorkerEnabled, "contextWorkerEnabled") } }
     public var continuousContextEnabled: Bool { didSet { save(continuousContextEnabled, "continuousContextEnabled") } }
     public var animationIntensity: Double { didSet { save(animationIntensity, "animationIntensity") } }
     public var minimumRecordingDuration: Double { didSet { save(minimumRecordingDuration, "minimumRecordingDuration") } }
@@ -39,6 +40,7 @@ public final class SettingsStore {
             "launchAtLogin": false,
             "soundsEnabled": false,
             "overlayEnabled": true,
+            "contextWorkerEnabled": true,
             "continuousContextEnabled": true,
             "animationIntensity": 0.6,
             "minimumRecordingDuration": 0.25,
@@ -56,6 +58,7 @@ public final class SettingsStore {
         launchAtLogin = defaults.bool(forKey: "launchAtLogin")
         soundsEnabled = defaults.bool(forKey: "soundsEnabled")
         overlayEnabled = defaults.bool(forKey: "overlayEnabled")
+        contextWorkerEnabled = defaults.bool(forKey: "contextWorkerEnabled")
         continuousContextEnabled = defaults.bool(forKey: "continuousContextEnabled")
         animationIntensity = defaults.double(forKey: "animationIntensity")
         minimumRecordingDuration = defaults.double(forKey: "minimumRecordingDuration")

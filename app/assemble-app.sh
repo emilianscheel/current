@@ -247,9 +247,9 @@ if [[ "$SIGNING_MODE" == "distribution" ]]; then
   EMBEDDED_ENTITLEMENTS="$PROJECT_DIR/.build/Current.release-entitlements.plist"
   codesign -d --entitlements :- "$STAGE_APP" > "$EMBEDDED_ENTITLEMENTS" 2>/dev/null
   plutil -lint "$EMBEDDED_ENTITLEMENTS" >/dev/null || die "The assembled app has malformed embedded entitlements."
-  AUDIO_INPUT="$(plutil -extract com.apple.security.device.audio-input raw -o - "$EMBEDDED_ENTITLEMENTS" 2>/dev/null || true)"
+  AUDIO_INPUT="$(plutil -extract 'com\.apple\.security\.device\.audio-input' raw -o - "$EMBEDDED_ENTITLEMENTS" 2>/dev/null || true)"
   [[ "$AUDIO_INPUT" == "true" ]] || die "The distribution app is missing the audio-input entitlement."
-  GET_TASK_ALLOW="$(plutil -extract com.apple.security.get-task-allow raw -o - "$EMBEDDED_ENTITLEMENTS" 2>/dev/null || true)"
+  GET_TASK_ALLOW="$(plutil -extract 'com\.apple\.security\.get-task-allow' raw -o - "$EMBEDDED_ENTITLEMENTS" 2>/dev/null || true)"
   [[ "$GET_TASK_ALLOW" != "true" ]] || die "Distribution builds must not include com.apple.security.get-task-allow."
 fi
 

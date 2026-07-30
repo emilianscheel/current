@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import ApplicationServices
 import CoreGraphics
+import CoreImage.CIFilterBuiltins
 import CurrentCore
 import Observation
 import SwiftUI
@@ -119,10 +120,17 @@ final class PermissionGuidanceOverlayController {
                     in: windows,
                     systemSettings: observation
                 )
-                updatePanels(
-                    for: observation,
+                if Self.isRelatedApplicationFrontmost(
+                    systemSettings: observation,
                     authenticationWindows: authenticationWindows
-                )
+                ) {
+                    updatePanels(
+                        for: observation,
+                        authenticationWindows: authenticationWindows
+                    )
+                } else {
+                    hidePanelsForFocusLoss()
+                }
             } else if trackedWindowID == nil {
                 if ContinuousClock.now - startedAt >= .seconds(8) {
                     dismiss()
@@ -219,10 +227,11 @@ final class PermissionGuidanceOverlayController {
             blurPanel.update(
                 screenFrame: screen.frame,
                 focusFrames: focusFrames,
-                outlineFrame: outlineFrame
+                outlineFrame: outlineFrame,
+                grayscaleEnabled: model?.dropAccepted != true
             )
             if !blurPanel.panel.isVisible {
-                blurPanel.panel.orderFrontRegardless()
+                blurPanel.present()
             }
         }
 
@@ -315,6 +324,11 @@ final class PermissionGuidanceOverlayController {
         }
     }
 
+    private func hidePanelsForFocusLoss() {
+        blurPanels.values.forEach { $0.hide() }
+        guidePanel?.orderOut(nil)
+    }
+
     private func makeModel() -> PermissionGuidanceModel {
         let applicationURL = Self.applicationBundleURL()
         let icon = applicationURL.map {
@@ -384,6 +398,20 @@ final class PermissionGuidanceOverlayController {
             }
             return observation
         }
+    }
+
+    private static func isRelatedApplicationFrontmost(
+        systemSettings: WindowObservation,
+        authenticationWindows: [WindowObservation]
+    ) -> Bool {
+        guard let frontmostProcessIdentifier = NSWorkspace.shared
+            .frontmostApplication?.processIdentifier else {
+            return false
+        }
+        return frontmostProcessIdentifier == systemSettings.processIdentifier
+            || authenticationWindows.contains {
+                $0.processIdentifier == frontmostProcessIdentifier
+            }
     }
 
     private static func observation(
@@ -463,6 +491,7 @@ private final class PermissionGuidePanel: NSPanel {
 private final class PermissionBlurPanel {
     let panel: NSPanel
     private let focusView: PermissionFocusView
+    private var hasPresented = false
 
     init(screenFrame: CGRect) {
         panel = NSPanel(
@@ -474,6 +503,7 @@ private final class PermissionBlurPanel {
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.alphaValue = 0
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = true
@@ -491,19 +521,44 @@ private final class PermissionBlurPanel {
     func update(
         screenFrame: CGRect,
         focusFrames: [CGRect],
-        outlineFrame: CGRect?
+        outlineFrame: CGRect?,
+        grayscaleEnabled: Bool
     ) {
         panel.setFrame(screenFrame, display: false)
         focusView.update(
             focusFrames: focusFrames,
-            outlineFrame: outlineFrame
+            outlineFrame: outlineFrame,
+            grayscaleEnabled: grayscaleEnabled,
+            animated: hasPresented
         )
+    }
+
+    func present() {
+        guard !panel.isVisible else { return }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        panel.alphaValue = reduceMotion ? 1 : 0
+        panel.orderFrontRegardless()
+        hasPresented = true
+        guard !reduceMotion else { return }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.20
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    func hide() {
+        panel.orderOut(nil)
     }
 }
 
 private final class PermissionFocusView: NSView {
     private let effectView = NSVisualEffectView()
+    private let grayscaleView = NSView()
+    private let grayscaleEffectView = NSVisualEffectView()
     private let outlineLayer = CAShapeLayer()
+    private var grayscaleEnabled: Bool?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -513,8 +568,33 @@ private final class PermissionFocusView: NSView {
         effectView.blendingMode = .behindWindow
         effectView.material = .fullScreenUI
         effectView.state = .active
-        effectView.alphaValue = 0.86
+        effectView.alphaValue = 0.9
         addSubview(effectView)
+
+        grayscaleView.frame = bounds
+        grayscaleView.autoresizingMask = [.width, .height]
+        grayscaleView.wantsLayer = true
+        grayscaleView.layer?.backgroundColor = NSColor.white
+            .withAlphaComponent(0.001).cgColor
+        grayscaleView.layer?.masksToBounds = true
+        let colorControls = CIFilter.colorControls()
+        colorControls.saturation = 0
+        colorControls.brightness = 0
+        colorControls.contrast = 1
+        grayscaleView.backgroundFilters = [colorControls]
+        grayscaleEffectView.frame = grayscaleView.bounds
+        grayscaleEffectView.autoresizingMask = [.width, .height]
+        grayscaleEffectView.blendingMode = .behindWindow
+        grayscaleEffectView.material = .fullScreenUI
+        grayscaleEffectView.state = .active
+        let grayscaleBlurControls = CIFilter.colorControls()
+        grayscaleBlurControls.saturation = 0
+        grayscaleBlurControls.brightness = 0
+        grayscaleBlurControls.contrast = 1
+        grayscaleEffectView.contentFilters = [grayscaleBlurControls]
+        grayscaleView.addSubview(grayscaleEffectView)
+        addSubview(grayscaleView)
+
         layer?.addSublayer(outlineLayer)
         outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
         outlineLayer.strokeColor = NSColor.black.withAlphaComponent(0.78).cgColor
@@ -531,9 +611,17 @@ private final class PermissionFocusView: NSView {
 
     func update(
         focusFrames: [CGRect],
-        outlineFrame: CGRect?
+        outlineFrame: CGRect?,
+        grayscaleEnabled: Bool,
+        animated: Bool
     ) {
-        effectView.maskImage = maskImage(cuttingOut: focusFrames)
+        let focusMask = maskImage(cuttingOut: focusFrames)
+        effectView.maskImage = focusMask
+        grayscaleEffectView.maskImage = focusMask
+        updateGrayscale(
+            enabled: grayscaleEnabled,
+            animated: animated
+        )
         if let outlineFrame {
             outlineLayer.path = CGPath(
                 roundedRect: outlineFrame.insetBy(dx: 1, dy: 1),
@@ -545,6 +633,24 @@ private final class PermissionFocusView: NSView {
         } else {
             outlineLayer.isHidden = true
             outlineLayer.path = nil
+        }
+    }
+
+    private func updateGrayscale(enabled: Bool, animated: Bool) {
+        guard grayscaleEnabled != enabled else { return }
+        let isInitialState = grayscaleEnabled == nil
+        grayscaleEnabled = enabled
+        let targetAlpha: CGFloat = enabled ? 1 : 0
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animated, !isInitialState, !reduceMotion else {
+            grayscaleView.alphaValue = targetAlpha
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.20
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            grayscaleView.animator().alphaValue = targetAlpha
         }
     }
 

@@ -25,6 +25,14 @@ public enum DictationPhase: String, Sendable, Codable, CaseIterable {
 
 public enum MenuBarPresentation {
     public static func symbol(for _: DictationPhase) -> String { "alternatingcurrent" }
+
+    package static func onboardingActionTitle(
+        completed: Bool,
+        permissions: PermissionSnapshot
+    ) -> String? {
+        if !completed { return "Onboarding…" }
+        return permissions.allGranted ? nil : "Grant permissions…"
+    }
 }
 
 public struct DictationSession: Identifiable, Sendable, Equatable {

@@ -22,9 +22,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        let permissions = runtime.permissions.snapshot()
+        let onboardingTitle = MenuBarPresentation.onboardingActionTitle(
+            completed: runtime.settings.onboardingComplete,
+            permissions: permissions
+        )
         add(runtime.coordinator.phase.displayName, to: menu, enabled: false)
-        if !runtime.settings.onboardingComplete {
-            add(runtime.permissions.snapshot().allGranted ? "Permissions: Ready" : "Permissions: Action needed", to: menu, enabled: false)
+        if onboardingTitle != nil {
+            add(
+                permissions.allGranted
+                    ? "Permissions: Ready"
+                    : "Permissions: Action needed",
+                to: menu,
+                enabled: false
+            )
         }
         menu.addItem(.separator())
         add(captureTitle, to: menu, action: #selector(toggleCapture))
@@ -37,8 +48,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
         add(speechModelTitle, to: menu, enabled: false)
         add(contextModelTitle, to: menu, enabled: false)
-        if !runtime.settings.onboardingComplete {
-            add("Permissions & Onboarding…", to: menu, action: #selector(openOnboarding))
+        if let onboardingTitle {
+            add(onboardingTitle, to: menu, action: #selector(openOnboarding))
         }
         add("About Current", to: menu, action: #selector(openAbout))
         menu.addItem(.separator())

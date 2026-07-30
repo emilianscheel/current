@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ApplicationServices
 import CoreGraphics
 import CurrentCore
 import Observation
@@ -22,6 +23,8 @@ final class PermissionGuidanceOverlayController {
     private struct WindowObservation {
         let id: CGWindowID
         let frame: CGRect
+        let processIdentifier: pid_t
+        let ownerName: String
     }
 
     private let permissionSnapshot: () -> PermissionSnapshot
@@ -33,6 +36,9 @@ final class PermissionGuidanceOverlayController {
     private var trackedWindowID: CGWindowID?
     private var startedAt = ContinuousClock.now
     private var missingSince: ContinuousClock.Instant?
+    private var detectedListFrame: CGRect?
+    private var lastListLookupAt: ContinuousClock.Instant?
+    private var lastListLookupSettingsFrame: CGRect?
     private var localKeyMonitor: Any?
     private var globalKeyMonitor: Any?
     private var screenObserver: NSObjectProtocol?
@@ -61,6 +67,8 @@ final class PermissionGuidanceOverlayController {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.trackedWindowID = nil
+                self?.detectedListFrame = nil
+                self?.lastListLookupAt = nil
             }
         }
         trackingTask = Task { @MainActor [weak self] in
@@ -91,6 +99,9 @@ final class PermissionGuidanceOverlayController {
         kind = nil
         trackedWindowID = nil
         missingSince = nil
+        detectedListFrame = nil
+        lastListLookupAt = nil
+        lastListLookupSettingsFrame = nil
     }
 
     private func trackSystemSettings() async {
@@ -102,12 +113,16 @@ final class PermissionGuidanceOverlayController {
             }
 
             let windows = Self.visibleWindows()
-            if Self.hasAuthorizationWindow(in: windows) {
-                hidePanels()
+            if let observation = systemSettingsWindow(in: windows) {
                 missingSince = nil
-            } else if let observation = systemSettingsWindow(in: windows) {
-                missingSince = nil
-                updatePanels(for: observation.frame)
+                let authenticationWindows = Self.authenticationWindows(
+                    in: windows,
+                    systemSettings: observation
+                )
+                updatePanels(
+                    for: observation,
+                    authenticationWindows: authenticationWindows
+                )
             } else if trackedWindowID == nil {
                 if ContinuousClock.now - startedAt >= .seconds(8) {
                     dismiss()
@@ -160,35 +175,92 @@ final class PermissionGuidanceOverlayController {
         return match
     }
 
-    private func updatePanels(for settingsFrame: CGRect) {
-        let layout = PermissionGuidanceLayout(settingsFrame: settingsFrame)
+    private func updatePanels(
+        for systemSettings: WindowObservation,
+        authenticationWindows: [WindowObservation]
+    ) {
+        let settingsFrame = systemSettings.frame
+        let exactListFrame = refreshedDetectedListFrame(
+            processIdentifier: systemSettings.processIdentifier,
+            settingsFrame: settingsFrame
+        )
+        let layout = PermissionGuidanceLayout(
+            settingsFrame: settingsFrame,
+            detectedListFrame: exactListFrame
+        )
         let clampedGuideFrame = clampedGuideFrame(
             layout.guideFrame,
             near: settingsFrame
         )
+        let authenticationFrames = authenticationWindows.map(\.frame)
+        let hasSeparateAuthenticationWindow = !authenticationFrames.isEmpty
+        let focusEntireSettingsWindow = model?.dropAccepted == true
+            || hasSeparateAuthenticationWindow
+        let globalFocusFrames = focusEntireSettingsWindow
+            ? [settingsFrame] + authenticationFrames
+            : [layout.listFrame]
         ensureBlurPanels()
         ensureGuidePanel()
 
         for screen in NSScreen.screens {
             guard let displayID = Self.displayID(for: screen),
                   let blurPanel = blurPanels[displayID] else { continue }
-            let listFrame = PermissionGuidanceLayout.localIntersection(
-                of: layout.listFrame,
-                in: screen.frame
-            )
+            let focusFrames = globalFocusFrames.compactMap {
+                PermissionGuidanceLayout.localIntersection(
+                    of: $0,
+                    in: screen.frame
+                )
+            }
+            let outlineFrame = focusEntireSettingsWindow ? nil
+                : PermissionGuidanceLayout.localIntersection(
+                    of: layout.listFrame,
+                    in: screen.frame
+                )
             blurPanel.update(
                 screenFrame: screen.frame,
-                listFrame: listFrame
+                focusFrames: focusFrames,
+                outlineFrame: outlineFrame
             )
             if !blurPanel.panel.isVisible {
                 blurPanel.panel.orderFrontRegardless()
             }
         }
 
-        guidePanel?.setFrame(clampedGuideFrame, display: true)
-        if guidePanel?.isVisible != true {
-            guidePanel?.orderFrontRegardless()
+        if hasSeparateAuthenticationWindow {
+            guidePanel?.orderOut(nil)
+        } else {
+            guidePanel?.setFrame(clampedGuideFrame, display: true)
+            if guidePanel?.isVisible != true {
+                guidePanel?.orderFrontRegardless()
+            }
         }
+    }
+
+    private func refreshedDetectedListFrame(
+        processIdentifier: pid_t,
+        settingsFrame: CGRect
+    ) -> CGRect? {
+        guard AXIsProcessTrusted() else {
+            detectedListFrame = nil
+            return nil
+        }
+
+        let settingsMoved = lastListLookupSettingsFrame != settingsFrame
+        let lookupIsStale = lastListLookupAt.map {
+            ContinuousClock.now - $0 >= .milliseconds(500)
+        } ?? true
+        guard settingsMoved || lookupIsStale else {
+            return detectedListFrame
+        }
+
+        lastListLookupAt = .now
+        lastListLookupSettingsFrame = settingsFrame
+        detectedListFrame = SystemSettingsPermissionListLocator.listFrame(
+            processIdentifier: processIdentifier,
+            settingsFrame: settingsFrame,
+            convertToAppKit: Self.appKitFrame(from:)
+        )
+        return detectedListFrame
     }
 
     private func ensureBlurPanels() {
@@ -208,7 +280,7 @@ final class PermissionGuidanceOverlayController {
     private func ensureGuidePanel() {
         guard guidePanel == nil, let model else { return }
         let panel = PermissionGuidePanel(
-            contentRect: CGRect(x: 0, y: 0, width: 460, height: 124)
+            contentRect: CGRect(x: 0, y: 0, width: 460, height: 168)
         )
         panel.level = .statusBar
         panel.isOpaque = false
@@ -227,11 +299,6 @@ final class PermissionGuidanceOverlayController {
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
         guidePanel = panel
-    }
-
-    private func hidePanels() {
-        blurPanels.values.forEach { $0.panel.orderOut(nil) }
-        guidePanel?.orderOut(nil)
     }
 
     private func installEventMonitors() {
@@ -293,18 +360,29 @@ final class PermissionGuidanceOverlayController {
         ) as? [[String: Any]] ?? []
     }
 
-    private static func hasAuthorizationWindow(
-        in windows: [[String: Any]]
-    ) -> Bool {
+    private static func authenticationWindows(
+        in windows: [[String: Any]],
+        systemSettings: WindowObservation
+    ) -> [WindowObservation] {
         let authorizationOwners = Set([
             "SecurityAgent",
             "CoreServicesUIAgent",
             "authorizationhost",
+            "LocalAuthenticationRemoteService",
+            "CoreAuthUI",
+            "AuthenticationServicesAgent",
         ])
-        return windows.contains { window in
-            guard let owner = window[kCGWindowOwnerName as String] as? String,
-                  authorizationOwners.contains(owner) else { return false }
-            return (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0
+        return windows.compactMap { window in
+            guard let observation = observation(from: window),
+                  observation.id != systemSettings.id,
+                  observation.frame.width >= 120,
+                  observation.frame.height >= 80,
+                  (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0,
+                  observation.processIdentifier == systemSettings.processIdentifier
+                    || authorizationOwners.contains(observation.ownerName) else {
+                return nil
+            }
+            return observation
         }
     }
 
@@ -312,10 +390,18 @@ final class PermissionGuidanceOverlayController {
         from window: [String: Any]
     ) -> WindowObservation? {
         guard let id = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+              let processIdentifier = (window[kCGWindowOwnerPID as String]
+                  as? NSNumber)?.int32Value,
+              let ownerName = window[kCGWindowOwnerName as String] as? String,
               let dictionary = window[kCGWindowBounds as String] as? NSDictionary,
               let cgFrame = CGRect(dictionaryRepresentation: dictionary),
               let frame = appKitFrame(from: cgFrame) else { return nil }
-        return WindowObservation(id: id, frame: frame)
+        return WindowObservation(
+            id: id,
+            frame: frame,
+            processIdentifier: processIdentifier,
+            ownerName: ownerName
+        )
     }
 
     private static func appKitFrame(from cgFrame: CGRect) -> CGRect? {
@@ -404,10 +490,14 @@ private final class PermissionBlurPanel {
 
     func update(
         screenFrame: CGRect,
-        listFrame: CGRect?
+        focusFrames: [CGRect],
+        outlineFrame: CGRect?
     ) {
         panel.setFrame(screenFrame, display: false)
-        focusView.update(listFrame: listFrame)
+        focusView.update(
+            focusFrames: focusFrames,
+            outlineFrame: outlineFrame
+        )
     }
 }
 
@@ -423,6 +513,7 @@ private final class PermissionFocusView: NSView {
         effectView.blendingMode = .behindWindow
         effectView.material = .fullScreenUI
         effectView.state = .active
+        effectView.alphaValue = 0.86
         addSubview(effectView)
         layer?.addSublayer(outlineLayer)
         outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
@@ -438,12 +529,14 @@ private final class PermissionFocusView: NSView {
         outlineLayer.frame = bounds
     }
 
-    func update(listFrame: CGRect?) {
-        let holes = [listFrame].compactMap { $0 }
-        effectView.maskImage = maskImage(cuttingOut: holes)
-        if let listFrame {
+    func update(
+        focusFrames: [CGRect],
+        outlineFrame: CGRect?
+    ) {
+        effectView.maskImage = maskImage(cuttingOut: focusFrames)
+        if let outlineFrame {
             outlineLayer.path = CGPath(
-                roundedRect: listFrame.insetBy(dx: 1, dy: 1),
+                roundedRect: outlineFrame.insetBy(dx: 1, dy: 1),
                 cornerWidth: 14,
                 cornerHeight: 14,
                 transform: nil
@@ -477,10 +570,11 @@ private struct PermissionGuidanceView: View {
     let dismiss: () -> Void
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 0) {
             Image(systemName: model.dropAccepted ? "checkmark" : "arrow.up")
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.black)
+                .padding(.bottom, 12)
             Text(
                 model.dropAccepted
                     ? "Now turn on Current in the list"
@@ -488,10 +582,12 @@ private struct PermissionGuidanceView: View {
             )
             .font(.headline)
             .foregroundStyle(.black)
+            .padding(.bottom, 20)
             applicationRow
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 8)
+        .padding(.top, 20)
+        .padding(.bottom, 20)
         .background(.white.opacity(0.97), in: .rect(cornerRadius: 18))
         .overlay {
             RoundedRectangle(cornerRadius: 18)

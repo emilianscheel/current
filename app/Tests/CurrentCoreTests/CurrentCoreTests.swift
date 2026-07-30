@@ -572,9 +572,9 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
     let layout = PermissionGuidanceLayout(settingsFrame: settings)
 
-    #expect(layout.placement == .belowWindow)
-    #expect(layout.listFrame == CGRect(x: 344, y: 82, width: 460, height: 556))
-    #expect(layout.guideFrame == CGRect(x: 344, y: -50, width: 460, height: 124))
+    #expect(layout.placement == .conservative)
+    #expect(layout.listFrame == CGRect(x: 344, y: 334, width: 460, height: 304))
+    #expect(layout.guideFrame == CGRect(x: 344, y: 158, width: 460, height: 168))
 }
 
 @Test func permissionGuidanceLayoutTracksWindowMovementAndResize() {
@@ -589,16 +589,42 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(moved.listFrame.minY - original.listFrame.minY == 30)
     #expect(moved.listFrame.width - original.listFrame.width == 100)
     #expect(moved.listFrame.height - original.listFrame.height == 50)
-    #expect(moved.guideFrame.origin == CGPoint(x: 384, y: -20))
+    #expect(moved.guideFrame.origin == CGPoint(x: 384, y: 188))
 }
 
-@Test func permissionGuidanceLayoutKeepsGuideBelowCompactWindow() {
+@Test func permissionGuidanceLayoutUsesConservativeCompactFallback() {
     let settings = CGRect(x: 50, y: 300, width: 600, height: 500)
     let layout = PermissionGuidanceLayout(settingsFrame: settings)
 
-    #expect(layout.placement == .belowWindow)
-    #expect(layout.listFrame == CGRect(x: 294, y: 302, width: 336, height: 386))
-    #expect(layout.guideFrame == CGRect(x: 294, y: 170, width: 336, height: 124))
+    #expect(layout.placement == .conservative)
+    #expect(layout.listFrame == CGRect(x: 294, y: 554, width: 336, height: 134))
+    #expect(layout.guideFrame == CGRect(x: 294, y: 378, width: 336, height: 168))
+}
+
+@Test func permissionGuidanceLayoutUsesValidatedDetectedBounds() {
+    let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
+    let detected = CGRect(x: 352, y: 340, width: 452, height: 294)
+    let layout = PermissionGuidanceLayout(
+        settingsFrame: settings,
+        detectedListFrame: detected
+    )
+
+    #expect(layout.placement == .detected)
+    #expect(layout.listFrame == detected)
+    #expect(layout.guideFrame == CGRect(x: 352, y: 164, width: 452, height: 168))
+    #expect(layout.listFrame.minY - layout.guideFrame.maxY == 8)
+}
+
+@Test func permissionGuidanceLayoutRejectsUnsafeDetectedBounds() {
+    let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
+    let oversized = CGRect(x: 220, y: 100, width: 604, height: 594)
+    let layout = PermissionGuidanceLayout(
+        settingsFrame: settings,
+        detectedListFrame: oversized
+    )
+
+    #expect(layout.placement == .conservative)
+    #expect(layout.listFrame == CGRect(x: 344, y: 334, width: 460, height: 304))
 }
 
 @Test func permissionGuidanceLayoutIntersectsMultipleDisplays() {
@@ -620,6 +646,51 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     for phase in DictationPhase.allCases {
         #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")
     }
+}
+
+@Test func menuBarShowsOnboardingWhileOnboardingIsIncomplete() {
+    let permissions = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
+    #expect(
+        MenuBarPresentation.onboardingActionTitle(
+            completed: false,
+            permissions: permissions
+        ) == "Onboarding…"
+    )
+}
+
+@Test func menuBarShowsPermissionRepairWhenCompletedPermissionIsMissing() {
+    let permissions = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .denied,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
+    #expect(
+        MenuBarPresentation.onboardingActionTitle(
+            completed: true,
+            permissions: permissions
+        ) == "Grant permissions…"
+    )
+}
+
+@Test func menuBarOmitsOnboardingWhenSetupIsComplete() {
+    let permissions = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
+    #expect(
+        MenuBarPresentation.onboardingActionTitle(
+            completed: true,
+            permissions: permissions
+        ) == nil
+    )
 }
 
 @Test func onboardingRepairsTheFirstMissingPermission() {

@@ -410,7 +410,7 @@ public final class ScreenContextCoordinator: ScreenContextProviding {
     private let policy: ContextBackgroundPolicy
     private let accessibility = AccessibilityContextSource()
     private let signposter = OSSignposter(
-        subsystem: "local.Current",
+        subsystem: "com.emilianscheel.current",
         category: "ContextBackground"
     )
     private var ledger: RecentApplicationLedger

@@ -1088,7 +1088,7 @@ private actor PromptScreenStub: ScreenContextProviding {
     let repository = ContextRepository(
         store: store,
         structurer: StubIntelligence(),
-        excludedBundleIdentifiers: ["local.Current"],
+        excludedBundleIdentifiers: ["com.emilianscheel.current"],
         excludedProcessIdentifiers: [777]
     )
     let block = ContextTextBlock(
@@ -1110,7 +1110,7 @@ private actor PromptScreenStub: ScreenContextProviding {
         !(await repository.accept(
             ContextObservation(
                 processIdentifier: 778,
-                bundleIdentifier: "local.Current",
+                bundleIdentifier: "com.emilianscheel.current",
                 applicationName: "Bundle match",
                 blocks: [block]
             )
@@ -1235,11 +1235,11 @@ private actor PromptScreenStub: ScreenContextProviding {
     }
     #expect(ledger.entries.count == 12)
     for (offset, bundleIdentifier) in [
-        "local.Current",
+        "com.emilianscheel.current",
         "com.apple.dock",
         "com.apple.controlcenter",
         "com.apple.systemuiserver",
-        "local.Current.ContextWorker",
+        "com.emilianscheel.current.ContextWorker",
     ].enumerated() {
         let accepted = ledger.record(.init(
             target: .init(

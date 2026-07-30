@@ -122,7 +122,10 @@ app/Packaging/                   Info.plist and signing entitlements
 app/AppIcon.icon/                Adaptive layered app-icon source
 app/Assets/                      Editable SVG artwork and legacy app-icon renditions
 app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion tests
+app/assemble-app.sh              Shared test, optimized build, assembly, and signing workflow
 app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
+app/release.sh                   Developer ID signing, notarization, tag, and GitHub release workflow
+.githooks/pre-push               Guard against bypassing the verified release workflow
 ```
 
 ## Build, install, and restart
@@ -139,7 +142,7 @@ To validate compilation and bundle assembly without changing Keychain, installin
 ./app/build-install-restart.sh --assemble-only
 ```
 
-Release automation can also inject a numeric semantic version into the assembled bundle without changing the tracked `Info.plist`:
+Assembly checks can also inject a numeric semantic version into the staged bundle without changing the tracked `Info.plist`:
 
 ```sh
 ./app/build-install-restart.sh --assemble-only --version 0.2.0
@@ -164,7 +167,7 @@ The script therefore prefers an existing **Apple Development** identity, includi
 
 If no Apple Development identity passes that check, the script reuses or creates a long-lived **Current Local Development** certificate in the login Keychain and limits its trust purpose to code signing. The first setup can display a Keychain confirmation. Later builds reuse that identity. Revoked Apple certificates are left untouched in Keychain.
 
-Changing the signing identity, `local.Current` bundle identifier, or installation path requires granting permissions once again. The script intentionally does not hide or work around that macOS security behavior.
+Changing the signing identity, `com.emilianscheel.current` bundle identifier, or installation path requires granting permissions once again. The move from the former `local.Current` identifier therefore requires one fresh permission grant. The script intentionally does not hide or work around that macOS security behavior.
 
 ## Manual development commands
 
@@ -235,24 +238,47 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 
 ## Download and releases
 
-The latest release is always available as [`Current.dmg`](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg). The DMG contains `Current.app` and an Applications shortcut.
+The latest release is always available as [`Current.dmg`](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg). The DMG contains `Current.app` and an Applications shortcut. Public releases are signed with a **Developer ID Application** certificate, use Hardened Runtime and secure timestamps, and are notarized and stapled so Gatekeeper can validate them normally.
 
-Current is ad-hoc signed because the project does not have an Apple Developer Program membership, so Apple cannot notarize it. On first launch, macOS blocks the app because it cannot verify the developer:
+Development builds are intentionally different: the installed local app uses a stable Apple Development or Current Local Development identity, while raw Swift unit tests need no distribution signing or notarization. Never use the Developer ID identity for the routine development loop.
 
-1. Attempt to open Current once.
-2. Open **System Settings → Privacy & Security**.
-3. Scroll to the security notice for Current and choose **Open Anyway**.
-4. Confirm **Open** in the warning dialog.
+### One-time release setup
 
-Only install a non-notarized build when it came from this repository and you trust its contents.
+1. In **Xcode → Settings → Accounts → Manage Certificates**, create an **Apple Development** certificate for local builds and a **Developer ID Application** certificate for direct distribution. The Developer ID certificate and private key must be present in the login Keychain.
+2. Install and authenticate GitHub CLI:
 
-To publish a release, create and push an annotated semantic-version tag:
+   ```sh
+   brew install gh
+   gh auth login
+   ```
+
+3. Create an app-specific password for the Apple ID, then store notarization credentials in Keychain without putting secrets in the repository or script:
+
+   ```sh
+   xcrun notarytool store-credentials "Current-notary" \
+     --apple-id "APPLE-ID" \
+     --team-id "TEAM-ID" \
+     --password "APP-SPECIFIC-PASSWORD"
+   ```
+
+4. Enable the tracked Git hook and validate all prerequisites:
+
+   ```sh
+   ./app/release.sh --setup
+   ```
+
+The default notarization profile is `Current-notary`; override it with `CURRENT_NOTARY_PROFILE`. If the Keychain contains multiple Developer ID Application identities, select one by SHA-1 hash or full certificate name with `CURRENT_DEVELOPER_ID_APPLICATION`.
+
+### Publish a release
+
+First push `main`, ensure the worktree is clean, and run:
 
 ```sh
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+./app/release.sh v0.2.0
 ```
 
-The tag-triggered GitHub Actions workflow validates the `vX.Y.Z` format, injects that version into the assembled app, runs the Swift tests, creates and verifies the ad-hoc-signed `Current.dmg`, and publishes it as the latest GitHub Release with generated notes. No Apple credentials or repository secrets are required. Invalid tags, failed tests, invalid signatures, or malformed disk images stop before publication.
+The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
 
-Every release uses the asset name `Current.dmg`, so the website and README can use GitHub's permanent latest-release URL without changing on each version.
+Direct `vX.Y.Z` pushes are rejected by `.githooks/pre-push`; use `app/release.sh` so a tag cannot bypass signing and notarization. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
+
+Every release uses the asset name `Current.dmg`, so the website and README keep using GitHub's permanent latest-release URL.

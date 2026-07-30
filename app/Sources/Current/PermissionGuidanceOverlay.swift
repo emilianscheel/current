@@ -537,7 +537,7 @@ final class PermissionGuidanceOverlayController {
         let bundleURL = Bundle.main.bundleURL
         if bundleURL.pathExtension.lowercased() == "app" { return bundleURL }
         return NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.Current"
+            withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.emilianscheel.current"
         )
     }
 

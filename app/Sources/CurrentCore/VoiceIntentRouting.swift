@@ -143,7 +143,7 @@ public actor HybridVoiceIntentRouter: VoiceIntentRoutingProviding {
     private let fallback: any VoiceIntentRoutingProviding
     private let clock = ContinuousClock()
     private let signposter = OSSignposter(
-        subsystem: "local.Current",
+        subsystem: "com.emilianscheel.current",
         category: "VoiceIntentRouting"
     )
     public private(set) var diagnostics = IntentRoutingDiagnostics(

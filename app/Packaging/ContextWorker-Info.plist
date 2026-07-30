@@ -4,7 +4,7 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleExecutable</key><string>CurrentContextWorker</string>
-    <key>CFBundleIdentifier</key><string>local.Current.ContextWorker</string>
+    <key>CFBundleIdentifier</key><string>com.emilianscheel.current.ContextWorker</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Current Context Worker</string>
     <key>CFBundlePackageType</key><string>XPC!</string>

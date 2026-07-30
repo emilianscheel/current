@@ -3,7 +3,7 @@ import Foundation
 
 public enum ContextWorkerProtocolVersion {
     public static let current = 4
-    public static let serviceName = "local.Current.ContextWorker"
+    public static let serviceName = "com.emilianscheel.current.ContextWorker"
 }
 
 @objc public protocol ContextWorkerXPCProtocol {

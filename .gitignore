@@ -1,4 +1,5 @@
 .build/
+app/dist/
 .swiftpm/
 .DS_Store
 Current.app

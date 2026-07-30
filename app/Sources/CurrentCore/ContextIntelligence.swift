@@ -389,11 +389,11 @@ public enum ContextBackgroundState: String, Codable, Sendable, Equatable {
 
 public enum ContextApplicationExclusions {
     public static let bundleIdentifiers: Set<String> = [
-        "local.Current",
+        "com.emilianscheel.current",
         "com.apple.dock",
         "com.apple.controlcenter",
         "com.apple.systemuiserver",
-        "local.Current.ContextWorker",
+        "com.emilianscheel.current.ContextWorker",
     ]
 
     public static func contains(

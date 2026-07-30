@@ -32,7 +32,7 @@ private final class ContextWorkerService: NSObject,
 
     private let queue: OperationQueue = {
         let queue = OperationQueue()
-        queue.name = "local.Current.ContextWorker.serial"
+        queue.name = "com.emilianscheel.current.ContextWorker.serial"
         queue.qualityOfService = .background
         queue.maxConcurrentOperationCount = 1
         return queue

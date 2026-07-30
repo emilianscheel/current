@@ -603,6 +603,41 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(layout.guideFrame == CGRect(x: 344, y: 158, width: 460, height: 168))
 }
 
+@Test func permissionGuidanceMotionUsesClampedCubicEaseOut() {
+    #expect(PermissionGuidanceMotion.easedProgress(-1) == 0)
+    #expect(PermissionGuidanceMotion.easedProgress(0) == 0)
+    #expect(PermissionGuidanceMotion.easedProgress(0.5) == 0.875)
+    #expect(PermissionGuidanceMotion.easedProgress(1) == 1)
+    #expect(PermissionGuidanceMotion.easedProgress(2) == 1)
+}
+
+@Test func permissionGuidanceMotionInterpolatesAndRetargetsContinuously() {
+    let start = CGRect(x: 0, y: 20, width: 100, height: 200)
+    let firstTarget = CGRect(x: 100, y: 60, width: 140, height: 240)
+    let current = PermissionGuidanceMotion.interpolate(
+        from: start,
+        to: firstTarget,
+        progress: 0.5
+    )
+
+    #expect(current == CGRect(x: 87.5, y: 55, width: 135, height: 235))
+
+    let newTarget = CGRect(x: 40, y: 10, width: 120, height: 220)
+    let retargetedStart = PermissionGuidanceMotion.interpolate(
+        from: current,
+        to: newTarget,
+        progress: 0
+    )
+    #expect(retargetedStart == current)
+    #expect(
+        PermissionGuidanceMotion.interpolate(
+            from: current,
+            to: newTarget,
+            progress: 1
+        ) == newTarget
+    )
+}
+
 @Test func permissionGuidanceLayoutTracksWindowMovementAndResize() {
     let original = PermissionGuidanceLayout(
         settingsFrame: CGRect(x: 100, y: 80, width: 724, height: 670)
@@ -639,6 +674,32 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(layout.listFrame == detected)
     #expect(layout.guideFrame == CGRect(x: 352, y: 164, width: 452, height: 168))
     #expect(layout.listFrame.minY - layout.guideFrame.maxY == 8)
+}
+
+@Test func permissionGuidanceDetectedBoundsTranslateOnlyDuringMovement() {
+    let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
+    let list = CGRect(x: 352, y: 340, width: 452, height: 294)
+    let movedSettings = settings.offsetBy(dx: 45, dy: -20)
+
+    #expect(
+        PermissionGuidanceLayout.translatedDetectedListFrame(
+            list,
+            from: settings,
+            to: movedSettings
+        ) == list.offsetBy(dx: 45, dy: -20)
+    )
+
+    let resizedSettings = CGRect(
+        origin: movedSettings.origin,
+        size: CGSize(width: 824, height: 720)
+    )
+    #expect(
+        PermissionGuidanceLayout.translatedDetectedListFrame(
+            list,
+            from: settings,
+            to: resizedSettings
+        ) == nil
+    )
 }
 
 @Test func permissionGuidanceLayoutRejectsUnsafeDetectedBounds() {

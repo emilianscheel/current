@@ -233,15 +233,68 @@ struct OnboardingView: View {
                 }
             case .preferences:
                 StepLayout(symbol: "checkmark.circle", title: "Ready when you are") {
-                    VStack(alignment: .leading) {
-                        Toggle("Launch Current at login", isOn: $runtime.settings.launchAtLogin)
-                        Toggle("Play quiet start and stop sounds", isOn: $runtime.settings.soundsEnabled)
-                    }.toggleStyle(.switch).frame(maxWidth: 360)
+                    VStack(spacing: 10) {
+                        preferenceCard(
+                            title: "Launch Current at login",
+                            symbol: "arrow.clockwise.circle",
+                            isSelected: $runtime.settings.launchAtLogin
+                        )
+                        preferenceCard(
+                            title: "Play quiet start and stop sounds",
+                            symbol: "speaker.wave.2",
+                            isSelected: $runtime.settings.soundsEnabled
+                        )
+                    }
+                    .frame(maxWidth: 360)
                 }
             case .complete:
                 StepLayout(symbol: "checkmark.seal.fill", title: "Current is ready") { EmptyView() }
             }
         }
+    }
+
+    private func preferenceCard(
+        title: String,
+        symbol: String,
+        isSelected: Binding<Bool>
+    ) -> some View {
+        Button {
+            isSelected.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(
+                        isSelected.wrappedValue ? Color.accentColor : Color.secondary
+                    )
+                    .frame(width: 22)
+                Text(title)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .contentShape(.rect)
+            .background(
+                isSelected.wrappedValue
+                    ? Color.accentColor.opacity(0.07)
+                    : Color.white,
+                in: .rect(cornerRadius: 11)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 11)
+                    .stroke(
+                        isSelected.wrappedValue
+                            ? Color.accentColor
+                            : Color(nsColor: .separatorColor).opacity(0.7),
+                        lineWidth: isSelected.wrappedValue ? 2 : 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isSelected.wrappedValue ? "On" : "Off")
     }
 
     private func permissionStep(_ kind: PermissionKind) -> some View {

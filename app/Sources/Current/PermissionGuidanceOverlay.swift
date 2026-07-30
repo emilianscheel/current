@@ -4,6 +4,7 @@ import CoreGraphics
 import CoreImage.CIFilterBuiltins
 import CurrentCore
 import Observation
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -20,12 +21,58 @@ private final class PermissionGuidanceModel {
 }
 
 @MainActor
-final class PermissionGuidanceOverlayController {
+final class PermissionGuidanceOverlayController: NSObject {
     private struct WindowObservation {
         let id: CGWindowID
         let frame: CGRect
         let processIdentifier: pid_t
         let ownerName: String
+    }
+
+    private struct PresentationGeometry: Equatable {
+        let guideFrame: CGRect
+        let focusFrames: [CGRect]
+        let outlineFrame: CGRect?
+        let guideVisible: Bool
+        let grayscaleEnabled: Bool
+        let behindWindowID: CGWindowID?
+
+        func canInterpolate(to other: Self) -> Bool {
+            focusFrames.count == other.focusFrames.count
+                && (outlineFrame == nil) == (other.outlineFrame == nil)
+                && guideVisible == other.guideVisible
+                && grayscaleEnabled == other.grayscaleEnabled
+                && behindWindowID == other.behindWindowID
+        }
+
+        func interpolated(to other: Self, progress: CGFloat) -> Self {
+            Self(
+                guideFrame: PermissionGuidanceMotion.interpolate(
+                    from: guideFrame,
+                    to: other.guideFrame,
+                    progress: progress
+                ),
+                focusFrames: zip(focusFrames, other.focusFrames).map { pair in
+                    PermissionGuidanceMotion.interpolate(
+                        from: pair.0,
+                        to: pair.1,
+                        progress: progress
+                    )
+                },
+                outlineFrame: outlineFrame.flatMap { start in
+                    other.outlineFrame.map {
+                        PermissionGuidanceMotion.interpolate(
+                            from: start,
+                            to: $0,
+                            progress: progress
+                        )
+                    }
+                },
+                guideVisible: other.guideVisible,
+                grayscaleEnabled: other.grayscaleEnabled,
+                behindWindowID: other.behindWindowID
+            )
+        }
     }
 
     private let permissionSnapshot: () -> PermissionSnapshot
@@ -41,6 +88,13 @@ final class PermissionGuidanceOverlayController {
     private var detectedListFrame: CGRect?
     private var lastListLookupAt: ContinuousClock.Instant?
     private var lastListLookupSettingsFrame: CGRect?
+    private var lastSettingsGeometryChangeAt: ContinuousClock.Instant?
+    private var displayLink: CADisplayLink?
+    private var motionFrom: PresentationGeometry?
+    private var motionTarget: PresentationGeometry?
+    private var motionStartedAt: CFTimeInterval?
+    private var presentedGeometry: PresentationGeometry?
+    private var requiresGeometrySnap = true
     private var localKeyMonitor: Any?
     private var globalKeyMonitor: Any?
     private var screenObserver: NSObjectProtocol?
@@ -51,6 +105,7 @@ final class PermissionGuidanceOverlayController {
     ) {
         self.permissionSnapshot = permissionSnapshot
         self.dropAccepted = dropAccepted
+        super.init()
     }
 
     func present(for kind: PermissionKind) {
@@ -75,6 +130,9 @@ final class PermissionGuidanceOverlayController {
                 self?.trackedWindowID = nil
                 self?.detectedListFrame = nil
                 self?.lastListLookupAt = nil
+                self?.lastListLookupSettingsFrame = nil
+                self?.lastSettingsGeometryChangeAt = nil
+                self?.resetMotion()
             }
         }
         trackingTask = Task { @MainActor [weak self] in
@@ -85,6 +143,8 @@ final class PermissionGuidanceOverlayController {
     func dismiss() {
         trackingTask?.cancel()
         trackingTask = nil
+        displayLink?.invalidate()
+        displayLink = nil
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
             self.localKeyMonitor = nil
@@ -97,7 +157,7 @@ final class PermissionGuidanceOverlayController {
             NotificationCenter.default.removeObserver(screenObserver)
             self.screenObserver = nil
         }
-        blurPanels.values.forEach { $0.panel.orderOut(nil) }
+        blurPanels.values.forEach { $0.hide() }
         blurPanels.removeAll()
         guidePanel?.orderOut(nil)
         guidePanel = nil
@@ -108,6 +168,12 @@ final class PermissionGuidanceOverlayController {
         detectedListFrame = nil
         lastListLookupAt = nil
         lastListLookupSettingsFrame = nil
+        lastSettingsGeometryChangeAt = nil
+        motionFrom = nil
+        motionTarget = nil
+        motionStartedAt = nil
+        presentedGeometry = nil
+        requiresGeometrySnap = true
     }
 
     private func trackSystemSettings() async {
@@ -226,47 +292,27 @@ final class PermissionGuidanceOverlayController {
         )
         let authenticationFrames = authenticationWindows.map(\.frame)
         let hasSeparateAuthenticationWindow = !authenticationFrames.isEmpty
-        let focusEntireSettingsWindow = model?.dropAccepted == true
-            || hasSeparateAuthenticationWindow
-        let globalFocusFrames = focusEntireSettingsWindow
-            ? [settingsFrame] + authenticationFrames
-            : [layout.listFrame]
+        let dropAccepted = model?.dropAccepted == true
+        let focusEntireSettingsWindow = hasSeparateAuthenticationWindow
+        let globalFocusFrames = dropAccepted
+            ? []
+            : focusEntireSettingsWindow
+                ? [settingsFrame] + authenticationFrames
+                : [layout.listFrame]
         ensureBlurPanels()
         ensureGuidePanel()
-
-        for screen in NSScreen.screens {
-            guard let displayID = Self.displayID(for: screen),
-                  let blurPanel = blurPanels[displayID] else { continue }
-            let focusFrames = globalFocusFrames.compactMap {
-                PermissionGuidanceLayout.localIntersection(
-                    of: $0,
-                    in: screen.frame
-                )
-            }
-            let outlineFrame = focusEntireSettingsWindow ? nil
-                : PermissionGuidanceLayout.localIntersection(
-                    of: layout.listFrame,
-                    in: screen.frame
-                )
-            blurPanel.update(
-                screenFrame: screen.frame,
-                focusFrames: focusFrames,
-                outlineFrame: outlineFrame,
-                grayscaleEnabled: model?.dropAccepted != true
+        setPresentationTarget(
+            PresentationGeometry(
+                guideFrame: clampedGuideFrame,
+                focusFrames: globalFocusFrames,
+                outlineFrame: dropAccepted || focusEntireSettingsWindow
+                    ? nil
+                    : layout.listFrame,
+                guideVisible: !hasSeparateAuthenticationWindow,
+                grayscaleEnabled: !dropAccepted,
+                behindWindowID: dropAccepted ? systemSettings.id : nil
             )
-            if !blurPanel.panel.isVisible {
-                blurPanel.present()
-            }
-        }
-
-        if hasSeparateAuthenticationWindow {
-            guidePanel?.orderOut(nil)
-        } else {
-            guidePanel?.setFrame(clampedGuideFrame, display: true)
-            if guidePanel?.isVisible != true {
-                guidePanel?.orderFrontRegardless()
-            }
-        }
+        )
     }
 
     private func refreshedDetectedListFrame(
@@ -275,19 +321,47 @@ final class PermissionGuidanceOverlayController {
     ) -> CGRect? {
         guard AXIsProcessTrusted() else {
             detectedListFrame = nil
+            lastListLookupSettingsFrame = settingsFrame
             return nil
         }
 
-        let settingsMoved = lastListLookupSettingsFrame != settingsFrame
-        let lookupIsStale = lastListLookupAt.map {
-            ContinuousClock.now - $0 >= .milliseconds(500)
-        } ?? true
-        guard settingsMoved || lookupIsStale else {
+        let now = ContinuousClock.now
+        if let previousSettingsFrame = lastListLookupSettingsFrame,
+           previousSettingsFrame != settingsFrame {
+            lastListLookupSettingsFrame = settingsFrame
+            lastSettingsGeometryChangeAt = now
+            if let detectedListFrame,
+               let translated = PermissionGuidanceLayout
+                .translatedDetectedListFrame(
+                    detectedListFrame,
+                    from: previousSettingsFrame,
+                    to: settingsFrame
+                ) {
+                self.detectedListFrame = translated
+                return translated
+            }
+
+            detectedListFrame = nil
+            lastListLookupAt = nil
+            return nil
+        }
+
+        if lastListLookupSettingsFrame == nil {
+            lastListLookupSettingsFrame = settingsFrame
+        }
+        if let detectedListFrame {
             return detectedListFrame
         }
 
-        lastListLookupAt = .now
-        lastListLookupSettingsFrame = settingsFrame
+        let geometryIsSettled = lastSettingsGeometryChangeAt.map {
+            now - $0 >= .milliseconds(250)
+        } ?? true
+        let lookupIsReady = lastListLookupAt.map {
+            now - $0 >= .milliseconds(500)
+        } ?? true
+        guard geometryIsSettled, lookupIsReady else { return nil }
+
+        lastListLookupAt = now
         detectedListFrame = SystemSettingsPermissionListLocator.listFrame(
             processIdentifier: processIdentifier,
             settingsFrame: settingsFrame,
@@ -296,11 +370,147 @@ final class PermissionGuidanceOverlayController {
         return detectedListFrame
     }
 
+    private func setPresentationTarget(_ target: PresentationGeometry) {
+        let now = CACurrentMediaTime()
+        if motionTarget == target, motionFrom != nil {
+            reassertBlurPanelOrdering()
+            return
+        }
+        if motionFrom == nil, presentedGeometry == target,
+           !requiresGeometrySnap {
+            reassertBlurPanelOrdering()
+            return
+        }
+
+        let current = currentPresentation(at: now) ?? target
+        let reduceMotion = NSWorkspace.shared
+            .accessibilityDisplayShouldReduceMotion
+        guard !requiresGeometrySnap,
+              !reduceMotion,
+              current != target,
+              current.canInterpolate(to: target) else {
+            stopMotion()
+            requiresGeometrySnap = false
+            presentedGeometry = target
+            render(target)
+            return
+        }
+
+        motionFrom = current
+        motionTarget = target
+        motionStartedAt = now
+        presentedGeometry = current
+        ensureDisplayLink()
+        guard let displayLink else {
+            stopMotion()
+            presentedGeometry = target
+            render(target)
+            return
+        }
+        displayLink.isPaused = false
+    }
+
+    private func reassertBlurPanelOrdering() {
+        blurPanels.values.forEach { $0.reassertOrdering() }
+    }
+
+    private func currentPresentation(
+        at timestamp: CFTimeInterval
+    ) -> PresentationGeometry? {
+        guard let motionFrom, let motionTarget, let motionStartedAt else {
+            return presentedGeometry
+        }
+        let progress = CGFloat(
+            (timestamp - motionStartedAt) / PermissionGuidanceMotion.duration
+        )
+        return motionFrom.interpolated(to: motionTarget, progress: progress)
+    }
+
+    private func ensureDisplayLink() {
+        guard displayLink == nil,
+              let screen = guidePanel?.screen ?? NSScreen.main
+                ?? NSScreen.screens.first else { return }
+        let displayLink = screen.displayLink(
+            target: self,
+            selector: #selector(displayLinkDidFire(_:))
+        )
+        displayLink.add(to: .main, forMode: .common)
+        displayLink.isPaused = true
+        self.displayLink = displayLink
+    }
+
+    @objc private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        guard let motionFrom, let motionTarget, let motionStartedAt else {
+            displayLink.isPaused = true
+            return
+        }
+        let linearProgress = CGFloat(
+            (displayLink.timestamp - motionStartedAt)
+                / PermissionGuidanceMotion.duration
+        )
+        let geometry = motionFrom.interpolated(
+            to: motionTarget,
+            progress: linearProgress
+        )
+        presentedGeometry = geometry
+        render(geometry)
+
+        guard linearProgress >= 1 else { return }
+        presentedGeometry = motionTarget
+        self.motionFrom = nil
+        self.motionTarget = nil
+        self.motionStartedAt = nil
+        displayLink.isPaused = true
+    }
+
+    private func render(_ geometry: PresentationGeometry) {
+        for screen in NSScreen.screens {
+            guard let displayID = Self.displayID(for: screen),
+                  let blurPanel = blurPanels[displayID] else { continue }
+            let focusFrames = geometry.focusFrames.compactMap {
+                PermissionGuidanceLayout.localIntersection(
+                    of: $0,
+                    in: screen.frame
+                )
+            }
+            let outlineFrame = geometry.outlineFrame.flatMap {
+                PermissionGuidanceLayout.localIntersection(
+                    of: $0,
+                    in: screen.frame
+                )
+            }
+            blurPanel.update(
+                screenFrame: screen.frame,
+                focusFrames: focusFrames,
+                outlineFrame: outlineFrame,
+                grayscaleEnabled: geometry.grayscaleEnabled,
+                behindWindowID: geometry.behindWindowID
+            )
+            blurPanel.present()
+        }
+
+        if geometry.guideVisible {
+            guidePanel?.setFrame(geometry.guideFrame, display: false)
+            if guidePanel?.isVisible != true {
+                guidePanel?.orderFrontRegardless()
+            }
+        } else {
+            guidePanel?.orderOut(nil)
+        }
+    }
+
+    private func stopMotion() {
+        displayLink?.isPaused = true
+        motionFrom = nil
+        motionTarget = nil
+        motionStartedAt = nil
+    }
+
     private func ensureBlurPanels() {
         let currentIDs = Set(NSScreen.screens.compactMap(Self.displayID(for:)))
         let removedIDs = blurPanels.keys.filter { !currentIDs.contains($0) }
         for id in removedIDs {
-            blurPanels.removeValue(forKey: id)?.panel.orderOut(nil)
+            blurPanels.removeValue(forKey: id)?.hide()
         }
         for screen in NSScreen.screens {
             guard let id = Self.displayID(for: screen), blurPanels[id] == nil else {
@@ -349,7 +559,16 @@ final class PermissionGuidanceOverlayController {
         }
     }
 
+    private func resetMotion() {
+        stopMotion()
+        displayLink?.invalidate()
+        displayLink = nil
+        presentedGeometry = nil
+        requiresGeometrySnap = true
+    }
+
     private func hidePanelsForFocusLoss() {
+        resetMotion()
         blurPanels.values.forEach { $0.hide() }
         guidePanel?.orderOut(nil)
     }
@@ -564,9 +783,27 @@ private final class PermissionGuidePanel: NSPanel {
 
 @MainActor
 private final class PermissionBlurPanel {
+    private enum Placement: Equatable {
+        case foreground
+        case behind(CGWindowID)
+    }
+
+    private struct Configuration {
+        let focusFrames: [CGRect]
+        let outlineFrame: CGRect?
+        let grayscaleEnabled: Bool
+        let placement: Placement
+    }
+
     let panel: NSPanel
     private let focusView: PermissionFocusView
     private var hasPresented = false
+    private var desiredVisible = false
+    private var desiredConfiguration: Configuration?
+    private var appliedConfiguration: Configuration?
+    private var appliedPlacement: Placement?
+    private var isChangingPlacement = false
+    private var transitionGeneration = 0
 
     init(screenFrame: CGRect) {
         panel = NSPanel(
@@ -597,34 +834,201 @@ private final class PermissionBlurPanel {
         screenFrame: CGRect,
         focusFrames: [CGRect],
         outlineFrame: CGRect?,
-        grayscaleEnabled: Bool
+        grayscaleEnabled: Bool,
+        behindWindowID: CGWindowID?
     ) {
-        panel.setFrame(screenFrame, display: false)
-        focusView.update(
+        if panel.frame != screenFrame {
+            panel.setFrame(screenFrame, display: false)
+        }
+        let configuration = Configuration(
             focusFrames: focusFrames,
             outlineFrame: outlineFrame,
             grayscaleEnabled: grayscaleEnabled,
-            animated: hasPresented
+            placement: behindWindowID.map(Placement.behind) ?? .foreground
         )
+        desiredConfiguration = configuration
+
+        guard let appliedPlacement else {
+            apply(configuration, animated: false)
+            self.appliedPlacement = configuration.placement
+            return
+        }
+
+        if appliedPlacement != configuration.placement {
+            beginPlacementTransitionIfNeeded()
+        } else if !isChangingPlacement {
+            apply(configuration, animated: hasPresented)
+            if desiredVisible, !panel.isVisible {
+                orderPanel(for: configuration.placement)
+            }
+        }
     }
 
     func present() {
-        guard !panel.isVisible else { return }
+        guard let desiredConfiguration else { return }
+        if desiredVisible {
+            if !isChangingPlacement, !panel.isVisible {
+                orderPanel(for: appliedPlacement ?? desiredConfiguration.placement)
+            }
+            return
+        }
+
+        desiredVisible = true
+        transitionGeneration += 1
+        let generation = transitionGeneration
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        panel.alphaValue = reduceMotion ? 1 : 0
-        panel.orderFrontRegardless()
+        if !panel.isVisible {
+            panel.alphaValue = reduceMotion ? 1 : 0
+        }
+        orderPanel(for: appliedPlacement ?? desiredConfiguration.placement)
         hasPresented = true
-        guard !reduceMotion else { return }
+        guard !reduceMotion else {
+            panel.alphaValue = 1
+            return
+        }
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.20
+            context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.transitionGeneration == generation,
+                      self.desiredVisible else { return }
+                self.panel.alphaValue = 1
+            }
         }
     }
 
     func hide() {
-        panel.orderOut(nil)
+        guard desiredVisible || panel.isVisible else { return }
+        desiredVisible = false
+        isChangingPlacement = false
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard panel.isVisible, !reduceMotion else {
+            panel.alphaValue = 0
+            panel.orderOut(nil)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        } completionHandler: { [self] in
+            Task { @MainActor [self] in
+                guard transitionGeneration == generation,
+                      !desiredVisible else { return }
+                panel.alphaValue = 0
+                panel.orderOut(nil)
+            }
+        }
+    }
+
+    func reassertOrdering() {
+        guard desiredVisible, !isChangingPlacement,
+              let appliedPlacement,
+              case .behind = appliedPlacement else { return }
+        orderPanel(for: appliedPlacement)
+    }
+
+    private func beginPlacementTransitionIfNeeded() {
+        guard !isChangingPlacement, desiredVisible,
+              panel.isVisible else {
+            if !desiredVisible || !panel.isVisible,
+               let desiredConfiguration {
+                apply(desiredConfiguration, animated: false)
+                appliedPlacement = desiredConfiguration.placement
+            }
+            return
+        }
+
+        isChangingPlacement = true
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if let appliedConfiguration,
+           appliedConfiguration.grayscaleEnabled
+                != desiredConfiguration?.grayscaleEnabled {
+            focusView.update(
+                focusFrames: appliedConfiguration.focusFrames,
+                outlineFrame: appliedConfiguration.outlineFrame,
+                grayscaleEnabled: desiredConfiguration?.grayscaleEnabled ?? false,
+                animated: true
+            )
+        }
+        guard !reduceMotion else {
+            completePlacementTransition(generation: generation)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.completePlacementTransition(generation: generation)
+            }
+        }
+    }
+
+    private func completePlacementTransition(generation: Int) {
+        guard transitionGeneration == generation,
+              let desiredConfiguration else { return }
+        apply(desiredConfiguration, animated: false)
+        appliedPlacement = desiredConfiguration.placement
+        isChangingPlacement = false
+
+        guard desiredVisible else {
+            panel.alphaValue = 0
+            panel.orderOut(nil)
+            return
+        }
+
+        orderPanel(for: desiredConfiguration.placement)
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard !reduceMotion else {
+            panel.alphaValue = 1
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.transitionGeneration == generation,
+                      self.desiredVisible else { return }
+                self.panel.alphaValue = 1
+            }
+        }
+    }
+
+    private func apply(_ configuration: Configuration, animated: Bool) {
+        focusView.update(
+            focusFrames: configuration.focusFrames,
+            outlineFrame: configuration.outlineFrame,
+            grayscaleEnabled: configuration.grayscaleEnabled,
+            animated: animated
+        )
+        appliedConfiguration = configuration
+    }
+
+    private func orderPanel(for placement: Placement) {
+        switch placement {
+        case .foreground:
+            panel.level = .floating
+            panel.orderFrontRegardless()
+        case let .behind(windowID):
+            panel.level = .normal
+            panel.order(.below, relativeTo: Int(windowID))
+        }
     }
 }
 
@@ -632,14 +1036,19 @@ private final class PermissionFocusView: NSView {
     private let effectView = NSVisualEffectView()
     private let grayscaleView = NSView()
     private let grayscaleEffectView = NSVisualEffectView()
+    private let effectMaskLayer = CAShapeLayer()
+    private let grayscaleMaskLayer = CAShapeLayer()
     private let outlineLayer = CAShapeLayer()
     private var grayscaleEnabled: Bool?
+    private var focusFrames: [CGRect] = []
+    private var outlineFrame: CGRect?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         effectView.frame = bounds
         effectView.autoresizingMask = [.width, .height]
+        effectView.wantsLayer = true
         effectView.blendingMode = .behindWindow
         effectView.material = .fullScreenUI
         effectView.state = .active
@@ -659,6 +1068,7 @@ private final class PermissionFocusView: NSView {
         grayscaleView.backgroundFilters = [colorControls]
         grayscaleEffectView.frame = grayscaleView.bounds
         grayscaleEffectView.autoresizingMask = [.width, .height]
+        grayscaleEffectView.wantsLayer = true
         grayscaleEffectView.blendingMode = .behindWindow
         grayscaleEffectView.material = .fullScreenUI
         grayscaleEffectView.state = .active
@@ -669,6 +1079,13 @@ private final class PermissionFocusView: NSView {
         grayscaleEffectView.contentFilters = [grayscaleBlurControls]
         grayscaleView.addSubview(grayscaleEffectView)
         addSubview(grayscaleView)
+
+        for maskLayer in [effectMaskLayer, grayscaleMaskLayer] {
+            maskLayer.fillColor = NSColor.black.cgColor
+            maskLayer.fillRule = .evenOdd
+        }
+        effectView.layer?.mask = effectMaskLayer
+        grayscaleEffectView.layer?.mask = grayscaleMaskLayer
 
         layer?.addSublayer(outlineLayer)
         outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
@@ -681,7 +1098,7 @@ private final class PermissionFocusView: NSView {
 
     override func layout() {
         super.layout()
-        outlineLayer.frame = bounds
+        updateGeometryLayers()
     }
 
     func update(
@@ -690,13 +1107,33 @@ private final class PermissionFocusView: NSView {
         grayscaleEnabled: Bool,
         animated: Bool
     ) {
-        let focusMask = maskImage(cuttingOut: focusFrames)
-        effectView.maskImage = focusMask
-        grayscaleEffectView.maskImage = focusMask
+        self.focusFrames = focusFrames
+        self.outlineFrame = outlineFrame
+        updateGeometryLayers()
         updateGrayscale(
             enabled: grayscaleEnabled,
             animated: animated
         )
+    }
+
+    private func updateGeometryLayers() {
+        let maskPath = CGMutablePath()
+        maskPath.addRect(bounds)
+        for frame in focusFrames {
+            maskPath.addRoundedRect(
+                in: frame.insetBy(dx: -3, dy: -3),
+                cornerWidth: 16,
+                cornerHeight: 16
+            )
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for maskLayer in [effectMaskLayer, grayscaleMaskLayer] {
+            maskLayer.frame = bounds
+            maskLayer.path = maskPath
+        }
+        outlineLayer.frame = bounds
         if let outlineFrame {
             outlineLayer.path = CGPath(
                 roundedRect: outlineFrame.insetBy(dx: 1, dy: 1),
@@ -709,6 +1146,7 @@ private final class PermissionFocusView: NSView {
             outlineLayer.isHidden = true
             outlineLayer.path = nil
         }
+        CATransaction.commit()
     }
 
     private func updateGrayscale(enabled: Bool, animated: Bool) {
@@ -723,27 +1161,12 @@ private final class PermissionFocusView: NSView {
         }
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.20
+            context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             grayscaleView.animator().alphaValue = targetAlpha
         }
     }
 
-    private func maskImage(cuttingOut holes: [CGRect]) -> NSImage {
-        NSImage(size: bounds.size, flipped: false) { [bounds] _ in
-            NSColor.white.setFill()
-            bounds.fill()
-            NSGraphicsContext.current?.compositingOperation = .clear
-            for hole in holes {
-                NSBezierPath(
-                    roundedRect: hole.insetBy(dx: -3, dy: -3),
-                    xRadius: 16,
-                    yRadius: 16
-                ).fill()
-            }
-            return true
-        }
-    }
 }
 
 private struct PermissionGuidanceView: View {

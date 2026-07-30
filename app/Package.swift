@@ -46,11 +46,7 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ]
         ),
-        .systemLibrary(
-            name: "CSQLite",
-            pkgConfig: "sqlite3",
-            providers: [.brew(["sqlite3"])]
-        ),
+        .systemLibrary(name: "CSQLite"),
         .executableTarget(
             name: "Current",
             dependencies: ["CurrentCore"],

@@ -10,6 +10,10 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     private let auxiliaryWindowID = UUID()
     private var window: NSWindow?
     private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private lazy var permissionGuidance =
+        PermissionGuidanceOverlayController { [unowned self] in
+            self.runtime.permissions.snapshot()
+        }
     var step: OnboardingStep
     var permissions = PermissionSnapshot()
     var practiceText = ""
@@ -71,6 +75,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        permissionGuidance.dismiss()
         window?.orderOut(nil)
         onboardingDidHide()
     }
@@ -89,11 +94,14 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         Task {
             _ = await runtime.permissions.request(kind)
             refreshPermissions()
-            if !permissions[kind].isGranted { runtime.permissions.openSettings(for: kind) }
+            if !permissions[kind].isGranted { openSettings(kind) }
         }
     }
 
-    func openSettings(_ kind: PermissionKind) { runtime.permissions.openSettings(for: kind) }
+    func openSettings(_ kind: PermissionKind) {
+        runtime.permissions.openSettings(for: kind)
+        permissionGuidance.present(for: kind)
+    }
 
     func next() {
         guard let index = OnboardingStep.allCases.firstIndex(of: step), index + 1 < OnboardingStep.allCases.count else { return }
@@ -105,7 +113,10 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         setStep(OnboardingStep.allCases[index - 1])
     }
 
-    func restart() { runtime.relaunch() }
+    func restart() {
+        permissionGuidance.dismiss()
+        runtime.relaunch()
+    }
 
     func finish() {
         runtime.settings.onboardingComplete = true
@@ -126,12 +137,14 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     private func onboardingDidHide() {
+        permissionGuidance.dismiss()
         pollTask?.cancel()
         pollTask = nil
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
     }
 
     private func setStep(_ step: OnboardingStep) {
+        permissionGuidance.dismiss()
         withAnimation(.snappy) { self.step = step }
         runtime.settings.onboardingStep = step
     }

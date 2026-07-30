@@ -568,6 +568,54 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(layout.panelFrame.maxX <= screen.maxX)
 }
 
+@Test func permissionGuidanceLayoutMatchesMacOS26SettingsGeometry() {
+    let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
+    let layout = PermissionGuidanceLayout(settingsFrame: settings)
+
+    #expect(layout.placement == .embedded)
+    #expect(layout.listFrame == CGRect(x: 344, y: 338, width: 460, height: 300))
+    #expect(layout.guideFrame == CGRect(x: 344, y: 158, width: 460, height: 172))
+}
+
+@Test func permissionGuidanceLayoutTracksWindowMovementAndResize() {
+    let original = PermissionGuidanceLayout(
+        settingsFrame: CGRect(x: 100, y: 80, width: 724, height: 670)
+    )
+    let moved = PermissionGuidanceLayout(
+        settingsFrame: CGRect(x: 140, y: 110, width: 824, height: 720)
+    )
+
+    #expect(moved.listFrame.minX - original.listFrame.minX == 40)
+    #expect(moved.listFrame.minY - original.listFrame.minY == 30)
+    #expect(moved.listFrame.width - original.listFrame.width == 100)
+    #expect(moved.listFrame.height - original.listFrame.height == 50)
+    #expect(moved.guideFrame.origin == CGPoint(x: 384, y: 188))
+}
+
+@Test func permissionGuidanceLayoutFallsBackBelowCompactWindow() {
+    let settings = CGRect(x: 50, y: 300, width: 600, height: 500)
+    let layout = PermissionGuidanceLayout(settingsFrame: settings)
+
+    #expect(layout.placement == .belowWindow)
+    #expect(layout.listFrame == CGRect(x: 294, y: 320, width: 336, height: 368))
+    #expect(layout.guideFrame == CGRect(x: 294, y: 120, width: 336, height: 172))
+}
+
+@Test func permissionGuidanceLayoutIntersectsMultipleDisplays() {
+    let focus = CGRect(x: 1_380, y: 120, width: 180, height: 200)
+    let left = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+    let right = CGRect(x: 1_440, y: 0, width: 1_440, height: 900)
+
+    #expect(
+        PermissionGuidanceLayout.localIntersection(of: focus, in: left)
+            == CGRect(x: 1_380, y: 120, width: 60, height: 200)
+    )
+    #expect(
+        PermissionGuidanceLayout.localIntersection(of: focus, in: right)
+            == CGRect(x: 0, y: 120, width: 120, height: 200)
+    )
+}
+
 @Test func menuBarSymbolStaysDefaultForEveryPhase() {
     for phase in DictationPhase.allCases {
         #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")

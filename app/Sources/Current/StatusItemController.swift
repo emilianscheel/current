@@ -27,7 +27,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             permissions: permissions,
             contextWorkerEnabled: runtime.settings.contextWorkerEnabled
         )
-        add(runtime.coordinator.phase.displayName, to: menu, enabled: false)
+        add(
+            runtime.coordinator.phase.displayName,
+            to: menu,
+            symbol: MenuBarPresentation.symbol(for: runtime.coordinator.phase),
+            enabled: false
+        )
         if onboardingTitle != nil {
             add(
                 permissions.allGranted(
@@ -36,28 +41,67 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     ? "Permissions: Ready"
                     : "Permissions: Action needed",
                 to: menu,
+                symbol: permissions.allGranted(
+                    contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+                ) ? "checkmark.shield" : "exclamationmark.triangle",
                 enabled: false
             )
         }
         menu.addItem(.separator())
-        add(captureTitle, to: menu, action: #selector(toggleCapture))
-        add("Paste Last Transcription", to: menu, action: #selector(pasteLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
-        add("Copy Last Transcription", to: menu, action: #selector(copyLast), enabled: !runtime.coordinator.lastTranscription.isEmpty)
-        add("Undo Last Insertion", to: menu, action: #selector(undoLast), enabled: runtime.coordinator.insertion.canUndoLastInsertion)
-        add("Context…", to: menu, action: #selector(openContext))
-        add("Usage Statistics…", to: menu, action: #selector(openUsageStatistics))
+        add(
+            captureTitle,
+            to: menu,
+            action: #selector(toggleCapture),
+            symbol: runtime.coordinator.phase == .recording ? "stop.circle" : "waveform"
+        )
+        add(
+            "Paste Last Transcription",
+            to: menu,
+            action: #selector(pasteLast),
+            symbol: "doc.on.clipboard",
+            enabled: !runtime.coordinator.lastTranscription.isEmpty
+        )
+        add(
+            "Copy Last Transcription",
+            to: menu,
+            action: #selector(copyLast),
+            symbol: "doc.on.doc",
+            enabled: !runtime.coordinator.lastTranscription.isEmpty
+        )
+        add(
+            "Undo Last Insertion",
+            to: menu,
+            action: #selector(undoLast),
+            symbol: "arrow.uturn.backward",
+            enabled: runtime.coordinator.insertion.canUndoLastInsertion
+        )
+        add("Context…", to: menu, action: #selector(openContext), symbol: "doc.text.magnifyingglass")
+        add("Usage Statistics…", to: menu, action: #selector(openUsageStatistics), symbol: "chart.bar")
         if let onboardingTitle {
-            add(onboardingTitle, to: menu, action: #selector(openOnboarding))
+            add(
+                onboardingTitle,
+                to: menu,
+                action: #selector(openOnboarding),
+                symbol: permissions.allGranted(
+                    contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+                ) ? "checklist" : "hand.raised"
+            )
         }
         menu.addItem(.separator())
-        add(runtime.settings.isEnabled ? "Pause Current" : "Resume Current", to: menu, action: #selector(toggleEnabled))
-        let contextWorkerItem = add(
-            "Context Worker",
+        add(
+            runtime.settings.isEnabled ? "Pause Current" : "Resume Current",
             to: menu,
-            action: #selector(toggleContextWorker)
+            action: #selector(toggleEnabled),
+            symbol: runtime.settings.isEnabled ? "pause" : "play"
         )
-        contextWorkerItem.state = runtime.settings.contextWorkerEnabled
-            ? .on : .off
+        add(
+            runtime.settings.contextWorkerEnabled
+                ? "Disable Context Worker"
+                : "Enable Context Worker",
+            to: menu,
+            action: #selector(toggleContextWorker),
+            symbol: "brain"
+        )
         addModel(
             "Parakeet TDT v3 Multilingual",
             category: "Speech model",
@@ -72,9 +116,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 ? nil : "Disabled",
             to: menu
         )
-        add("About Current", to: menu, action: #selector(openAbout))
+        add("About Current", to: menu, action: #selector(openAbout), symbol: "info.circle")
         menu.addItem(.separator())
-        add("Quit Current", to: menu, action: #selector(quit), key: "q")
+        add("Quit Current", to: menu, action: #selector(quit), key: "q", symbol: "power")
     }
 
     private var captureTitle: String {
@@ -88,13 +132,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return "Start Dictation"
     }
 
-    @discardableResult
-    private func add(_ title: String, to menu: NSMenu, action: Selector? = nil, key: String = "", enabled: Bool = true) -> NSMenuItem {
+    private func add(
+        _ title: String,
+        to menu: NSMenu,
+        action: Selector? = nil,
+        key: String = "",
+        symbol: String? = nil,
+        enabled: Bool = true
+    ) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         item.isEnabled = enabled
+        if let symbol {
+            item.image = NSImage(
+                systemSymbolName: symbol,
+                accessibilityDescription: title
+            )
+            item.image?.isTemplate = true
+        }
         menu.addItem(item)
-        return item
     }
 
     private func addModel(
@@ -130,7 +186,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
 @MainActor
 private final class ModelMenuItemView: NSView {
-    private static let horizontalPadding: CGFloat = 16
+    private static let horizontalPadding: CGFloat = 20
     private static let verticalPadding: CGFloat = 5
     private static let lineSpacing: CGFloat = 1
 

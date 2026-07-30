@@ -4,6 +4,26 @@ import Observation
 import SwiftUI
 
 @MainActor
+private final class ContextSearchWindow: NSWindow {
+    var presentSearch: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([
+            .command,
+            .control,
+            .option,
+            .shift,
+        ])
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "f" {
+            presentSearch?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+@MainActor
 final class ContextWindowController: NSObject, NSWindowDelegate {
     private unowned let runtime: AppRuntime
     private let store: ContextStore
@@ -31,7 +51,10 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
             let controller = NSHostingController(
                 rootView: ContextManagementView(model: viewModel)
             )
-            let window = NSWindow(contentViewController: controller)
+            let window = ContextSearchWindow(contentViewController: controller)
+            window.presentSearch = { [weak viewModel] in
+                viewModel?.presentSearch()
+            }
             window.title = "Context"
             window.styleMask = [
                 .titled,
@@ -86,6 +109,7 @@ final class ContextViewModel {
     let store: ContextStore
     private let repository: ContextRepository
     var searchText = ""
+    var isSearchPresented = false
     private(set) var selectedDocumentID: String?
     var richText = AttributedString()
     var selection = AttributedTextSelection()
@@ -111,6 +135,18 @@ final class ContextViewModel {
     var selectedDocument: ContextDocument? {
         guard let selectedDocumentID else { return nil }
         return store.document(id: selectedDocumentID)
+    }
+
+    func presentSearch() {
+        if isSearchPresented {
+            isSearchPresented = false
+            Task { [weak self] in
+                await Task.yield()
+                self?.isSearchPresented = true
+            }
+        } else {
+            isSearchPresented = true
+        }
     }
 
     func displayTitle(for document: ContextDocument) -> String {
@@ -486,6 +522,7 @@ private struct ContextManagementView: View {
         .scrollContentBackground(.hidden)
         .searchable(
             text: $model.searchText,
+            isPresented: $model.isSearchPresented,
             placement: .toolbar,
             prompt: "Search context"
         )

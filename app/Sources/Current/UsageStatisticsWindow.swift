@@ -258,11 +258,18 @@ private enum DailyHistoryRange: Int, CaseIterable, Identifiable {
 @MainActor
 @Observable
 private final class UsageStatisticsViewModel {
+    struct ExportNotice: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
     let monitor: UsageMetricsMonitor
     var selectedRange = DailyHistoryRange.sevenDays
     private(set) var battery = SystemBatteryReader.snapshot()
     private(set) var storage: StorageUsageSnapshot?
     private(set) var isRefreshingStorage = false
+    var exportNotice: ExportNotice?
 
     private let calendar = Calendar.autoupdatingCurrent
     private let storageRoots: [StorageUsageCategory: [URL]]
@@ -321,6 +328,72 @@ private final class UsageStatisticsViewModel {
             isRefreshingStorage = false
         }
     }
+
+    func exportVisibleRecords() {
+        do {
+            let fileManager = FileManager.default
+            guard let downloads = fileManager.urls(
+                for: .downloadsDirectory,
+                in: .userDomainMask
+            ).first else {
+                throw UsageExportError.downloadsDirectoryUnavailable
+            }
+            let day = DailyUsageAggregation.dayIdentifier(
+                for: Date(),
+                calendar: calendar
+            )
+            let baseName = "Current-usage-\(selectedRange.title)-\(day)"
+            let destination = availableExportURL(
+                in: downloads,
+                baseName: baseName,
+                fileManager: fileManager
+            )
+            try DailyUsageCSVExporter.encode(visibleRecords).write(
+                to: destination,
+                options: [.atomic, .withoutOverwriting]
+            )
+            exportNotice = ExportNotice(
+                title: "Usage Data Exported",
+                message: "Saved \(destination.lastPathComponent) to Downloads."
+            )
+        } catch {
+            exportNotice = ExportNotice(
+                title: "Usage Data Couldn’t Be Exported",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func dismissExportNotice() {
+        exportNotice = nil
+    }
+
+    private func availableExportURL(
+        in directory: URL,
+        baseName: String,
+        fileManager: FileManager
+    ) -> URL {
+        var suffix = 1
+        var candidate = directory.appendingPathComponent("\(baseName).csv")
+        while fileManager.fileExists(atPath: candidate.path) {
+            suffix += 1
+            candidate = directory.appendingPathComponent(
+                "\(baseName)-\(suffix).csv"
+            )
+        }
+        return candidate
+    }
+}
+
+private enum UsageExportError: LocalizedError {
+    case downloadsDirectoryUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .downloadsDirectoryUnavailable:
+            "The Downloads folder couldn’t be found."
+        }
+    }
 }
 
 private struct UsageStatisticsView: View {
@@ -346,7 +419,15 @@ private struct UsageStatisticsView: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    model.exportVisibleRecords()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .help("Export usage data as CSV")
+                .accessibilityLabel("Export usage data as CSV")
+
                 Picker("History", selection: $model.selectedRange) {
                     ForEach(DailyHistoryRange.allCases) { range in
                         Text(range.title).tag(range)
@@ -357,6 +438,15 @@ private struct UsageStatisticsView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .accessibilityLabel("History range")
             }
+        }
+        .alert(item: $model.exportNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK")) {
+                    model.dismissExportNotice()
+                }
+            )
         }
     }
 

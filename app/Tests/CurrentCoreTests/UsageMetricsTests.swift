@@ -139,6 +139,89 @@ import Testing
     #expect(records.map(\.id) == ["2026-07-29", "2026-07-30"])
 }
 
+@Test func dailyUsageCSVExportIsDeterministicAndChronological() throws {
+    let calendar = utcCalendar()
+    let earlierDay = try #require(calendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 28)
+    ))
+    let laterDay = try #require(calendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 29)
+    ))
+    let records = [
+        DailyUsageRecord(
+            id: "2026-07-29",
+            day: laterDay,
+            cpuPercentTotal: 25,
+            cpuSampleCount: 1,
+            cpuPeakPercent: 25,
+            memoryBytesTotal: 1_024,
+            memorySampleCount: 1,
+            memoryPeakBytes: 1_024,
+            successfulTranscriptions: 3
+        ),
+        DailyUsageRecord(
+            id: "2026-07-28",
+            day: earlierDay,
+            cpuPeakPercent: 0,
+            memoryPeakBytes: 0,
+            successfulTranscriptions: 1
+        ),
+    ]
+
+    let csv = try #require(String(
+        data: DailyUsageCSVExporter.encode(records),
+        encoding: .utf8
+    ))
+    #expect(csv == """
+        date,average_cpu_percent,peak_cpu_percent,cpu_sample_count,average_memory_bytes,peak_memory_bytes,memory_sample_count,successful_transcriptions\r
+        2026-07-28,,0.0,0,,0,0,1\r
+        2026-07-29,25.0,25.0,1,1024,1024,1,3\r
+
+        """)
+}
+
+@Test func dailyUsageCSVExportWithNoRecordsContainsOnlyHeader() throws {
+    let csv = try #require(String(
+        data: DailyUsageCSVExporter.encode([]),
+        encoding: .utf8
+    ))
+    #expect(csv == """
+        date,average_cpu_percent,peak_cpu_percent,cpu_sample_count,average_memory_bytes,peak_memory_bytes,memory_sample_count,successful_transcriptions\r
+
+        """)
+}
+
+@Test func dailyUsagePruningMatchesSelectableHistoryRanges() throws {
+    let calendar = utcCalendar()
+    let now = try #require(calendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 30, hour: 12)
+    ))
+    var records: [DailyUsageRecord] = []
+    for offset in -29...0 {
+        let date = try #require(calendar.date(
+            byAdding: .day,
+            value: offset,
+            to: now
+        ))
+        records = DailyUsageAggregation.recordingSuccessfulTranscription(
+            at: date,
+            in: records,
+            calendar: calendar
+        )
+    }
+
+    for days in [7, 14, 30] {
+        let visible = DailyUsageAggregation.pruning(
+            records,
+            now: now,
+            calendar: calendar,
+            retentionDays: days
+        )
+        #expect(visible.count == days)
+        #expect(visible.last?.id == "2026-07-30")
+    }
+}
+
 @Test func dailyUsageStorePersistsAndPrunesToThirtyDays() async throws {
     let directory = temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

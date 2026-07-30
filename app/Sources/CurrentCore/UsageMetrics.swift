@@ -84,6 +84,48 @@ public struct DailyUsageRecord: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public enum DailyUsageCSVExporter {
+    public static func encode(_ records: [DailyUsageRecord]) -> Data {
+        let header = [
+            "date",
+            "average_cpu_percent",
+            "peak_cpu_percent",
+            "cpu_sample_count",
+            "average_memory_bytes",
+            "peak_memory_bytes",
+            "memory_sample_count",
+            "successful_transcriptions",
+        ]
+        let rows = records
+            .sorted {
+                if $0.day == $1.day { return $0.id < $1.id }
+                return $0.day < $1.day
+            }
+            .map { record in
+                [
+                    record.id,
+                    record.averageCPUPercent.map { "\($0)" } ?? "",
+                    "\(record.cpuPeakPercent)",
+                    "\(record.cpuSampleCount)",
+                    record.averageMemoryBytes.map { "\($0)" } ?? "",
+                    "\(record.memoryPeakBytes)",
+                    "\(record.memorySampleCount)",
+                    "\(record.successfulTranscriptions)",
+                ]
+            }
+        let csv = ([header] + rows)
+            .map { $0.map(escaped).joined(separator: ",") }
+            .joined(separator: "\r\n") + "\r\n"
+        return Data(csv.utf8)
+    }
+
+    private static func escaped(_ value: String) -> String {
+        guard value.contains(where: { $0 == "," || $0 == "\"" || $0.isNewline })
+        else { return value }
+        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}
+
 public enum DailyUsageAggregation {
     public static func dayIdentifier(
         for date: Date,

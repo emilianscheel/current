@@ -1,10 +1,21 @@
 import AppKit
 import Foundation
 import Observation
+import OSLog
 
 @MainActor
 @Observable
 public final class DictationCoordinator {
+    private struct PromptTimings {
+        var transcription = 0
+        var classification = 0
+        var contextPreparation = 0
+        var generation = 0
+    }
+    private struct PreparedPromptContext: Sendable {
+        let envelope: PromptContextEnvelope
+        let durationMilliseconds: Int
+    }
     public enum ExecutionMode: Sendable, Equatable {
         case fast
         case rich
@@ -23,6 +34,17 @@ public final class DictationCoordinator {
     public private(set) var partialTranscription = ""
     public private(set) var errorMessage: String?
     public private(set) var currentExecutionMode: ExecutionMode?
+    public private(set) var lastPromptLatencyDiagnostics: PromptLatencyDiagnostics?
+    public private(set) var promptLatencySamples: [PromptLatencyDiagnostics] = []
+    public var promptLatencySummary: PromptLatencySummary? {
+        guard !promptLatencySamples.isEmpty else { return nil }
+        let values = promptLatencySamples.map(\.releaseToPasteMilliseconds).sorted()
+        return .init(
+            sampleCount: values.count,
+            releaseToPasteP50Milliseconds: Self.percentile(0.50, values: values),
+            releaseToPasteP95Milliseconds: Self.percentile(0.95, values: values)
+        )
+    }
 
     public let settings: SettingsStore
     public let model: ModelManager
@@ -34,6 +56,7 @@ public final class DictationCoordinator {
     public let intentRouter: any VoiceIntentRoutingProviding
     public let contextRepository: ContextRepository?
     public let promptContextPreparer: (any PromptContextPreparing)?
+    public let conversationContext: ConversationContext?
     public var onPhaseChange: ((DictationPhase) -> Void)?
     public var onPartialTranscriptionChange: ((String) -> Void)?
     public var onTranscriptionCompleted: ((Date) -> Void)?
@@ -44,6 +67,15 @@ public final class DictationCoordinator {
     private var transcriptProcessingTask: Task<Void, Never>?
     private var processingGeneration = UUID()
     private var pendingPromptBypass: PendingPromptBypass?
+    private let clock = ContinuousClock()
+    private let signposter = OSSignposter(
+        subsystem: "com.emilianscheel.current",
+        category: "PromptLatency"
+    )
+    private let latencyLogger = Logger(
+        subsystem: "com.emilianscheel.current",
+        category: "PromptLatency"
+    )
 
     public init(
         settings: SettingsStore = .shared,
@@ -55,7 +87,8 @@ public final class DictationCoordinator {
         intelligence: any LocalIntelligenceProviding = AppleFoundationModelProvider(),
         intentRouter: any VoiceIntentRoutingProviding = AppleVoiceIntentRouter(),
         contextRepository: ContextRepository? = nil,
-        promptContextPreparer: (any PromptContextPreparing)? = nil
+        promptContextPreparer: (any PromptContextPreparing)? = nil,
+        conversationContext: ConversationContext? = nil
     ) {
         self.settings = settings
         self.model = model
@@ -67,6 +100,7 @@ public final class DictationCoordinator {
         self.intentRouter = intentRouter
         self.contextRepository = contextRepository
         self.promptContextPreparer = promptContextPreparer
+        self.conversationContext = conversationContext
         self.audio.selectedDeviceID = settings.inputDeviceID
         shortcut.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in self?.handleShortcut(event) }
@@ -215,11 +249,29 @@ public final class DictationCoordinator {
             currentSession = session
             currentExecutionMode = executionMode
             if executionMode == .rich {
-                Task { [intentRouter, context = insertion.currentContext] in
-                    await intentRouter.prepare(
+                Task {
+                    [
+                        intentRouter,
+                        promptContextPreparer,
+                        context = insertion.currentContext,
+                        target = insertion.contextCaptureTarget,
+                        continuousContextEnabled = settings.continuousContextEnabled,
+                    ] in
+                    async let routing: Void = intentRouter.prepare(
                         sessionID: session.id,
                         context: IntentRoutingContext(context: context)
                     )
+                    async let contextPrefetch: Void = promptContextPreparer?.prefetch(
+                        focusedContext: context,
+                        target: target,
+                        continuousContextEnabled: continuousContextEnabled
+                    ) ?? ()
+                    let conversationID = await conversationContext?
+                        .snapshot().conversationID ?? UUID()
+                    async let generationPrewarm: Void = intelligence.prewarmPrompt(
+                        conversationID: conversationID
+                    )
+                    _ = await (routing, contextPrefetch, generationPrewarm)
                 }
             }
             try audio.start()
@@ -254,6 +306,7 @@ public final class DictationCoordinator {
               let executionMode = currentExecutionMode else { return }
         maximumDurationTask?.cancel()
         let samples = audio.stop()
+        let releasedAt = clock.now
         let minimumSamples = Int(settings.minimumRecordingDuration * 16_000)
         guard samples.count >= minimumSamples else {
             fail(CurrentError.recordingTooShort)
@@ -275,6 +328,9 @@ public final class DictationCoordinator {
                 guard let self, self.currentSession?.id == session.id else { return }
                 let text: String
                 let directDictation: Bool
+                var committedIntent: VoiceIntent = .direct
+                var committedInstruction: String?
+                var promptTimings: PromptTimings?
                 if executionMode == .fast {
                     self.clearPromptBypass()
                     text = DeterministicRefiner.refine(
@@ -285,6 +341,23 @@ public final class DictationCoordinator {
                     directDictation = true
                 } else {
                     self.setPhase(.classifying)
+                    let classificationStartedAt = self.clock.now
+                    let speculativeContext = Task {
+                        let startedAt = self.clock.now
+                        let envelope = try await self.preparePromptContext(
+                            instruction: rawText,
+                            focusedContext: context,
+                            target: captureTarget,
+                            scope: .retrieved
+                        )
+                        return PreparedPromptContext(
+                            envelope: envelope,
+                            durationMilliseconds: Self.milliseconds(
+                                from: startedAt,
+                                to: self.clock.now
+                            )
+                        )
+                    }
                     let decision = try await self.intentRouter.classify(
                         IntentRoutingRequest(
                             transcript: rawText,
@@ -292,13 +365,24 @@ public final class DictationCoordinator {
                         ),
                         sessionID: session.id
                     )
+                    var timings = PromptTimings()
+                    timings.transcription = Self.milliseconds(
+                        from: releasedAt,
+                        to: classificationStartedAt
+                    )
+                    timings.classification = Self.milliseconds(
+                        from: classificationStartedAt,
+                        to: self.clock.now
+                    )
                     guard self.isCurrent(
                         sessionID: session.id,
                         generation: generation
                     ) else { return }
                     directDictation = decision.intent == .direct
+                    committedIntent = decision.intent
                     switch decision.intent {
                     case .prompt:
+                        committedInstruction = rawText
                         let envelope: PromptContextEnvelope
                         self.pendingPromptBypass = PendingPromptBypass(
                             session: session,
@@ -308,27 +392,22 @@ public final class DictationCoordinator {
                         )
                         self.shortcut.setReturnInterceptionEnabled(true)
                         self.setPhase(.gatheringContext)
-                        if let preparer = self.promptContextPreparer {
-                            envelope = try await preparer.prepare(
-                                instruction: rawText,
-                                focusedContext: context,
-                                target: captureTarget,
-                                continuousContextEnabled:
-                                    self.settings.continuousContextEnabled
-                            )
-                        } else if let contextRepository = self.contextRepository {
-                            envelope = await contextRepository.promptContext(
-                                instruction: rawText,
-                                focusedContext: context,
-                                target: captureTarget,
-                                includeApplicationContext:
-                                    self.settings.continuousContextEnabled
-                            )
+                        if decision.contextScope == .retrieved {
+                            let prepared = try await speculativeContext.value
+                            envelope = prepared.envelope
+                            timings.contextPreparation = prepared.durationMilliseconds
                         } else {
-                            envelope = PromptContextEnvelope(
+                            speculativeContext.cancel()
+                            let contextStartedAt = self.clock.now
+                            envelope = try await self.preparePromptContext(
                                 instruction: rawText,
                                 focusedContext: context,
-                                sections: []
+                                target: captureTarget,
+                                scope: decision.contextScope
+                            )
+                            timings.contextPreparation = Self.milliseconds(
+                                from: contextStartedAt,
+                                to: self.clock.now
                             )
                         }
                         if self.shortcut.consumeReturnInterceptionRequest() {
@@ -341,8 +420,20 @@ public final class DictationCoordinator {
                             generation: generation
                         ) else { return }
                         self.setPhase(.generating)
+                        let generationStartedAt = self.clock.now
+                        let conversationID = await self.conversationContext?
+                            .snapshot().conversationID ?? UUID()
                         let disposition = try await self.intelligence
-                            .generatePromptDisposition(envelope)
+                            .generatePromptDisposition(.init(
+                                envelope: envelope,
+                                conversationID: conversationID,
+                                contextScope: decision.contextScope
+                            ))
+                        timings.generation = Self.milliseconds(
+                            from: generationStartedAt,
+                            to: self.clock.now
+                        )
+                        promptTimings = timings
                         if self.shortcut.consumeReturnInterceptionRequest() {
                             self.insertRawTranscriptionIfPending()
                             return
@@ -358,6 +449,7 @@ public final class DictationCoordinator {
                             throw CurrentError.insufficientPromptContext
                         }
                     case .direct:
+                        speculativeContext.cancel()
                         self.clearPromptBypass()
                         let deterministic = DeterministicRefiner.refine(
                             rawText,
@@ -370,6 +462,7 @@ public final class DictationCoordinator {
                         )
                         text = refinement.text
                     case .uncertain:
+                        speculativeContext.cancel()
                         throw CurrentError.intentClassificationFailed(
                             "The local models were uncertain."
                         )
@@ -391,6 +484,7 @@ public final class DictationCoordinator {
                 }
                 self.clearPromptBypass()
                 self.setPhase(.inserting)
+                let insertionStartedAt = self.clock.now
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
                 let result = try await self.insertion.insert(
                     text,
@@ -400,9 +494,39 @@ public final class DictationCoordinator {
                 guard self.isCurrent(sessionID: session.id, generation: generation) else {
                     return
                 }
-                self.completeInsertion(
+                if let promptTimings {
+                    let diagnostics = PromptLatencyDiagnostics(
+                        transcriptionMilliseconds: promptTimings.transcription,
+                        classificationMilliseconds: promptTimings.classification,
+                        contextPreparationMilliseconds: promptTimings.contextPreparation,
+                        generationMilliseconds: promptTimings.generation,
+                        insertionMilliseconds: Self.milliseconds(
+                            from: insertionStartedAt,
+                            to: self.clock.now
+                        ),
+                        releaseToPasteMilliseconds: Self.milliseconds(
+                            from: releasedAt,
+                            to: self.clock.now
+                        )
+                    )
+                    self.lastPromptLatencyDiagnostics = diagnostics
+                    self.promptLatencySamples.append(diagnostics)
+                    if self.promptLatencySamples.count > 200 {
+                        self.promptLatencySamples.removeFirst(
+                            self.promptLatencySamples.count - 200
+                        )
+                    }
+                    self.signposter.emitEvent("Prompt release-to-paste completed")
+                    self.latencyLogger.info(
+                        "Prompt latency ms transcription=\(diagnostics.transcriptionMilliseconds, privacy: .public) classification=\(diagnostics.classificationMilliseconds, privacy: .public) context=\(diagnostics.contextPreparationMilliseconds, privacy: .public) generation=\(diagnostics.generationMilliseconds, privacy: .public) insertion=\(diagnostics.insertionMilliseconds, privacy: .public) total=\(diagnostics.releaseToPasteMilliseconds, privacy: .public)"
+                    )
+                }
+                await self.completeInsertion(
                     text: text,
                     session: session,
+                    context: context,
+                    instruction: committedInstruction,
+                    intent: committedIntent,
                     captureTarget: captureTarget,
                     targetProcessIdentifier: targetProcessIdentifier,
                     result: result
@@ -452,9 +576,12 @@ public final class DictationCoordinator {
                     sessionID: pendingPromptBypass.session.id,
                     generation: generation
                 ) else { return }
-                self.completeInsertion(
+                await self.completeInsertion(
                     text: pendingPromptBypass.rawText,
                     session: pendingPromptBypass.session,
+                    context: pendingPromptBypass.context,
+                    instruction: nil,
+                    intent: .direct,
                     captureTarget: pendingPromptBypass.captureTarget,
                     targetProcessIdentifier: targetProcessIdentifier,
                     result: result
@@ -486,10 +613,13 @@ public final class DictationCoordinator {
     private func completeInsertion(
         text: String,
         session: DictationSession,
+        context: DictationContext,
+        instruction: String?,
+        intent: VoiceIntent,
         captureTarget: ContextCaptureTarget?,
         targetProcessIdentifier: pid_t?,
         result: InsertionService.Result
-    ) {
+    ) async {
         clearPromptBypass()
         lastTranscription = text
         partialTranscription = ""
@@ -497,8 +627,19 @@ public final class DictationCoordinator {
         onTranscriptionCompleted?(Date())
         if Self.shouldRecordContext(
             targetProcessIdentifier: targetProcessIdentifier,
-            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+            result: result,
+            isSecure: context.isSecure,
+            targetBundleIdentifier: context.bundleIdentifier
         ) {
+            if ContextEngineeringFeatureFlags.conversationLedger {
+                await conversationContext?.record(
+                    instruction: instruction,
+                    committedText: text,
+                    intent: intent,
+                    at: session.startedAt
+                )
+            }
             onSuccessfulTranscription?(text, session.startedAt)
         }
         if result != .copied, let captureTarget {
@@ -536,6 +677,61 @@ public final class DictationCoordinator {
         currentProcessIdentifier: pid_t
     ) -> Bool {
         targetProcessIdentifier != currentProcessIdentifier
+    }
+
+    nonisolated public static func shouldRecordContext(
+        targetProcessIdentifier: pid_t?,
+        currentProcessIdentifier: pid_t,
+        result: InsertionService.Result,
+        isSecure: Bool,
+        targetBundleIdentifier: String?
+    ) -> Bool {
+        result != .copied
+            && !isSecure
+            && shouldRecordContext(
+                targetProcessIdentifier: targetProcessIdentifier,
+                currentProcessIdentifier: currentProcessIdentifier
+            )
+            && !ContextApplicationExclusions.contains(
+                processIdentifier: targetProcessIdentifier ?? -1,
+                bundleIdentifier: targetBundleIdentifier
+            )
+    }
+
+    private func preparePromptContext(
+        instruction: String,
+        focusedContext: DictationContext,
+        target: ContextCaptureTarget?,
+        scope: PromptContextScope
+    ) async throws -> PromptContextEnvelope {
+        if let promptContextPreparer {
+            return try await promptContextPreparer.prepare(
+                instruction: instruction,
+                focusedContext: focusedContext,
+                target: target,
+                continuousContextEnabled: settings.continuousContextEnabled,
+                scope: scope
+            )
+        }
+        if let contextRepository {
+            return await contextRepository.promptContext(
+                instruction: instruction,
+                focusedContext: focusedContext,
+                target: target,
+                includeApplicationContext: settings.continuousContextEnabled,
+                conversation: await conversationContext?.snapshot(),
+                scope: scope
+            )
+        }
+        return PromptContextEnvelope(
+            instruction: instruction,
+            focusedContext: focusedContext,
+            sections: []
+        )
+    }
+
+    public func clearConversationContext() async {
+        await conversationContext?.clear()
     }
 
     nonisolated public static func learnedCorrection(
@@ -585,6 +781,24 @@ public final class DictationCoordinator {
             previous = current
         }
         return previous.last ?? 0
+    }
+
+    nonisolated private static func milliseconds(
+        from start: ContinuousClock.Instant,
+        to end: ContinuousClock.Instant
+    ) -> Int {
+        let components = start.duration(to: end).components
+        return Int(components.seconds * 1_000)
+            + Int(components.attoseconds / 1_000_000_000_000_000)
+    }
+
+    nonisolated private static func percentile(
+        _ percentile: Double,
+        values: [Int]
+    ) -> Int {
+        guard !values.isEmpty else { return 0 }
+        let rank = Int(ceil(percentile * Double(values.count))) - 1
+        return values[min(values.count - 1, max(0, rank))]
     }
 
     private func setPhase(_ phase: DictationPhase) {

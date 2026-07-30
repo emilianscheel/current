@@ -3,6 +3,8 @@ import Foundation
 public actor HybridLocalIntelligenceProvider: LocalIntelligenceProviding {
     private let primary: any LocalIntelligenceProviding
     private let fallback: any PromptResponseGenerating
+    private var consecutivePrimaryFailures = 0
+    private var primaryCooldownUntil: Date?
     public private(set) var lastSuccessfulBackend: PromptGenerationBackend?
 
     public init(
@@ -20,23 +22,44 @@ public actor HybridLocalIntelligenceProvider: LocalIntelligenceProviding {
         await primary.refineDictation(deterministic, context: context)
     }
 
+    public func prewarmPrompt(conversationID: UUID) async {
+        await primary.prewarmPrompt(conversationID: conversationID)
+    }
+
+    public func discardPromptCaches() async {
+        await primary.discardPromptCaches()
+        await fallback.discardPromptCaches()
+    }
+
     public func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
-        do {
-            let response = try await Self.withTimeout(.seconds(20)) {
-                try await self.primary.generatePromptDisposition(envelope)
+        if primaryCooldownUntil.map({ $0 <= Date() }) == true {
+            primaryCooldownUntil = nil
+            consecutivePrimaryFailures = 0
+        }
+        if primaryCooldownUntil == nil, request.contextScope != .corpusWide {
+            do {
+                let response = try await Self.withTimeout(.seconds(6)) {
+                    try await self.primary.generatePromptDisposition(request)
+                }
+                consecutivePrimaryFailures = 0
+                lastSuccessfulBackend = .appleFoundationModel
+                return response
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                consecutivePrimaryFailures += 1
+                if ContextEngineeringFeatureFlags.backendCircuitBreaker,
+                   consecutivePrimaryFailures >= 2 {
+                    primaryCooldownUntil = Date().addingTimeInterval(60)
+                }
             }
-            lastSuccessfulBackend = .appleFoundationModel
-            return response
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
         }
         do {
-            let response = try await Self.withTimeout(.seconds(45)) {
-                try await self.fallback.generatePromptDisposition(envelope)
+            let response = try await Self.withTimeout(.seconds(30)) {
+                try await self.fallback.generatePromptDisposition(request)
             }
             lastSuccessfulBackend = .gemma4
             return response

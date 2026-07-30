@@ -2,7 +2,7 @@
 
 Current is a private, local-first voice writing utility for recent Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, automatically distinguishes literal dictation from writing instructions, and inserts the result into the field you were using.
 
-It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful dictations are retained locally as one editable Markdown context document per day. Accessibility and on-device screen OCR additionally maintain one Markdown context document per visible application process and calendar day.
+It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful, externally committed dictations are retained locally as one editable Markdown context document per day. Accessibility and on-device screen OCR additionally maintain one Markdown context document per visible application process and calendar day.
 
 ## Supported Macs
 
@@ -73,6 +73,9 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 
 - Audio is buffered as 16 kHz mono Float32 in memory and discarded after transcription or cancellation.
 - Successful external-app dictations are appended to `~/Library/Application Support/Current/Context/YYYY-MM-DD.md`.
+- Copied-only insertion fallbacks, secure fields, and Current's own editor are excluded from both conversation memory and daily dictation history.
+- During one app run, a global in-memory conversation ledger keeps the latest ten committed texts verbatim, a compact summary of older turns, and older raw turns for retrieval. It is cleared from Privacy settings or automatically when Current quits and is never serialized.
+- Context Markdown is indexed locally in `Context/Context Search.sqlite` using SQLite FTS5. The index contains derived chunks and, when Apple's Latin contextual-embedding asset is available, normalized 512-dimensional vectors. It is rebuilt from the source documents after schema changes and never uses a network retrieval service.
 - Accessibility events plus one-shot Vision OCR screenshots update `Context/App Sessions/YYYY-MM-DD/*.md`. Screenshots run every 30 seconds across displays and three seconds after typing settles in the originating window; raw images are discarded after change detection/OCR.
 - Current's own process is excluded at the capture and repository boundaries. Other visible sensitive information may be retained when macOS exposes it.
 - Screen Recording permission remains required, and macOS controls whether its screen-capture privacy indicator appears.
@@ -81,6 +84,14 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - The last successful result is held in memory for recovery and can be cleared from Settings.
 - Accessibility insertion is attempted first. If the target rejects it, Current uses a temporary pasteboard and Command-V; when configured, it restores the previous pasteboard after a short delay.
 - Secure or inaccessible controls fall back to **Copied — paste manually**.
+
+## Prompt context and latency architecture
+
+Prompt generation keeps canonical state outside model providers. Routine requests receive standing instructions, focused-field and fresh target context, the latest ten committed texts, a rolling summary, and at most six retrieved document or older-conversation chunks. Whole-corpus requests use a separately budgeted hierarchical document overview. Prior messages and retrieved documents are explicitly labeled as reference data rather than executable instructions.
+
+At recording start Current prewarms intent and generation sessions and starts target-window context capture. After transcription, classification, bounded retrieval, conversation packing, and prompt preparation overlap; a missing prompt-time screen refresh is capped at 250 ms. Apple Foundation Models sessions are reused per conversation and rebuilt near 70% of the 4,096-token window. Gemma reuses an MLX `ChatSession` and its KV cache, with periodic rebuilding. A primary-backend circuit breaker avoids repeatedly waiting for an unhealthy Apple path before warm Gemma fallback.
+
+Instruments signposts contain durations only, never prompt content. The coordinator retains the latest 200 in-memory prompt latency samples and exposes release-to-paste p50/p95 plus per-stage transcription, classification, context preparation, generation, and insertion timings. Internal `CURRENT_DISABLE_CONVERSATION_LEDGER`, `CURRENT_DISABLE_LOCAL_RETRIEVAL`, `CURRENT_DISABLE_RECORDING_CAPTURE`, `CURRENT_DISABLE_SESSION_REUSE`, and `CURRENT_DISABLE_CIRCUIT_BREAKER` launch flags allow attribution testing of each optimization.
 
 ## Tech stack
 
@@ -93,6 +104,7 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - macOS Accessibility API plus CoreGraphics paste fallback
 - ScreenCaptureKit one-shot screenshots, perceptual change detection, Vision OCR, and AX observers for per-app context
 - Apple Foundation Models for intent classification, app-session maintenance, and prompt responses
+- SQLite FTS5 plus Apple's optional `NLContextualEmbedding` for bounded local hybrid retrieval
 - Core ML and Apple Neural Engine inference through FluidAudio 0.15.5
 - ServiceManagement `SMAppService` for launch at login
 - Swift Testing for core behavior
@@ -203,6 +215,7 @@ Automated tests cover:
 - session-safe coordinator boundaries and model-file SHA-256 support
 - daily context grouping, local-time boundaries, search, deletion/recreation, and Markdown round-tripping
 - automatic direct/prompt intent fallback, OCR window attribution, Current exclusion, static-screen deduplication, capture-setting migration, app-session metadata, process/day rollover, and prompt-context budgeting
+- global conversation ordering/clearing and latest-ten rollover, copied/secure commit exclusion, multilingual FTS retrieval and deletion synchronization, scoped generation requests, XPC compatibility, session caching, and circuit breaking
 
 Before release, manually test:
 
@@ -218,7 +231,7 @@ Before release, manually test:
 - context search, rich formatting, autosave, copy, Trash confirmation, and reopen behavior
 - M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 
-Targets are feedback within 100 ms after the hold threshold, no continuous screen stream or one-second AX polling, no OCR/model work for unchanged screenshots, and warm release-to-result below 1.5 seconds for a typical short phrase on the reference M3 Pro MacBook.
+Prompt release gates are warm release-to-final-paste p50 and p95 at or below 20% of the recorded baseline, context preparation p95 below 100 ms after successful recording-time capture, retrieval p95 below 20 ms after query embedding, intent regression no greater than one percentage point, Recall@6 of at least 95%, and direct-dictation p95 regression below 10%. Apple-success, warm-Gemma fallback, cold-start, continuous-context-disabled, Accessibility-only, and OCR-required runs must be measured separately on the reference M3 Pro before release.
 
 ## Known platform limits
 

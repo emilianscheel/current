@@ -36,6 +36,7 @@ let package = Package(
         .target(
             name: "CurrentCore",
             dependencies: [
+                "CSQLite",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
@@ -44,6 +45,11 @@ let package = Package(
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ]
+        ),
+        .systemLibrary(
+            name: "CSQLite",
+            pkgConfig: "sqlite3",
+            providers: [.brew(["sqlite3"])]
         ),
         .executableTarget(
             name: "Current",

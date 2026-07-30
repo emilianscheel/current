@@ -8,6 +8,9 @@ private let modelRoutingCorpus: [(String, VoiceIntent)] = [
     ("Draft and email", .prompt),
     ("Please write a proper response here", .prompt),
     ("Schreib eine höfliche Antwort", .prompt),
+    ("Réécris ce message de façon professionnelle", .prompt),
+    ("Riscrivi l'ultimo messaggio in tono professionale", .prompt),
+    ("Resume todos los documentos de contexto", .prompt),
     ("The draft and email are ready", .direct),
     ("Type the words draft an email", .direct),
 ]
@@ -39,7 +42,7 @@ private actor StubIntelligence:
     }
 
     func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
         .generated(try PromptResponse(text: "Generated response"))
     }
@@ -54,7 +57,7 @@ private struct FailingPromptIntelligence: LocalIntelligenceProviding {
     }
 
     func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
         throw CurrentError.promptGenerationFailed("Primary unavailable")
     }
@@ -72,7 +75,7 @@ private struct FixedPromptGenerator: PromptResponseGenerating {
     }
 
     func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
         disposition
     }
@@ -184,9 +187,9 @@ private struct PromptOnlyIntelligence: LocalIntelligenceProviding {
     }
 
     func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
-        try await generator.generatePromptDisposition(envelope)
+        try await generator.generatePromptDisposition(request)
     }
 }
 
@@ -355,17 +358,21 @@ private actor PromptScreenStub: ScreenContextProviding {
 @Test func contextWorkerInteractiveRequestsAreVersionedAndCodable() throws {
     let request = ContextWorkerPromptRequest(
         modelSnapshotPath: "/tmp/gemma",
-        envelope: PromptContextEnvelope(
-            instruction: "Compose a response",
-            focusedContext: .empty,
-            sections: []
+        generationRequest: PromptGenerationRequest(
+            envelope: PromptContextEnvelope(
+                instruction: "Compose a response",
+                focusedContext: .empty,
+                sections: []
+            ),
+            conversationID: UUID(),
+            contextScope: .retrieved
         )
     )
     let decoded = try JSONDecoder().decode(
         ContextWorkerPromptRequest.self,
         from: JSONEncoder().encode(request)
     )
-    #expect(ContextWorkerProtocolVersion.current == 5)
+    #expect(ContextWorkerProtocolVersion.current == 6)
     #expect(decoded.requestID == request.requestID)
     #expect(decoded.priority == .interactive)
     #expect(DictationPhase.gatheringContext.displayName == "Reading context…")
@@ -438,7 +445,7 @@ private actor PromptScreenStub: ScreenContextProviding {
 }
 
 @Test func modelRoutingEvaluationCorpusIsExplicitlyModelOwned() {
-    #expect(modelRoutingCorpus.count == 6)
+    #expect(modelRoutingCorpus.count == 9)
     // This remains data only: no production keyword classifier exists.
 }
 
@@ -1366,4 +1373,92 @@ private actor PromptScreenStub: ScreenContextProviding {
         rejected = true
     }
     #expect(rejected)
+}
+
+@Test func conversationContextKeepsLatestTenAndClearsWithoutPersistence() async {
+    let context = ConversationContext()
+    for index in 0..<12 {
+        await context.record(
+            instruction: index.isMultiple(of: 2) ? "Rewrite \(index)" : nil,
+            committedText: "Committed \(index)",
+            intent: index.isMultiple(of: 2) ? .prompt : .direct,
+            at: Date(timeIntervalSince1970: Double(index))
+        )
+    }
+    let before = await context.snapshot()
+    #expect(before.latestCommittedTexts.count == 10)
+    #expect(before.latestCommittedTexts.first?.committedText == "Committed 2")
+    #expect(before.latestCommittedTexts.last?.committedText == "Committed 11")
+    #expect(before.olderTurns.map(\.committedText) == ["Committed 0", "Committed 1"])
+    #expect(before.rollingSummary.contains("Committed 0"))
+
+    await context.clear()
+    let after = await context.snapshot()
+    #expect(after.latestCommittedTexts.isEmpty)
+    #expect(after.olderTurns.isEmpty)
+    #expect(after.conversationID != before.conversationID)
+}
+
+@Test func localRetrievalIndexFindsMultilingualExactFactsAndSynchronizesDeletion() async throws {
+    let index = ContextRetrievalIndex()
+    let documents = [
+        ContextDocument(
+            id: "german",
+            date: Date(timeIntervalSince1970: 100),
+            url: URL(fileURLWithPath: "/tmp/german.md"),
+            markdown: "Projekt Aurora hat Abgabetermin 17. Oktober. Kontakt: anna@example.com",
+            modifiedAt: Date(timeIntervalSince1970: 100),
+            customDisplayName: "Projektstatus"
+        ),
+        ContextDocument(
+            id: "spanish",
+            date: Date(timeIntervalSince1970: 200),
+            url: URL(fileURLWithPath: "/tmp/spanish.md"),
+            markdown: "La reunión sobre presupuesto será el martes en Madrid.",
+            modifiedAt: Date(timeIntervalSince1970: 200),
+            customDisplayName: "Notas"
+        ),
+    ]
+    try await index.synchronize(documents: documents)
+    let exact = try await index.retrieve(query: "Aurora 17 Oktober anna@example.com")
+    #expect(exact.first?.documentID == "german")
+    #expect(exact.first?.content.contains("17. Oktober") == true)
+    let spanish = try await index.retrieve(query: "presupuesto Madrid martes")
+    #expect(spanish.first?.documentID == "spanish")
+
+    try await index.synchronize(documents: [])
+    #expect(await index.indexedChunkCount() == 0)
+    #expect(try await index.retrieve(query: "Aurora").isEmpty)
+}
+
+@Test func commitEligibilityExcludesCopiedSecureAndCurrentTargets() {
+    let externalPID = ProcessInfo.processInfo.processIdentifier + 10
+    #expect(DictationCoordinator.shouldRecordContext(
+        targetProcessIdentifier: externalPID,
+        currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+        result: .inserted,
+        isSecure: false,
+        targetBundleIdentifier: "com.example.editor"
+    ))
+    #expect(!DictationCoordinator.shouldRecordContext(
+        targetProcessIdentifier: externalPID,
+        currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+        result: .copied,
+        isSecure: false,
+        targetBundleIdentifier: "com.example.editor"
+    ))
+    #expect(!DictationCoordinator.shouldRecordContext(
+        targetProcessIdentifier: externalPID,
+        currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+        result: .inserted,
+        isSecure: true,
+        targetBundleIdentifier: "com.example.editor"
+    ))
+    #expect(!DictationCoordinator.shouldRecordContext(
+        targetProcessIdentifier: externalPID,
+        currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+        result: .inserted,
+        isSecure: false,
+        targetBundleIdentifier: "com.emilianscheel.current"
+    ))
 }

@@ -125,7 +125,7 @@ private final class ContextWorkerService: NSObject,
                 try await gemma.load(snapshot: snapshot)
                 try Task.checkCancellation()
                 let response = try await gemma.generatePrompt(
-                    envelope: request.envelope
+                    request: request.generationRequest
                 )
                 return try JSONEncoder().encode(response)
             }
@@ -216,7 +216,7 @@ private final class ContextWorkerService: NSObject,
         let task = Task { [weak self, gemma] in
             await gemma.unload()
             reply.callback()
-            self?.lock.withLock {
+            _ = self?.lock.withLock {
                 self?.tasks.removeValue(forKey: taskID)
             }
         }

@@ -148,12 +148,16 @@ struct SettingsView: View {
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
             Label("Screenshots are discarded after OCR; extracted text and metadata are retained", systemImage: "internaldrive")
+            Label("Conversation memory stays in RAM until Current quits or you clear it", systemImage: "bubble.left.and.bubble.right")
             Button("Open Context Library…") { runtime.context.show() }
         }
         Section("Recovery") {
             LabeledContent("Last transcription", value: runtime.coordinator.lastTranscription.isEmpty ? "None" : runtime.coordinator.lastTranscription)
             Button("Clear last transcription", role: .destructive) { runtime.coordinator.clearLastTranscription() }
                 .disabled(runtime.coordinator.lastTranscription.isEmpty)
+            Button("Clear conversation memory", role: .destructive) {
+                Task { await runtime.coordinator.clearConversationContext() }
+            }
             LabeledContent("Learned corrections", value: "\(runtime.coordinator.vocabulary.entries.count)")
             Button("Forget learned words", role: .destructive) {
                 runtime.coordinator.forgetLearnedWords()

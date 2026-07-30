@@ -34,13 +34,18 @@ final class AppRuntime {
     let model = ModelManager()
     let contextWorker = ContextWorkerClient()
     let contextStore = ContextStore()
+    let conversationContext = ConversationContext()
+    @ObservationIgnored lazy var retrievalIndex = ContextRetrievalIndex(
+        databaseURL: contextStore.directory.appendingPathComponent("Context Search.sqlite")
+    )
     let appleIntelligence = AppleFoundationModelProvider()
     @ObservationIgnored lazy var contextModel = GemmaContextModelManager(
         worker: contextWorker
     )
     @ObservationIgnored lazy var contextRepository = ContextRepository(
         store: contextStore,
-        structurer: contextModel
+        structurer: contextModel,
+        retrievalIndex: retrievalIndex
     )
     @ObservationIgnored lazy var screenContext = ScreenContextCoordinator(
         repository: contextRepository,
@@ -50,7 +55,8 @@ final class AppRuntime {
     @ObservationIgnored lazy var promptContextPreparer =
         LivePromptContextPreparer(
             repository: contextRepository,
-            screenContext: screenContext
+            screenContext: screenContext,
+            conversationContext: conversationContext
         )
     @ObservationIgnored lazy var intelligence = HybridLocalIntelligenceProvider(
         primary: appleIntelligence,
@@ -66,7 +72,8 @@ final class AppRuntime {
         intelligence: intelligence,
         intentRouter: intentRouter,
         contextRepository: contextRepository,
-        promptContextPreparer: promptContextPreparer
+        promptContextPreparer: promptContextPreparer,
+        conversationContext: conversationContext
     )
     let hardware = HardwareChecker().current()
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
@@ -81,9 +88,24 @@ final class AppRuntime {
     @ObservationIgnored lazy var about = AboutWindowController(runtime: self)
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
     @ObservationIgnored private var phaseUpdateGeneration = UUID()
+    @ObservationIgnored private var promptMemoryPressureSource:
+        DispatchSourceMemoryPressure?
 
     init() {
         contextStore.reload()
+        scheduleRetrievalReindex()
+        contextStore.onDocumentsChanged = { [weak self] _ in
+            self?.scheduleRetrievalReindex()
+        }
+        let promptMemoryPressureSource = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        promptMemoryPressureSource.setEventHandler { [weak self] in
+            Task { await self?.intelligence.discardPromptCaches() }
+        }
+        promptMemoryPressureSource.resume()
+        self.promptMemoryPressureSource = promptMemoryPressureSource
         try? contextStore.closeAppSessions(at: Date())
         coordinator.onPhaseChange = { [weak self] phase in
             guard let self else { return }
@@ -172,6 +194,17 @@ final class AppRuntime {
                     await self.contextModel.unload()
                 }
             }
+        }
+    }
+
+    func scheduleRetrievalReindex() {
+        guard ContextEngineeringFeatureFlags.localRetrieval else { return }
+        let documents = contextStore.documents
+        Task.detached(priority: .utility) { [retrievalIndex] in
+            try? await retrievalIndex.synchronize(
+                documents: documents,
+                buildSemanticVectors: true
+            )
         }
     }
 

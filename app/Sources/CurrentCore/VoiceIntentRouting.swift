@@ -11,12 +11,22 @@ private enum AppleRoutedIntent {
 }
 
 @Generable
+private enum ApplePromptContextScope {
+    case focused
+    case retrieved
+    case corpusWide
+}
+
+@Generable
 private struct AppleIntentDecisionOutput {
     @Guide(description: "The routing decision")
     var intent: AppleRoutedIntent
 
     @Guide(description: "Confidence from zero to one")
     var confidence: Double
+
+    @Guide(description: "focused for the active field, retrieved for bounded history search, corpusWide only for summaries across all documents")
+    var contextScope: ApplePromptContextScope
 }
 #endif
 
@@ -80,7 +90,16 @@ public actor AppleVoiceIntentRouter: VoiceIntentRoutingProviding {
         case .prompt: .prompt
         case .uncertain: .uncertain
         }
-        return IntentDecision(intent: intent, confidence: response.confidence)
+        let scope: PromptContextScope = switch response.contextScope {
+        case .focused: .focused
+        case .retrieved: .retrieved
+        case .corpusWide: .corpusWide
+        }
+        return IntentDecision(
+            intent: intent,
+            confidence: response.confidence,
+            contextScope: intent == .prompt ? scope : .focused
+        )
 #else
         throw CurrentError.modelUnavailable(
             "Apple Intelligence intent routing is unavailable."
@@ -112,6 +131,9 @@ public actor AppleVoiceIntentRouter: VoiceIntentRoutingProviding {
             - "Type the words draft an email" is direct.
             - Equivalent commands in other languages are prompt.
             Return only the generated structured decision.
+            Use focused for transformations of selected or nearby text, retrieved for
+            references to prior messages or facts, and corpusWide only for requests to
+            summarize or compare the entire context-document collection.
             """
         )
     }

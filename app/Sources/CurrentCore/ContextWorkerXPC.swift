@@ -3,7 +3,7 @@ import Foundation
 import OSLog
 
 public enum ContextWorkerProtocolVersion {
-    public static let current = 5
+    public static let current = 6
     public static let serviceName = "com.emilianscheel.current.ContextWorker"
 }
 
@@ -131,18 +131,18 @@ public struct ContextWorkerStructureRequest: Codable, Sendable {
 public struct ContextWorkerPromptRequest: Codable, Sendable {
     public let requestID: UUID
     public let modelSnapshotPath: String
-    public let envelope: PromptContextEnvelope
+    public let generationRequest: PromptGenerationRequest
     public let priority: ContextWorkerRequestPriority
 
     public init(
         requestID: UUID = UUID(),
         modelSnapshotPath: String,
-        envelope: PromptContextEnvelope,
+        generationRequest: PromptGenerationRequest,
         priority: ContextWorkerRequestPriority = .interactive
     ) {
         self.requestID = requestID
         self.modelSnapshotPath = modelSnapshotPath
-        self.envelope = envelope
+        self.generationRequest = generationRequest
         self.priority = priority
     }
 }
@@ -291,11 +291,11 @@ public final class ContextWorkerClient: @unchecked Sendable {
 
     public func generatePrompt(
         snapshot: URL,
-        envelope: PromptContextEnvelope
+        request generationRequest: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
         let payload = ContextWorkerPromptRequest(
             modelSnapshotPath: snapshot.path,
-            envelope: envelope
+            generationRequest: generationRequest
         )
         let response = try await request(
             operation: "prompt",
@@ -780,9 +780,9 @@ public actor XPCGemmaPromptProvider: PromptResponseGenerating {
     }
 
     public func generatePromptDisposition(
-        _ envelope: PromptContextEnvelope
+        _ request: PromptGenerationRequest
     ) async throws -> PromptGenerationDisposition {
-        try await client.generatePrompt(snapshot: snapshot, envelope: envelope)
+        try await client.generatePrompt(snapshot: snapshot, request: request)
     }
 }
 

@@ -65,7 +65,7 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
         markdown.split(whereSeparator: { $0.isWhitespace }).count
     }
 
-    fileprivate var appSessionMetadata: AppSessionMetadata? {
+    public var appSessionMetadata: AppSessionMetadata? {
         guard case .appSession(let metadata) = kind else { return nil }
         return metadata
     }
@@ -132,6 +132,7 @@ public final class ContextStore {
 
     public private(set) var documents: [ContextDocument] = []
     public private(set) var lastError: String?
+    @ObservationIgnored public var onDocumentsChanged: (([ContextDocument]) -> Void)?
 
     public let directory: URL
     public var appSessionsDirectory: URL {
@@ -224,6 +225,7 @@ public final class ContextStore {
                 sorted.first { $0.id == id }
             } + sorted.filter { !standingIDs.contains($0.id) }
             lastError = nil
+            onDocumentsChanged?(documents)
         } catch {
             lastError = error.localizedDescription
         }

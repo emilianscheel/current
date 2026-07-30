@@ -512,6 +512,22 @@ private struct ContextManagementView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    model.presentNewDocument()
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .help("New Context Document")
+            }
+        }
+        .searchable(
+            text: $model.searchText,
+            isPresented: $model.isSearchPresented,
+            placement: .toolbar,
+            prompt: "Search context"
+        )
         .alert(
             "New Context Document",
             isPresented: $model.isNewDocumentPresented
@@ -627,22 +643,6 @@ private struct ContextManagementView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    model.presentNewDocument()
-                } label: {
-                    Image(systemName: "doc.badge.plus")
-                }
-                .help("New Context Document")
-            }
-        }
-        .searchable(
-            text: $model.searchText,
-            isPresented: $model.isSearchPresented,
-            placement: .toolbar,
-            prompt: "Search context"
-        )
         .tint(Color.gray.opacity(0.18))
     }
 

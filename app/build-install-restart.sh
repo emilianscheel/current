@@ -170,7 +170,6 @@ else
   [[ -n "$USER_HOME_DIR" && "$USER_HOME_DIR" == /* ]] || { print -u2 "Could not resolve the user home directory."; exit 1; }
   INSTALL_DIR="$USER_HOME_DIR/Applications"
   INSTALL_APP="$INSTALL_DIR/Current.app"
-  PREVIOUS_APP="$INSTALL_DIR/Current.previous.app"
   KEYCHAIN_PATH="$(security default-keychain -d user | awk -F'"' 'NF >= 2 { print $2; exit }')"
   [[ -n "$KEYCHAIN_PATH" && "$KEYCHAIN_PATH" == /* ]] || { print -u2 "Could not resolve the default user Keychain."; exit 1; }
   CODESIGN_KEYCHAIN_ARGS=(--keychain "$KEYCHAIN_PATH")
@@ -304,8 +303,7 @@ print "Installing without resetting TCC permissions or Current preferences…"
 pkill -TERM -x Current 2>/dev/null || true
 for _ in {1..30}; do pgrep -x Current >/dev/null || break; sleep 0.1; done
 mkdir -p "$INSTALL_DIR"
-if [[ -e "$PREVIOUS_APP" ]]; then rm -rf "$PREVIOUS_APP"; fi
-if [[ -e "$INSTALL_APP" ]]; then mv "$INSTALL_APP" "$PREVIOUS_APP"; fi
+rm -rf "$INSTALL_APP" "$INSTALL_DIR/Current.previous.app"
 mv "$STAGE_APP" "$INSTALL_APP"
 codesign --verify --deep --strict --verbose=2 "$INSTALL_APP"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

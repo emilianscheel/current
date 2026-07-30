@@ -154,7 +154,11 @@ struct OnboardingView: View {
                 HStack {
                     if controller.step != .welcome { Button("Back") { controller.back() }.buttonStyle(.plain) }
                     Spacer()
-                    if showNext { Button(nextTitle) { advance() }.buttonStyle(.borderedProminent).controlSize(.large) }
+                    Button(nextTitle) { advance() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!canAdvance)
                 }
                 .padding(24)
             }
@@ -206,22 +210,29 @@ struct OnboardingView: View {
     }
 
     private func permissionStep(_ kind: PermissionKind) -> some View {
-        StepLayout(symbol: permissionSymbol(kind), title: "Allow \(kind.title)") {
-            VStack(spacing: 12) {
+        StepLayout(symbol: permissionSymbol(kind), title: kind.title) {
+            VStack(spacing: 0) {
                 Label(controller.permissions[kind].isGranted ? "Granted" : "Waiting for permission", systemImage: controller.permissions[kind].isGranted ? "checkmark.circle.fill" : "circle.dotted")
                     .foregroundStyle(controller.permissions[kind].isGranted ? .green : .secondary)
                 if !controller.permissions[kind].isGranted {
                     Button(controller.permissions[kind] == .notDetermined ? "Continue" : "Allow \(kind.title)") {
                         controller.request(kind)
-                    }.buttonStyle(.borderedProminent).controlSize(.large)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .padding(.top, 28)
                 }
                 if kind == .inputMonitoring, controller.requestedInputMonitoring,
                    !controller.permissions[kind].isGranted {
-                    Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
+                    Button("I enabled it — Restart Current") { controller.restart() }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 12)
                 }
                 if kind == .screenRecording, controller.requestedScreenRecording,
                    !controller.permissions[kind].isGranted {
-                    Button("I enabled it — Restart Current") { controller.restart() }.buttonStyle(.bordered)
+                    Button("I enabled it — Restart Current") { controller.restart() }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 12)
                 }
             }
         }
@@ -271,8 +282,9 @@ struct OnboardingView: View {
         }
     }
 
-    private var showNext: Bool {
-        switch controller.step {
+    private var canAdvance: Bool {
+        guard runtime.hardware.isSupported else { return false }
+        return switch controller.step {
         case .microphone: controller.permissions.microphone.isGranted
         case .accessibility: controller.permissions.accessibility.isGranted
         case .screenRecording: controller.permissions.screenRecording.isGranted

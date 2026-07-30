@@ -37,10 +37,23 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             let controller = NSHostingController(rootView: view)
             let window = NSWindow(contentViewController: controller)
             window.title = "Welcome to Current"
-            window.styleMask = [.titled, .closable, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
+            window.styleMask = [
+                .titled,
+                .closable,
+                .miniaturizable,
+                .resizable,
+            ]
+            window.titlebarAppearsTransparent = false
+            window.titlebarSeparatorStyle = .none
+            window.titleVisibility = .visible
+            let toolbar = NSToolbar(identifier: "Onboarding")
+            toolbar.allowsUserCustomization = false
+            toolbar.displayMode = .iconOnly
+            window.toolbarStyle = .unified
+            window.toolbar = toolbar
             window.isMovableByWindowBackground = true
             window.setContentSize(NSSize(width: 720, height: 560))
+            window.contentMinSize = NSSize(width: 720, height: 560)
             window.center()
             window.isReleasedWhenClosed = false
             window.delegate = self
@@ -130,7 +143,9 @@ struct OnboardingView: View {
     @Bindable var runtime: AppRuntime
 
     var body: some View {
-        CurrentWindowBackground {
+        ZStack {
+            Color.white
+                .ignoresSafeArea()
             VStack(spacing: 0) {
                 Group { content }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -144,6 +159,7 @@ struct OnboardingView: View {
                 .padding(24)
             }
         }
+        .preferredColorScheme(.light)
     }
 
     @ViewBuilder private var content: some View {

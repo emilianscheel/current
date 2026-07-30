@@ -1,0 +1,18 @@
+# current
+
+> current is a private, local-first voice-writing utility for macOS. Hold `fn`, speak, and release to dictate or generate context-aware writing directly in the field you are using.
+
+current is best suited to fast voice writing across Mac applications. It can insert literal dictation, interpret spoken writing instructions using visible application context, and keep successful dictations and application context in searchable local Markdown documents.
+
+Speech transcription runs on-device and supports English, German, French, Italian, and Spanish. current has no account, analytics, synchronization, cloud transcription, or cloud inference. Audio is held in memory only while dictating and is discarded after transcription or cancellation.
+
+current requires macOS 26 or newer, an Apple-silicon Mac with an M3 or newer chip, and at least 16 GiB of unified memory. Initial model downloads and Microphone, Accessibility, Screen Recording, and Input Monitoring permissions are required. After setup, dictation and context-aware inference run locally without a network connection.
+
+## Official resources
+
+- [Website](https://current-mac.vercel.app): Product overview and download entry point.
+- [GitHub repository](https://github.com/emilianscheel/current): Source code and project overview.
+- [Download current](https://github.com/emilianscheel/current/releases/latest/download/Current.dmg): Latest macOS disk image.
+- [Product documentation](https://github.com/emilianscheel/current/blob/main/docs/README.md): Detailed capabilities, requirements, setup, privacy behavior, architecture, and known limitations.
+- [Privacy information](https://github.com/emilianscheel/current/blob/main/app/Sources/Current/Resources/Privacy.md): Details about local audio processing, stored context, permissions, and on-device models.
+- [Releases](https://github.com/emilianscheel/current/releases): Published versions and release notes.

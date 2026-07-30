@@ -97,13 +97,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         add(
             runtime.settings.contextWorkerEnabled
-                ? "Disable Context Worker"
-                : "Enable Context Worker",
+                ? "Pause Context Worker"
+                : "Resume Context Worker",
             to: menu,
             action: #selector(toggleContextWorker),
             symbol: runtime.settings.contextWorkerEnabled
-                ? "stop"
-                : "checkmark"
+                ? "pause"
+                : "play"
         )
         addModel(
             "Parakeet TDT v3 Multilingual",

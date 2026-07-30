@@ -435,6 +435,58 @@ private struct DictationEvaluationFixture: Decodable {
     #expect(envelope.value == 0)
 }
 
+@Test func waveformSmoothingIsFrameRateIndependent() {
+    var sixtyHertz = WaveformLevelSmoother()
+    var oneTwentyHertz = WaveformLevelSmoother()
+    for _ in 0..<30 { sixtyHertz.update(target: 1, deltaTime: 1.0 / 60.0) }
+    for _ in 0..<60 { oneTwentyHertz.update(target: 1, deltaTime: 1.0 / 120.0) }
+
+    #expect(abs(sixtyHertz.value - oneTwentyHertz.value) < 0.0001)
+    #expect(sixtyHertz.value > 0.99)
+
+    let released = sixtyHertz.update(target: 0, deltaTime: 1.0 / 60.0)
+    #expect(released > 0)
+    #expect(released < 1)
+    sixtyHertz.reset()
+    #expect(sixtyHertz.value == 0)
+}
+
+@Test func overlayPresentationMachineIgnoresRepeatedVisibleUpdates() {
+    var machine = OverlayPresentationMachine()
+    let command = machine.requestVisible(true)
+    #expect(command == .present(generation: 1))
+    #expect(machine.requestVisible(true) == nil)
+    let completed = machine.completePresentation(generation: 1)
+    #expect(completed)
+    #expect(machine.state == .visible)
+    #expect(machine.requestVisible(true) == nil)
+}
+
+@Test func overlayPresentationMachineRejectsStaleCompletionsAfterReversal() {
+    var machine = OverlayPresentationMachine()
+    #expect(machine.requestVisible(true) == .present(generation: 1))
+    #expect(machine.requestVisible(false) == .dismiss(generation: 2))
+    let stalePresentation = machine.completePresentation(generation: 1)
+    #expect(!stalePresentation)
+    #expect(machine.requestVisible(true) == .present(generation: 3))
+    let staleDismissal = machine.completeDismissal(generation: 2)
+    #expect(!staleDismissal)
+    let completed = machine.completePresentation(generation: 3)
+    #expect(completed)
+    #expect(machine.state == .visible)
+}
+
+@Test func overlayAnimationPolicyHonorsReduceMotion() {
+    let standard = OverlayAnimationPolicy(reduceMotion: false)
+    #expect(standard.animatesShape)
+    #expect(standard.presentationContentDuration == 0.18)
+
+    let reduced = OverlayAnimationPolicy(reduceMotion: true)
+    #expect(!reduced.animatesShape)
+    #expect(reduced.presentationContentDuration == 0.12)
+    #expect(reduced.dismissalContentDuration == 0.12)
+}
+
 @Test func automaticInputAvoidsBluetoothCaptureWhenBuiltInMicExists() {
     #expect(
         AudioCaptureService.preferredAutomaticInputDeviceID(

@@ -104,6 +104,10 @@ private final class AudioLevelState: @unchecked Sendable {
             return value
         }
     }
+
+    var currentValue: Float {
+        lock.withLock { envelope.value }
+    }
 }
 
 @MainActor
@@ -123,6 +127,10 @@ public final class AudioCaptureService {
     @ObservationIgnored private let sampleRelay = AudioSampleRelay()
 
     public init() {}
+
+    public nonisolated var currentMeterLevel: Float {
+        meterState.currentValue
+    }
 
     public func setSampleHandler(
         _ handler: (@Sendable ([Float]) -> Void)?

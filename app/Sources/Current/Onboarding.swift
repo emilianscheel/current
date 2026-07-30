@@ -207,29 +207,63 @@ struct OnboardingView: View {
     @Bindable var controller: OnboardingController
     @Bindable var runtime: AppRuntime
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayedStep: OnboardingStep
+    @State private var outgoingStep: OnboardingStep?
+    @State private var transitionDirection = OnboardingNavigationDirection.forward
+    @State private var pageTransitionProgress = CGFloat(1)
+    @State private var pageTransitionGeneration = 0
+
+    init(controller: OnboardingController, runtime: AppRuntime) {
+        self.controller = controller
+        self.runtime = runtime
+        _displayedStep = State(initialValue: controller.step)
+    }
 
     var body: some View {
         ZStack {
             Color.white
                 .ignoresSafeArea()
             VStack(spacing: 0) {
-                ZStack {
-                    content
-                        .id(controller.step)
-                        .transition(pageTransition)
-                        .padding(40)
-                    if !reduceMotion {
-                        CompletionConfetti(
-                            trigger: controller.completionCelebration
-                        )
-                            .opacity(controller.step == .complete ? 1 : 0)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
+                GeometryReader { geometry in
+                    ZStack {
+                        if let outgoingStep {
+                            content(for: outgoingStep)
+                                .padding(40)
+                                .opacity(1 - pageTransitionProgress)
+                                .offset(
+                                    x: pageOffset(
+                                        width: geometry.size.width,
+                                        outgoing: true
+                                    )
+                                )
+                                .allowsHitTesting(false)
+                        }
+                        content(for: displayedStep)
+                            .padding(40)
+                            .opacity(
+                                outgoingStep == nil ? 1 : pageTransitionProgress
+                            )
+                            .offset(
+                                x: pageOffset(
+                                    width: geometry.size.width,
+                                    outgoing: false
+                                )
+                            )
+                        if !reduceMotion {
+                            CompletionConfetti(
+                                trigger: controller.completionCelebration
+                            )
+                                .opacity(controller.step == .complete ? 1 : 0)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                     }
-                }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
-                    .animation(pageAnimation, value: controller.step)
+                }
+                .onChange(of: controller.step) { _, newStep in
+                    animatePageChange(to: newStep)
+                }
                 Divider().opacity(0.5)
                 HStack {
                     if controller.step != .welcome { Button("Back") { controller.back() }.buttonStyle(.plain) }
@@ -246,11 +280,11 @@ struct OnboardingView: View {
         .preferredColorScheme(.light)
     }
 
-    @ViewBuilder private var content: some View {
+    @ViewBuilder private func content(for step: OnboardingStep) -> some View {
         if !runtime.hardware.isSupported {
             StepLayout(symbol: "macbook", title: "This Mac isn’t supported") { EmptyView() }
         } else {
-            switch controller.step {
+            switch step {
             case .welcome:
                 StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.") { EmptyView() }
             case .microphone: permissionStep(.microphone)
@@ -393,16 +427,33 @@ struct OnboardingView: View {
         reduceMotion ? .easeOut(duration: 0.16) : .snappy(duration: 0.38)
     }
 
-    private var pageTransition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        let insertionEdge: Edge = controller.navigationDirection == .forward
-            ? .trailing : .leading
-        let removalEdge: Edge = controller.navigationDirection == .forward
-            ? .leading : .trailing
-        return .asymmetric(
-            insertion: .opacity.combined(with: .move(edge: insertionEdge)),
-            removal: .opacity.combined(with: .move(edge: removalEdge))
-        )
+    private func animatePageChange(to newStep: OnboardingStep) {
+        guard newStep != displayedStep else { return }
+        let generation = pageTransitionGeneration + 1
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            pageTransitionGeneration = generation
+            transitionDirection = controller.navigationDirection
+            outgoingStep = displayedStep
+            displayedStep = newStep
+            pageTransitionProgress = 0
+        }
+        withAnimation(pageAnimation) {
+            pageTransitionProgress = 1
+        } completion: {
+            guard pageTransitionGeneration == generation else { return }
+            outgoingStep = nil
+        }
+    }
+
+    private func pageOffset(width: CGFloat, outgoing: Bool) -> CGFloat {
+        guard !reduceMotion else { return 0 }
+        let direction: CGFloat = transitionDirection == .forward ? 1 : -1
+        if outgoing {
+            return -direction * width * pageTransitionProgress
+        }
+        return direction * width * (1 - pageTransitionProgress)
     }
 
     private var permissionStatusTransition: AnyTransition {

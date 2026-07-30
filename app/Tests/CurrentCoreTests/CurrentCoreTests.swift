@@ -785,7 +785,7 @@ private func contextTestDate(
     #expect(firstDay.markdown.contains("09:05 h"))
     #expect(firstDay.markdown.contains("15:30 h"))
     #expect(firstDay.markdown.contains("\\*literal\\*"))
-    #expect(firstDay.markdown.contains("**Second conversation**"))
+    #expect(firstDay.markdown.contains("**Friday, July 24, 2026 15:30 h**\nSecond conversation"))
     #expect(store.filteredDocuments(matching: "Second").map(\.id) == ["2026-07-24"])
     #expect(store.filteredDocuments(matching: "July 25").map(\.id) == ["2026-07-25"])
 }
@@ -810,9 +810,11 @@ private func contextTestDate(
     #expect(
         document.markdown
             == """
-            Friday, 24. July 2026 13:36 h **Hallo**
+            **Friday, 24. July 2026 13:36 h**
+            Hallo
 
-            Friday, 24. July 2026 14:07 h **Use \\*literal\\* Markdown.**
+            **Friday, 24. July 2026 14:07 h**
+            Use \\*literal\\* Markdown.
 
             """
     )

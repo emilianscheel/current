@@ -36,14 +36,51 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
     public var wordCount: Int {
         markdown.split(whereSeparator: { $0.isWhitespace }).count
     }
+
+    fileprivate var appSessionMetadata: AppSessionMetadata? {
+        guard case .appSession(let metadata) = kind else { return nil }
+        return metadata
+    }
 }
 
 @MainActor
 @Observable
 public final class ContextStore {
+    private struct PersistedAppSession: Codable {
+        var metadata: AppSessionMetadata
+        var presentationVersion: Int
+        var displayedThrough: Date
+    }
+
     private struct DocumentMetadataFile: Codable {
-        var version = 1
+        var version = 2
         var aliases: [String: String] = [:]
+        var appSessions: [String: PersistedAppSession] = [:]
+
+        private enum CodingKeys: String, CodingKey {
+            case version, aliases, appSessions
+        }
+
+        init(
+            aliases: [String: String] = [:],
+            appSessions: [String: PersistedAppSession] = [:]
+        ) {
+            self.aliases = aliases
+            self.appSessions = appSessions
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            aliases = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .aliases
+            ) ?? [:]
+            appSessions = try container.decodeIfPresent(
+                [String: PersistedAppSession].self,
+                forKey: .appSessions
+            ) ?? [:]
+        }
     }
 
     public private(set) var documents: [ContextDocument] = []
@@ -61,6 +98,7 @@ public final class ContextStore {
     private let fileManager: FileManager
     private let trashHandler: ((URL) throws -> Void)?
     private var aliases: [String: String] = [:]
+    private var persistedAppSessions: [String: PersistedAppSession] = [:]
     private var metadataURL: URL {
         directory.appendingPathComponent("Document Metadata.json")
     }
@@ -93,7 +131,9 @@ public final class ContextStore {
     public func reload() {
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            aliases = loadAliases()
+            let persistedMetadata = loadDocumentMetadata()
+            aliases = persistedMetadata.aliases
+            persistedAppSessions = persistedMetadata.appSessions
             let rootURLs = try fileManager.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -157,7 +197,8 @@ public final class ContextStore {
         }
         markdown = markdown.trimmingCharacters(in: .newlines)
         if !markdown.isEmpty { markdown += "\n\n" }
-        markdown += "\(displayTitle(for: date)) \(timeTitle(for: date)) h **\(Self.escapedLiteralMarkdown(text))**\n"
+        markdown += "**\(displayTitle(for: date)) \(timeTitle(for: date)) h**\n"
+            + "\(Self.escapedLiteralMarkdown(text))\n"
         try write(markdown, to: url)
         reload()
         guard let document = documents.first(where: { $0.id == id }) else {
@@ -174,16 +215,18 @@ public final class ContextStore {
         case .dailyDictation:
             try write(markdown, to: document.url)
         case .appSession(let metadata):
-            try write(
-                appSessionMarkdown(
-                    metadata: metadata,
-                    currentState: Self.section(named: "Current state", in: markdown),
-                    activity: Self.section(named: "Activity", in: markdown),
-                    unprocessed: Self.section(
-                        named: "Unprocessed observations",
-                        in: markdown
-                    )
+            try writeAppSession(
+                metadata: metadata,
+                currentState: Self.section(named: "Current state", in: markdown),
+                activity: Self.section(named: "Activity", in: markdown),
+                unprocessed: Self.section(
+                    named: "Unprocessed observations",
+                    in: markdown
                 ),
+                compact: isCompactAppSession(document),
+                displayedThrough: persistedAppSessions[
+                    metadata.sessionID.rawValue
+                ]?.displayedThrough ?? metadata.endedAt ?? metadata.startedAt,
                 to: document.url
             )
         }
@@ -201,6 +244,10 @@ public final class ContextStore {
             displayTitle(for: document.date).localizedStandardContains(needle)
                 || document.id.localizedStandardContains(needle)
                 || document.customDisplayName?
+                    .localizedStandardContains(needle) == true
+                || document.appSessionMetadata?.applicationName
+                    .localizedStandardContains(needle) == true
+                || document.appSessionMetadata?.bundleIdentifier?
                     .localizedStandardContains(needle) == true
                 || document.markdown.localizedStandardContains(needle)
         }
@@ -231,7 +278,13 @@ public final class ContextStore {
             _ = try fileManager.trashItem(at: document.url, resultingItemURL: nil)
         }
         if aliases.removeValue(forKey: documentID) != nil {
-            try persistAliases()
+            try persistDocumentMetadata()
+        }
+        if case .appSession(let metadata) = document.kind,
+           persistedAppSessions.removeValue(
+               forKey: metadata.sessionID.rawValue
+           ) != nil {
+            try persistDocumentMetadata()
         }
         reload()
     }
@@ -262,7 +315,8 @@ public final class ContextStore {
     public func appSessionDocumentsRequiringMigration()
         -> [ContextDocument] {
         appSessionDocuments().filter {
-            Self.tableValue("Format Version", in: $0.markdown) != "2"
+            Self.tableValue("Session ID", in: $0.markdown) != nil
+                && Self.tableValue("Format Version", in: $0.markdown) != "2"
         }
     }
 
@@ -275,16 +329,18 @@ public final class ContextStore {
               case .appSession(let metadata) = document.kind else {
             throw ContextStoreError.documentUnavailable
         }
-        try write(
-            appSessionMarkdown(
-                metadata: metadata,
-                currentState: currentState,
-                activity: activity,
-                unprocessed: Self.section(
-                    named: "Unprocessed observations",
-                    in: document.markdown
-                )
+        try writeAppSession(
+            metadata: metadata,
+            currentState: currentState,
+            activity: activity,
+            unprocessed: Self.section(
+                named: "Unprocessed observations",
+                in: document.markdown
             ),
+            compact: isCompactAppSession(document),
+            displayedThrough: persistedAppSessions[
+                metadata.sessionID.rawValue
+            ]?.displayedThrough ?? metadata.endedAt ?? metadata.startedAt,
             to: document.url
         )
         reload()
@@ -305,6 +361,7 @@ public final class ContextStore {
         let existingMarkdown = existing?.markdown
             ?? (try? String(contentsOf: url, encoding: .utf8))
             ?? ""
+        let compact = existing.map(isCompactAppSession) ?? true
         let currentState = ContextBulletNormalizer.bullets(
             update.currentStateMarkdown.components(separatedBy: .newlines),
             maximumCount: 24
@@ -328,13 +385,15 @@ public final class ContextStore {
             named: "Unprocessed observations",
             in: existingMarkdown
         )
-        let markdown = appSessionMarkdown(
+        try writeAppSession(
             metadata: metadata,
             currentState: currentState,
             activity: activity,
-            unprocessed: unprocessed
+            unprocessed: unprocessed,
+            compact: compact,
+            displayedThrough: date,
+            to: url
         )
-        try write(markdown, to: url)
         reload()
         guard let document = appSessionDocument(sessionID: metadata.sessionID) else {
             throw ContextStoreError.documentUnavailable
@@ -370,13 +429,13 @@ public final class ContextStore {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try write(
-            appSessionMarkdown(
-                metadata: metadata,
-                currentState: currentState,
-                activity: activity,
-                unprocessed: unprocessed
-            ),
+        try writeAppSession(
+            metadata: metadata,
+            currentState: currentState,
+            activity: activity,
+            unprocessed: unprocessed,
+            compact: existing.map(isCompactAppSession) ?? true,
+            displayedThrough: date,
             to: url
         )
         reload()
@@ -400,16 +459,16 @@ public final class ContextStore {
         }
         for (document, var metadata) in sessions {
             metadata.endedAt = date
-            try write(
-                appSessionMarkdown(
-                    metadata: metadata,
-                    currentState: Self.section(named: "Current state", in: document.markdown),
-                    activity: Self.section(named: "Activity", in: document.markdown),
-                    unprocessed: Self.section(
-                        named: "Unprocessed observations",
-                        in: document.markdown
-                    )
+            try writeAppSession(
+                metadata: metadata,
+                currentState: Self.section(named: "Current state", in: document.markdown),
+                activity: Self.section(named: "Activity", in: document.markdown),
+                unprocessed: Self.section(
+                    named: "Unprocessed observations",
+                    in: document.markdown
                 ),
+                compact: isCompactAppSession(document),
+                displayedThrough: date,
                 to: document.url
             )
         }
@@ -425,16 +484,16 @@ public final class ContextStore {
             return
         }
         metadata.endedAt = date
-        try write(
-            appSessionMarkdown(
-                metadata: metadata,
-                currentState: Self.section(named: "Current state", in: document.markdown),
-                activity: Self.section(named: "Activity", in: document.markdown),
-                unprocessed: Self.section(
-                    named: "Unprocessed observations",
-                    in: document.markdown
-                )
+        try writeAppSession(
+            metadata: metadata,
+            currentState: Self.section(named: "Current state", in: document.markdown),
+            activity: Self.section(named: "Activity", in: document.markdown),
+            unprocessed: Self.section(
+                named: "Unprocessed observations",
+                in: document.markdown
             ),
+            compact: isCompactAppSession(document),
+            displayedThrough: date,
             to: document.url
         )
         reload()
@@ -463,7 +522,42 @@ public final class ContextStore {
             .appendingPathComponent(filename)
     }
 
-    private func appSessionMarkdown(
+    private func writeAppSession(
+        metadata: AppSessionMetadata,
+        currentState: String,
+        activity: String,
+        unprocessed: String,
+        compact: Bool,
+        displayedThrough: Date,
+        to url: URL
+    ) throws {
+        if compact {
+            persistedAppSessions[metadata.sessionID.rawValue] =
+                PersistedAppSession(
+                    metadata: metadata,
+                    presentationVersion: 3,
+                    displayedThrough: displayedThrough
+                )
+            try persistDocumentMetadata()
+        }
+        let markdown = compact
+            ? compactAppSessionMarkdown(
+                metadata: metadata,
+                currentState: currentState,
+                activity: activity,
+                unprocessed: unprocessed,
+                displayedThrough: displayedThrough
+            )
+            : legacyAppSessionMarkdown(
+                metadata: metadata,
+                currentState: currentState,
+                activity: activity,
+                unprocessed: unprocessed
+            )
+        try write(markdown, to: url)
+    }
+
+    private func legacyAppSessionMarkdown(
         metadata: AppSessionMetadata,
         currentState: String,
         activity: String,
@@ -507,12 +601,114 @@ public final class ContextStore {
         return markdown.trimmingCharacters(in: .newlines) + "\n"
     }
 
+    private func compactAppSessionMarkdown(
+        metadata: AppSessionMetadata,
+        currentState: String,
+        activity: String,
+        unprocessed: String,
+        displayedThrough: Date
+    ) -> String {
+        var body: [String] = currentState
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        body.append(contentsOf: compactHistoryLines(from: activity))
+        body.append(contentsOf: compactHistoryLines(from: unprocessed))
+
+        let title = Self.escapedBoldMarkdown(metadata.applicationName)
+        let displayLine = sessionDisplayLine(
+            metadata: metadata,
+            displayedThrough: displayedThrough
+        )
+        var markdown = "**\(title)**\n\(displayLine)\n"
+        if !body.isEmpty {
+            markdown += "\n" + body.joined(separator: "\n")
+        }
+        return markdown.trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    private func compactHistoryLines(from markdown: String) -> [String] {
+        var output: [String] = []
+        var timestamp: String?
+        var context: String?
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("### ") {
+                let heading = String(line.dropFirst(4))
+                timestamp = String(heading.prefix(5))
+                var remainder = heading.dropFirst(min(8, heading.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if remainder.hasPrefix("—") {
+                    remainder = String(remainder.dropFirst())
+                        .trimmingCharacters(in: .whitespaces)
+                }
+                context = remainder.isEmpty ? nil : remainder
+                continue
+            }
+            guard !line.isEmpty, let timestamp else { continue }
+            let content = Self.removingBulletPrefix(from: line)
+            guard !content.isEmpty else { continue }
+            let prefix = context.map { "\($0) — " } ?? ""
+            output.append("\(timestamp) — \(prefix)\(content)")
+        }
+        return output
+    }
+
+    private func sessionDisplayLine(
+        metadata: AppSessionMetadata,
+        displayedThrough: Date
+    ) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = locale
+        dateFormatter.calendar = calendar
+        dateFormatter.timeZone = calendar.timeZone
+        dateFormatter.dateStyle = .long
+        dateFormatter.timeStyle = .none
+
+        let end = metadata.endedAt
+        let endLabel = end.map { timeTitle(for: $0) } ?? "Active"
+        let elapsedTo = max(metadata.startedAt, end ?? displayedThrough)
+        let elapsedMinutes = max(
+            0,
+            Int(elapsedTo.timeIntervalSince(metadata.startedAt) / 60)
+        )
+        let durationFormatter = DateComponentsFormatter()
+        var durationCalendar = calendar
+        durationCalendar.locale = locale
+        durationFormatter.calendar = durationCalendar
+        durationFormatter.allowedUnits = elapsedMinutes >= 60
+            ? [.hour, .minute]
+            : [.minute]
+        durationFormatter.unitsStyle = .short
+        durationFormatter.maximumUnitCount = 2
+        let duration = durationFormatter.string(
+            from: TimeInterval(elapsedMinutes * 60)
+        )?.replacingOccurrences(of: ", ", with: " ") ?? "0 min"
+        return "\(dateFormatter.string(from: metadata.startedAt)), "
+            + "\(timeTitle(for: metadata.startedAt))–\(endLabel) (\(duration))"
+    }
+
     private func loadAppSessionDocument(at url: URL) throws -> ContextDocument? {
         let values = try url.resourceValues(
             forKeys: [.contentModificationDateKey, .isRegularFileKey]
         )
         guard values.isRegularFile == true else { return nil }
         let markdown = try String(contentsOf: url, encoding: .utf8)
+        if let persisted = persistedSession(for: url, markdown: markdown) {
+            guard let date = date(fromDocumentID: persisted.metadata.dayIdentifier) else {
+                return nil
+            }
+            let id = "app:\(persisted.metadata.sessionID.rawValue)"
+            return ContextDocument(
+                id: id,
+                date: date,
+                url: url,
+                markdown: markdown,
+                modifiedAt: values.contentModificationDate ?? .distantPast,
+                kind: .appSession(persisted.metadata),
+                customDisplayName: aliases[id]
+            )
+        }
         guard let sessionID = Self.tableValue("Session ID", in: markdown),
               let appName = Self.tableValue("App", in: markdown),
               let processString = Self.tableValue("Process ID", in: markdown),
@@ -556,6 +752,67 @@ public final class ContextStore {
         )
     }
 
+    private func persistedSession(
+        for url: URL,
+        markdown: String
+    ) -> PersistedAppSession? {
+        let filename = url.deletingPathExtension().lastPathComponent
+        let sessionID = filename.components(separatedBy: "--").last
+        if let sessionID,
+           let persisted = persistedAppSessions[sessionID],
+           persisted.presentationVersion >= 3 {
+            return persisted
+        }
+        return recoveredCompactSession(for: url, markdown: markdown)
+    }
+
+    private func isCompactAppSession(_ document: ContextDocument) -> Bool {
+        guard case .appSession(let metadata) = document.kind else {
+            return false
+        }
+        return (persistedAppSessions[metadata.sessionID.rawValue]?
+            .presentationVersion ?? 0) >= 3
+            || document.markdown.hasPrefix("**")
+    }
+
+    private func recoveredCompactSession(
+        for url: URL,
+        markdown: String
+    ) -> PersistedAppSession? {
+        let lines = markdown.components(separatedBy: .newlines)
+        guard let titleLine = lines.first,
+              titleLine.hasPrefix("**"), titleLine.hasSuffix("**"),
+              lines.count >= 2 else {
+            return nil
+        }
+        let parts = url.deletingPathExtension().lastPathComponent
+            .components(separatedBy: "--")
+        guard parts.count == 4,
+              let startedAt = Self.filenameDate(parts[1]),
+              let processIdentifier = pid_t(parts[2]) else {
+            return nil
+        }
+        let dayIdentifier = url.deletingLastPathComponent().lastPathComponent
+        let applicationName = String(titleLine.dropFirst(2).dropLast(2))
+            .replacingOccurrences(of: "\\*", with: "*")
+            .replacingOccurrences(of: "\\_", with: "_")
+            .replacingOccurrences(of: "\\\\", with: "\\")
+        let metadata = AppSessionMetadata(
+            sessionID: AppSessionID(rawValue: parts[3]),
+            applicationName: applicationName,
+            bundleIdentifier: nil,
+            processIdentifier: processIdentifier,
+            startedAt: startedAt,
+            endedAt: lines[1].contains("–Active") ? nil : startedAt,
+            dayIdentifier: dayIdentifier
+        )
+        return PersistedAppSession(
+            metadata: metadata,
+            presentationVersion: 3,
+            displayedThrough: startedAt
+        )
+    }
+
     private static func tableValue(_ key: String, in markdown: String) -> String? {
         let prefix = "| \(key) |"
         guard let line = markdown.split(separator: "\n", omittingEmptySubsequences: false)
@@ -576,7 +833,9 @@ public final class ContextStore {
         in markdown: String
     ) -> String {
         let marker = "## \(name)"
-        guard let start = markdown.range(of: marker) else { return "" }
+        guard let start = markdown.range(of: marker) else {
+            return compactSection(named: name, in: markdown)
+        }
         let contentStart = start.upperBound
         let remainder = markdown[contentStart...]
         let end = remainder.range(of: "\n## ")?.lowerBound ?? markdown.endIndex
@@ -584,11 +843,61 @@ public final class ContextStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private nonisolated static func compactSection(
+        named name: String,
+        in markdown: String
+    ) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        guard lines.first?.hasPrefix("**") == true, lines.count >= 3 else {
+            return ""
+        }
+        let body = lines.dropFirst(3).filter { !$0.isEmpty }
+        let historyStart = body.firstIndex(where: isCompactHistoryLine)
+            ?? body.endIndex
+        if name == "Current state" {
+            return body[..<historyStart].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if name == "Activity" {
+            return body[historyStart...].compactMap { line -> String? in
+                guard isCompactHistoryLine(line), line.count > 8 else {
+                    return nil
+                }
+                let time = line.prefix(5)
+                let content = line.dropFirst(8)
+                return "### \(time)\n\n- \(content)"
+            }.joined(separator: "\n\n")
+        }
+        return ""
+    }
+
+    private nonisolated static func isCompactHistoryLine(_ line: String) -> Bool {
+        line.range(
+            of: #"^\d{2}:\d{2} — .+"#,
+            options: .regularExpression
+        ) != nil
+    }
+
     private static func tableEscaped(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "|", with: "\\|")
             .replacingOccurrences(of: "\n", with: " ")
+    }
+
+    private static func escapedBoldMarkdown(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "*", with: "\\*")
+            .replacingOccurrences(of: "_", with: "\\_")
+            .replacingOccurrences(of: "\n", with: " ")
+    }
+
+    private static func removingBulletPrefix(from value: String) -> String {
+        for prefix in ["- ", "* ", "+ ", "• "] where value.hasPrefix(prefix) {
+            return String(value.dropFirst(prefix.count))
+        }
+        return value
     }
 
     private static func filenameSlug(_ value: String) -> String {
@@ -609,6 +918,14 @@ public final class ContextStore {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         return formatter.string(from: date)
+    }
+
+    private static func filenameDate(_ value: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return formatter.date(from: value)
     }
 
     public nonisolated static func escapedLiteralMarkdown(_ text: String) -> String {
@@ -649,23 +966,30 @@ public final class ContextStore {
         )
     }
 
-    private func loadAliases() -> [String: String] {
+    private func loadDocumentMetadata() -> DocumentMetadataFile {
         guard fileManager.fileExists(atPath: metadataURL.path),
-              let data = try? Data(contentsOf: metadataURL),
-              let file = try? JSONDecoder().decode(
-                  DocumentMetadataFile.self,
-                  from: data
-              ) else {
-            return [:]
+              let data = try? Data(contentsOf: metadataURL) else {
+            return DocumentMetadataFile()
         }
-        return file.aliases
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(DocumentMetadataFile.self, from: data))
+            ?? DocumentMetadataFile()
     }
 
     private func persistAliases() throws {
+        try persistDocumentMetadata()
+    }
+
+    private func persistDocumentMetadata() throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(
-            DocumentMetadataFile(aliases: aliases)
+            DocumentMetadataFile(
+                aliases: aliases,
+                appSessions: persistedAppSessions
+            )
         ).write(to: metadataURL, options: .atomic)
     }
 

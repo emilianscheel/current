@@ -504,15 +504,29 @@ private actor PromptScreenStub: ScreenContextProviding {
         "current-app-session-\(UUID().uuidString)"
     )
     defer { try? FileManager.default.removeItem(at: root) }
-    let store = ContextStore(directory: root)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_GB")
+    )
     store.reload()
-    let started = Date(timeIntervalSince1970: 1_775_000_000)
+    let started = try #require(calendar.date(from: DateComponents(
+        timeZone: calendar.timeZone,
+        year: 2026,
+        month: 7,
+        day: 30,
+        hour: 10,
+        minute: 56
+    )))
+    let updated = started.addingTimeInterval(23 * 60)
     let metadata = AppSessionMetadata(
         applicationName: "Mail",
         bundleIdentifier: "com.apple.mail",
         processIdentifier: 42,
         startedAt: started,
-        dayIdentifier: "2026-04-01",
+        dayIdentifier: "2026-07-30",
         iconRelativePath: "App Icons/com.apple.mail.png",
         sources: [.accessibility, .visionOCR]
     )
@@ -523,21 +537,106 @@ private actor PromptScreenStub: ScreenContextProviding {
             currentStateMarkdown: "Viewing the inbox.",
             activityEntryMarkdown: "Opened a message."
         ),
-        at: started
+        at: updated
     )
     #expect(document.id == "app:\(metadata.sessionID.rawValue)")
-    #expect(document.markdown.contains("## Current state"))
-    #expect(document.markdown.contains("Opened a message."))
+    #expect(
+        document.markdown
+            == """
+            **Mail**
+            30 July 2026, 10:56–Active (23 min)
+
+            - Viewing the inbox.
+            11:19 — Opened a message.
+
+            """
+    )
+    #expect(!document.markdown.contains("Metadata"))
+    #expect(!document.markdown.contains("Current state"))
+    #expect(!document.markdown.contains("##"))
     #expect(store.filteredDocuments(matching: "com.apple.mail").count == 1)
 
-    try store.closeAppSessions(processIdentifier: 42, at: started.addingTimeInterval(60))
-    let closed = try #require(store.appSessionDocument(sessionID: metadata.sessionID))
+    let reloaded = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_GB"),
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    reloaded.reload()
+    let roundTripped = try #require(
+        reloaded.appSessionDocument(sessionID: metadata.sessionID)
+    )
+    guard case .appSession(let roundTrippedMetadata) = roundTripped.kind else {
+        Issue.record("Expected app-session document")
+        return
+    }
+    #expect(roundTrippedMetadata.bundleIdentifier == "com.apple.mail")
+    #expect(roundTrippedMetadata.processIdentifier == 42)
+    #expect(roundTrippedMetadata.iconRelativePath == "App Icons/com.apple.mail.png")
+    #expect(roundTrippedMetadata.sources == [.accessibility, .visionOCR])
+    #expect(roundTrippedMetadata.isActive)
+
+    let secondUpdate = started.addingTimeInterval(24 * 60)
+    let updatedDocument = try reloaded.applyAppSessionUpdate(
+        metadata: roundTrippedMetadata,
+        update: ContextDocumentUpdate(
+            changed: true,
+            currentStateMarkdown: "Reading the reply.",
+            activityEntryMarkdown: "Typed a response."
+        ),
+        at: secondUpdate
+    )
+    #expect(updatedDocument.markdown.contains("- Reading the reply."))
+    #expect(!updatedDocument.markdown.contains("- Viewing the inbox."))
+    #expect(updatedDocument.markdown.contains("11:19 — Opened a message."))
+    #expect(updatedDocument.markdown.contains("11:20 — Typed a response."))
+
+    let rawObservation = ContextObservation(
+        capturedAt: started.addingTimeInterval(25 * 60),
+        processIdentifier: 42,
+        bundleIdentifier: "com.apple.mail",
+        applicationName: "Mail",
+        windowTitle: "Reply",
+        blocks: [
+            ContextTextBlock(text: "Raw OCR fallback", source: .visionOCR),
+        ]
+    )
+    let withFallback = try reloaded.appendUnprocessedObservations(
+        [rawObservation],
+        metadata: roundTrippedMetadata,
+        at: rawObservation.capturedAt
+    )
+    #expect(withFallback.markdown.contains("11:21 — Reply — Raw OCR fallback"))
+    #expect(
+        ContextStore.section(named: "Current state", in: withFallback.markdown)
+            == "- Reading the reply."
+    )
+    #expect(
+        ContextStore.section(named: "Activity", in: withFallback.markdown)
+            .contains("Raw OCR fallback")
+    )
+
+    try reloaded.closeAppSessions(
+        processIdentifier: 42,
+        at: started.addingTimeInterval(26 * 60)
+    )
+    let closed = try #require(
+        reloaded.appSessionDocument(sessionID: metadata.sessionID)
+    )
     guard case .appSession(let closedMetadata) = closed.kind else {
         Issue.record("Expected app-session document")
         return
     }
     #expect(closedMetadata.endedAt != nil)
     #expect(!closedMetadata.isActive)
+    #expect(closed.markdown.contains("10:56–11:22 (26 min)"))
+
+    try reloaded.moveToTrash(documentID: closed.id)
+    let internalMetadata = try String(
+        contentsOf: root.appendingPathComponent("Document Metadata.json"),
+        encoding: .utf8
+    )
+    #expect(!internalMetadata.contains(metadata.sessionID.rawValue))
 }
 
 @MainActor
@@ -711,6 +810,26 @@ private actor PromptScreenStub: ScreenContextProviding {
 }
 
 @MainActor
+@Test func aliasOnlyMetadataSchemaRemainsReadable() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-v1-metadata-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try Data("Legacy document\n".utf8).write(
+        to: root.appendingPathComponent("2026-07-30.md")
+    )
+    try Data(
+        #"{"version":1,"aliases":{"2026-07-30":"Imported alias"}}"#.utf8
+    ).write(to: root.appendingPathComponent("Document Metadata.json"))
+
+    let store = ContextStore(directory: root)
+    store.reload()
+
+    #expect(store.document(id: "2026-07-30")?.customDisplayName == "Imported alias")
+}
+
+@MainActor
 @Test func legacyAppSessionsMigrateAtomicallyAndPreserveTimestamps()
     async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -767,6 +886,25 @@ private actor PromptScreenStub: ScreenContextProviding {
     #expect(migrated.markdown.contains("| Format Version | 2 |"))
     #expect(migrated.markdown.contains("### 10:01:02"))
     #expect(migrated.markdown.contains("Alex"))
+    guard case .appSession(let metadata) = migrated.kind else {
+        Issue.record("Expected app-session document")
+        return
+    }
+    _ = try store.applyAppSessionUpdate(
+        metadata: metadata,
+        update: ContextDocumentUpdate(
+            changed: true,
+            currentStateMarkdown: "Still reviewing the project message.",
+            activityEntryMarkdown: "Reopened the message."
+        ),
+        at: metadata.startedAt.addingTimeInterval(360)
+    )
+    let updated = try #require(
+        store.appSessionDocument(sessionID: metadata.sessionID)
+    )
+    #expect(updated.markdown.contains("| Metadata | Value |"))
+    #expect(updated.markdown.contains("## Current state"))
+    #expect(!updated.markdown.hasPrefix("**Mail**"))
 }
 
 @MainActor

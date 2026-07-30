@@ -572,9 +572,9 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     let settings = CGRect(x: 100, y: 80, width: 724, height: 670)
     let layout = PermissionGuidanceLayout(settingsFrame: settings)
 
-    #expect(layout.placement == .embedded)
-    #expect(layout.listFrame == CGRect(x: 344, y: 338, width: 460, height: 300))
-    #expect(layout.guideFrame == CGRect(x: 344, y: 158, width: 460, height: 172))
+    #expect(layout.placement == .belowWindow)
+    #expect(layout.listFrame == CGRect(x: 344, y: 82, width: 460, height: 556))
+    #expect(layout.guideFrame == CGRect(x: 344, y: -50, width: 460, height: 124))
 }
 
 @Test func permissionGuidanceLayoutTracksWindowMovementAndResize() {
@@ -589,16 +589,16 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(moved.listFrame.minY - original.listFrame.minY == 30)
     #expect(moved.listFrame.width - original.listFrame.width == 100)
     #expect(moved.listFrame.height - original.listFrame.height == 50)
-    #expect(moved.guideFrame.origin == CGPoint(x: 384, y: 188))
+    #expect(moved.guideFrame.origin == CGPoint(x: 384, y: -20))
 }
 
-@Test func permissionGuidanceLayoutFallsBackBelowCompactWindow() {
+@Test func permissionGuidanceLayoutKeepsGuideBelowCompactWindow() {
     let settings = CGRect(x: 50, y: 300, width: 600, height: 500)
     let layout = PermissionGuidanceLayout(settingsFrame: settings)
 
     #expect(layout.placement == .belowWindow)
-    #expect(layout.listFrame == CGRect(x: 294, y: 320, width: 336, height: 368))
-    #expect(layout.guideFrame == CGRect(x: 294, y: 120, width: 336, height: 172))
+    #expect(layout.listFrame == CGRect(x: 294, y: 302, width: 336, height: 386))
+    #expect(layout.guideFrame == CGRect(x: 294, y: 170, width: 336, height: 124))
 }
 
 @Test func permissionGuidanceLayoutIntersectsMultipleDisplays() {

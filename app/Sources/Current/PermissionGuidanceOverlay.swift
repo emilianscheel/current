@@ -176,14 +176,9 @@ final class PermissionGuidanceOverlayController {
                 of: layout.listFrame,
                 in: screen.frame
             )
-            let guideFrame = PermissionGuidanceLayout.localIntersection(
-                of: clampedGuideFrame,
-                in: screen.frame
-            )
             blurPanel.update(
                 screenFrame: screen.frame,
-                listFrame: listFrame,
-                guideFrame: guideFrame
+                listFrame: listFrame
             )
             if !blurPanel.panel.isVisible {
                 blurPanel.panel.orderFrontRegardless()
@@ -213,7 +208,7 @@ final class PermissionGuidanceOverlayController {
     private func ensureGuidePanel() {
         guard guidePanel == nil, let model else { return }
         let panel = PermissionGuidePanel(
-            contentRect: CGRect(x: 0, y: 0, width: 460, height: 172)
+            contentRect: CGRect(x: 0, y: 0, width: 460, height: 124)
         )
         panel.level = .statusBar
         panel.isOpaque = false
@@ -409,11 +404,10 @@ private final class PermissionBlurPanel {
 
     func update(
         screenFrame: CGRect,
-        listFrame: CGRect?,
-        guideFrame: CGRect?
+        listFrame: CGRect?
     ) {
         panel.setFrame(screenFrame, display: false)
-        focusView.update(listFrame: listFrame, guideFrame: guideFrame)
+        focusView.update(listFrame: listFrame)
     }
 }
 
@@ -431,8 +425,8 @@ private final class PermissionFocusView: NSView {
         effectView.state = .active
         addSubview(effectView)
         layer?.addSublayer(outlineLayer)
-        outlineLayer.fillColor = NSColor.systemBlue.withAlphaComponent(0.08).cgColor
-        outlineLayer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.9).cgColor
+        outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
+        outlineLayer.strokeColor = NSColor.black.withAlphaComponent(0.78).cgColor
         outlineLayer.lineWidth = 2
         outlineLayer.lineDashPattern = [6, 6]
     }
@@ -444,8 +438,8 @@ private final class PermissionFocusView: NSView {
         outlineLayer.frame = bounds
     }
 
-    func update(listFrame: CGRect?, guideFrame: CGRect?) {
-        let holes = [listFrame, guideFrame].compactMap { $0 }
+    func update(listFrame: CGRect?) {
+        let holes = [listFrame].compactMap { $0 }
         effectView.maskImage = maskImage(cuttingOut: holes)
         if let listFrame {
             outlineLayer.path = CGPath(
@@ -486,23 +480,18 @@ private struct PermissionGuidanceView: View {
         VStack(spacing: 6) {
             Image(systemName: model.dropAccepted ? "checkmark" : "arrow.up")
                 .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.blue)
+                .foregroundStyle(.black)
             Text(
                 model.dropAccepted
                     ? "Now turn on Current in the list"
                     : "Drag and drop this row into the list"
             )
             .font(.headline)
-            .foregroundStyle(.blue)
-            if !model.dropAccepted {
-                Text("Already listed? Turn Current on.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            .foregroundStyle(.black)
             applicationRow
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(.white.opacity(0.97), in: .rect(cornerRadius: 18))
         .overlay {
             RoundedRectangle(cornerRadius: 18)
@@ -542,7 +531,7 @@ private struct PermissionGuidanceView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 13)
                 .stroke(
-                    .blue,
+                    .black,
                     style: StrokeStyle(lineWidth: 2, dash: [6, 5])
                 )
         }

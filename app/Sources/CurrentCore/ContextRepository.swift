@@ -173,7 +173,9 @@ public actor ContextRepository {
             }
             sections.append(.init(
                 kind: kind,
-                title: document.customDisplayName ?? "Standing context",
+                title: role == .aboutMe
+                    ? PromptGenerationPolicy.aboutMeSectionTitle
+                    : document.customDisplayName ?? "Standing context",
                 content: document.markdown
             ))
         }

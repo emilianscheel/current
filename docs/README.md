@@ -137,7 +137,6 @@ app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion test
 app/assemble-app.sh              Shared test, optimized build, assembly, and signing workflow
 app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
 app/release.sh                   Developer ID signing, notarization, tag, and GitHub release workflow
-.githooks/pre-push               Guard against bypassing the verified release workflow
 ```
 
 ## Build, install, and restart
@@ -274,7 +273,7 @@ Development builds are intentionally different: the installed local app uses a s
      --password "APP-SPECIFIC-PASSWORD"
    ```
 
-4. Enable the tracked Git hook and validate all prerequisites:
+4. Validate all release prerequisites:
 
    ```sh
    ./app/release.sh --setup
@@ -292,6 +291,6 @@ First push `main`, ensure the worktree is clean, and run:
 
 The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
 
-Direct `vX.Y.Z` pushes are rejected by `.githooks/pre-push`; use `app/release.sh` so a tag cannot bypass signing and notarization. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
+Use `app/release.sh` rather than creating or pushing release tags manually. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
 
 Every release uses the asset name `Current.dmg`, so the website and README keep using GitHub's permanent latest-release URL.

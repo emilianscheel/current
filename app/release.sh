@@ -59,13 +59,6 @@ setup_release_environment() {
   local failed keychain identity_count
   failed=false
 
-  git config core.hooksPath .githooks
-  print "Configured this repository to use the tracked .githooks directory."
-  if [[ ! -x "$REPO_DIR/.githooks/pre-push" ]]; then
-    print -u2 "The tracked pre-push hook is missing or not executable."
-    failed=true
-  fi
-
   keychain="$(default_keychain)"
   if [[ -z "$keychain" || "$keychain" != /* ]]; then
     print -u2 "Could not resolve the default user Keychain."
@@ -126,7 +119,6 @@ OS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 [[ "$(git rev-parse --show-toplevel)" == "$REPO_DIR" ]] || die "release.sh must run inside the Current repository."
 [[ "$(git branch --show-current)" == "main" ]] || die "Releases must be built from the main branch."
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die "The worktree must be clean before releasing."
-[[ "$(git config --get core.hooksPath || true)" == ".githooks" ]] || die "The tracked Git hooks are not enabled. Run ./app/release.sh --setup."
 gh auth status --hostname github.com >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run ./app/release.sh --setup."
 
 print "Fetching origin/main and release tags…"
@@ -263,8 +255,7 @@ if ! $LOCAL_TAG_EXISTS; then
 fi
 if [[ -z "$REMOTE_TAG_OBJECT" ]]; then
   print "Pushing annotated tag $TAG…"
-  CURRENT_RELEASE_TAG="$TAG" CURRENT_RELEASE_COMMIT="$HEAD_COMMIT" \
-    git push "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG"
+  git push "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG"
 fi
 VERIFIED_REMOTE_COMMIT="$(git ls-remote "$REMOTE" "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')"
 [[ "$VERIFIED_REMOTE_COMMIT" == "$HEAD_COMMIT" ]] || die "GitHub does not resolve $TAG to the expected commit."

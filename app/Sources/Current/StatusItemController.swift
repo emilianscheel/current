@@ -48,7 +48,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             captureTitle,
             to: menu,
             action: #selector(toggleCapture),
-            symbol: runtime.coordinator.phase == .recording ? "stop.circle" : "waveform",
+            symbol: runtime.coordinator.phase == .recording ? "stop" : "waveform",
             enabled: !runtime.inputMonitoringRestartRequired
         )
         add(
@@ -72,8 +72,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbol: "arrow.uturn.backward",
             enabled: runtime.coordinator.insertion.canUndoLastInsertion
         )
-        add("Context…", to: menu, action: #selector(openContext), symbol: "doc.text.magnifyingglass")
-        add("Usage Statistics…", to: menu, action: #selector(openUsageStatistics), symbol: "chart.bar")
+        add(
+            "Context…", to: menu, action: #selector(openContext), symbol: "doc.text.magnifyingglass"
+        )
+        add(
+            "Usage Statistics…", to: menu, action: #selector(openUsageStatistics),
+            symbol: "chart.bar")
         if let onboardingTitle {
             add(
                 onboardingTitle,
@@ -98,8 +102,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             to: menu,
             action: #selector(toggleContextWorker),
             symbol: runtime.settings.contextWorkerEnabled
-                ? "stop.circle"
-                : "checkmark.circle"
+                ? "stop"
+                : "checkmark"
         )
         addModel(
             "Parakeet TDT v3 Multilingual",
@@ -125,7 +129,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return "Stop and Transcribe"
         }
         if !runtime.settings.isEnabled
-            || runtime.coordinator.phase == .paused {
+            || runtime.coordinator.phase == .paused
+        {
             return "Resume and Start Dictation"
         }
         return "Start Dictation"
@@ -170,7 +175,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusOverride: String? = nil,
         to menu: NSMenu
     ) {
-        let status = statusOverride
+        let status =
+            statusOverride
             ?? MenuBarPresentation.modelStatusTitle(for: state)
         let subtitle = "\(category) · \(status)"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
@@ -213,7 +219,8 @@ private final class ModelMenuItemView: NSView {
             titleLabel.intrinsicContentSize.width,
             subtitleLabel.intrinsicContentSize.width
         )
-        let contentHeight = titleLabel.intrinsicContentSize.height
+        let contentHeight =
+            titleLabel.intrinsicContentSize.height
             + Self.lineSpacing
             + subtitleLabel.intrinsicContentSize.height
 
@@ -234,12 +241,17 @@ private final class ModelMenuItemView: NSView {
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalPadding),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalPadding),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: Self.lineSpacing),
+            titleLabel.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: Self.horizontalPadding),
+            titleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
+            subtitleLabel.topAnchor.constraint(
+                equalTo: titleLabel.bottomAnchor, constant: Self.lineSpacing),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
-            subtitleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalPadding),
+            subtitleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
+            subtitleLabel.bottomAnchor.constraint(
+                equalTo: bottomAnchor, constant: -Self.verticalPadding),
         ])
     }
 

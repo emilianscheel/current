@@ -26,6 +26,17 @@ public enum DictationPhase: String, Sendable, Codable, CaseIterable {
 public enum MenuBarPresentation {
     public static func symbol(for _: DictationPhase) -> String { "alternatingcurrent" }
 
+    package static func modelStatusTitle(for state: ModelState) -> String {
+        switch state {
+        case .notInstalled: "Preparing…"
+        case .downloading: "Downloading…"
+        case .verifying: "Verifying…"
+        case .loading: "Loading…"
+        case .ready: "Ready"
+        case .failed: "Error"
+        }
+    }
+
     package static func onboardingActionTitle(
         completed: Bool,
         permissions: PermissionSnapshot

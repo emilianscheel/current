@@ -648,6 +648,21 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     }
 }
 
+@Test func menuBarModelStatusTitlesCoverEveryState() {
+    let states: [(ModelState, String)] = [
+        (.notInstalled, "Preparing…"),
+        (.downloading(progress: 0.5), "Downloading…"),
+        (.verifying, "Verifying…"),
+        (.loading, "Loading…"),
+        (.ready, "Ready"),
+        (.failed("Download failed"), "Error"),
+    ]
+
+    for (state, expectedTitle) in states {
+        #expect(MenuBarPresentation.modelStatusTitle(for: state) == expectedTitle)
+    }
+}
+
 @Test func menuBarShowsOnboardingWhileOnboardingIsIncomplete() {
     let permissions = PermissionSnapshot(
         microphone: .granted,

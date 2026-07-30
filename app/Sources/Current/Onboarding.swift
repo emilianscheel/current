@@ -11,9 +11,14 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var pollTask: Task<Void, Never>?
     @ObservationIgnored private lazy var permissionGuidance =
-        PermissionGuidanceOverlayController { [unowned self] in
-            self.runtime.permissions.snapshot()
-        }
+        PermissionGuidanceOverlayController(
+            permissionSnapshot: { [unowned self] in
+                self.runtime.permissions.snapshot()
+            },
+            dropAccepted: { [unowned self] in
+                self.focusAfterPermissionDrop()
+            }
+        )
     var step: OnboardingStep
     var permissions = PermissionSnapshot()
     var practiceText = ""
@@ -141,6 +146,13 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         pollTask?.cancel()
         pollTask = nil
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
+    }
+
+    private func focusAfterPermissionDrop() {
+        refreshPermissions()
+        guard window?.isVisible == true else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     private func setStep(_ step: OnboardingStep) {

@@ -29,6 +29,7 @@ final class PermissionGuidanceOverlayController {
     }
 
     private let permissionSnapshot: () -> PermissionSnapshot
+    private let dropAccepted: () -> Void
     private var kind: PermissionKind?
     private var trackingTask: Task<Void, Never>?
     private var blurPanels: [CGDirectDisplayID: PermissionBlurPanel] = [:]
@@ -44,8 +45,12 @@ final class PermissionGuidanceOverlayController {
     private var globalKeyMonitor: Any?
     private var screenObserver: NSObjectProtocol?
 
-    init(permissionSnapshot: @escaping () -> PermissionSnapshot) {
+    init(
+        permissionSnapshot: @escaping () -> PermissionSnapshot,
+        dropAccepted: @escaping () -> Void
+    ) {
         self.permissionSnapshot = permissionSnapshot
+        self.dropAccepted = dropAccepted
     }
 
     func present(for kind: PermissionKind) {
@@ -109,7 +114,26 @@ final class PermissionGuidanceOverlayController {
         while !Task.isCancelled {
             guard let kind else { return }
             if permissionSnapshot()[kind].isGranted {
-                dismiss()
+                if model?.dropAccepted == true {
+                    let windows = Self.visibleWindows()
+                    if let observation = systemSettingsWindow(in: windows) {
+                        let authenticationWindows = Self.authenticationWindows(
+                            in: windows,
+                            systemSettings: observation
+                        )
+                        if !authenticationWindows.isEmpty {
+                            updatePanels(
+                                for: observation,
+                                authenticationWindows: authenticationWindows
+                            )
+                            try? await Task.sleep(for: .milliseconds(100))
+                            continue
+                        }
+                    }
+                    finishAcceptedDrop()
+                } else {
+                    dismiss()
+                }
                 return
             }
 
@@ -301,7 +325,8 @@ final class PermissionGuidanceOverlayController {
         let hostingView = NSHostingView(
             rootView: PermissionGuidanceView(
                 model: model,
-                dismiss: { [weak self] in self?.dismiss() }
+                dismiss: { [weak self] in self?.dismiss() },
+                accepted: { [weak self] in self?.handleAcceptedDrop() }
             )
         )
         hostingView.sizingOptions = []
@@ -327,6 +352,56 @@ final class PermissionGuidanceOverlayController {
     private func hidePanelsForFocusLoss() {
         blurPanels.values.forEach { $0.hide() }
         guidePanel?.orderOut(nil)
+    }
+
+    private func handleAcceptedDrop() {
+        guard model?.dropAccepted != true else { return }
+        model?.dropAccepted = true
+    }
+
+    private func finishAcceptedDrop() {
+        let settingsApplication = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.systempreferences"
+        ).first
+        let settingsProcessIdentifier = settingsApplication?.processIdentifier
+        dismiss()
+        if let settingsProcessIdentifier {
+            _ = Self.closeSystemSettingsWindow(
+                processIdentifier: settingsProcessIdentifier
+            )
+        }
+        dropAccepted()
+    }
+
+    private static func closeSystemSettingsWindow(
+        processIdentifier: pid_t
+    ) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXWindowsAttribute as CFString,
+            &windowsValue
+        ) == .success,
+              let window = (windowsValue as? [AXUIElement])?.first else {
+            return false
+        }
+
+        var closeButtonValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXCloseButtonAttribute as CFString,
+            &closeButtonValue
+        ) == .success,
+              let closeButtonValue else {
+            return false
+        }
+        let closeButton = closeButtonValue as! AXUIElement
+        return AXUIElementPerformAction(
+            closeButton,
+            kAXPressAction as CFString
+        ) == .success
     }
 
     private func makeModel() -> PermissionGuidanceModel {
@@ -674,6 +749,7 @@ private final class PermissionFocusView: NSView {
 private struct PermissionGuidanceView: View {
     @Bindable var model: PermissionGuidanceModel
     let dismiss: () -> Void
+    let accepted: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -743,7 +819,7 @@ private struct PermissionGuidanceView: View {
                     applicationURL: applicationURL,
                     applicationIcon: model.applicationIcon
                 ) {
-                    model.dropAccepted = true
+                    accepted()
                 }
             }
         }

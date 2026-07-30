@@ -5,6 +5,13 @@ import Observation
 @MainActor
 @Observable
 public final class DictationCoordinator {
+    private struct PendingPromptBypass {
+        let session: DictationSession
+        let rawText: String
+        let context: DictationContext
+        let captureTarget: ContextCaptureTarget?
+    }
+
     public private(set) var phase: DictationPhase = .idle
     public private(set) var currentSession: DictationSession?
     public private(set) var lastTranscription = ""
@@ -29,6 +36,8 @@ public final class DictationCoordinator {
     public var onMonitoringChange: ((Bool) -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
     private var transcriptProcessingTask: Task<Void, Never>?
+    private var processingGeneration = UUID()
+    private var pendingPromptBypass: PendingPromptBypass?
 
     public init(
         settings: SettingsStore = .shared,
@@ -55,6 +64,11 @@ public final class DictationCoordinator {
         self.audio.selectedDeviceID = settings.inputDeviceID
         shortcut.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in self?.handleShortcut(event) }
+        }
+        shortcut.onReturnKeyDown = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.insertRawTranscriptionIfPending()
+            }
         }
     }
 
@@ -141,6 +155,8 @@ public final class DictationCoordinator {
     public func cancel() {
         guard currentSession != nil else { return }
         let sessionID = currentSession?.id
+        processingGeneration = UUID()
+        clearPromptBypass()
         maximumDurationTask?.cancel()
         transcriptProcessingTask?.cancel()
         transcriptProcessingTask = nil
@@ -181,6 +197,8 @@ public final class DictationCoordinator {
             return
         }
         do {
+            processingGeneration = UUID()
+            clearPromptBypass()
             let session = DictationSession()
             if phase != .armed { insertion.captureTarget() }
             currentSession = session
@@ -228,6 +246,9 @@ public final class DictationCoordinator {
         let context = insertion.currentContext
         let captureTarget = insertion.contextCaptureTarget
         let vocabularyEntries = vocabulary.entries
+        let generation = UUID()
+        processingGeneration = generation
+        clearPromptBypass()
         transcriptProcessingTask?.cancel()
         transcriptProcessingTask = Task {
             [weak self, transcription = model.transcription] in
@@ -243,11 +264,20 @@ public final class DictationCoordinator {
                     ),
                     sessionID: session.id
                 )
-                guard self.currentSession?.id == session.id else { return }
+                guard self.isCurrent(sessionID: session.id, generation: generation) else {
+                    return
+                }
                 let text: String
                 switch decision.intent {
                 case .prompt:
                     let envelope: PromptContextEnvelope
+                    self.pendingPromptBypass = PendingPromptBypass(
+                        session: session,
+                        rawText: rawText,
+                        context: context,
+                        captureTarget: captureTarget
+                    )
+                    self.shortcut.setReturnInterceptionEnabled(true)
                     self.setPhase(.gatheringContext)
                     if let preparer = self.promptContextPreparer {
                         envelope = try await preparer.prepare(
@@ -257,12 +287,13 @@ public final class DictationCoordinator {
                             continuousContextEnabled:
                                 self.settings.continuousContextEnabled
                         )
-                    } else if self.settings.continuousContextEnabled,
-                              let contextRepository = self.contextRepository {
+                    } else if let contextRepository = self.contextRepository {
                         envelope = await contextRepository.promptContext(
                             instruction: rawText,
                             focusedContext: context,
-                            target: captureTarget
+                            target: captureTarget,
+                            includeApplicationContext:
+                                self.settings.continuousContextEnabled
                         )
                     } else {
                         envelope = PromptContextEnvelope(
@@ -271,11 +302,27 @@ public final class DictationCoordinator {
                             sections: []
                         )
                     }
+                    if self.shortcut.consumeReturnInterceptionRequest() {
+                        self.insertRawTranscriptionIfPending()
+                        return
+                    }
                     try Task.checkCancellation()
-                    guard self.currentSession?.id == session.id else { return }
+                    guard self.isCurrent(
+                        sessionID: session.id,
+                        generation: generation
+                    ) else { return }
                     self.setPhase(.generating)
                     let disposition = try await self.intelligence
                         .generatePromptDisposition(envelope)
+                    if self.shortcut.consumeReturnInterceptionRequest() {
+                        self.insertRawTranscriptionIfPending()
+                        return
+                    }
+                    try Task.checkCancellation()
+                    guard self.isCurrent(
+                        sessionID: session.id,
+                        generation: generation
+                    ) else { return }
                     switch disposition {
                     case let .generated(response):
                         text = response.text
@@ -283,6 +330,7 @@ public final class DictationCoordinator {
                         throw CurrentError.insufficientPromptContext
                     }
                 case .direct:
+                    self.clearPromptBypass()
                     let deterministic = DeterministicRefiner.refine(
                         rawText,
                         context: context,
@@ -298,7 +346,9 @@ public final class DictationCoordinator {
                         "The local models were uncertain."
                     )
                 }
-                guard self.currentSession?.id == session.id else { return }
+                guard self.isCurrent(sessionID: session.id, generation: generation) else {
+                    return
+                }
                 if decision.intent == .direct,
                    let selection = context.selectedText,
                    let learned = Self.learnedCorrection(
@@ -310,6 +360,7 @@ public final class DictationCoordinator {
                         writtenForm: learned.written
                     )
                 }
+                self.clearPromptBypass()
                 self.setPhase(.inserting)
                 let targetProcessIdentifier = self.insertion.targetApplicationPresentation?.processIdentifier
                 let result = try await self.insertion.insert(
@@ -317,29 +368,28 @@ public final class DictationCoordinator {
                     context: context,
                     restoreClipboard: true
                 )
-                guard self.currentSession?.id == session.id else { return }
-                self.lastTranscription = text
-                self.partialTranscription = ""
-                self.onPartialTranscriptionChange?("")
-                self.onTranscriptionCompleted?(Date())
-                if Self.shouldRecordContext(
+                guard self.isCurrent(sessionID: session.id, generation: generation) else {
+                    return
+                }
+                self.completeInsertion(
+                    text: text,
+                    session: session,
+                    captureTarget: captureTarget,
                     targetProcessIdentifier: targetProcessIdentifier,
-                    currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
-                ) {
-                    self.onSuccessfulTranscription?(text, session.startedAt)
-                }
-                if result != .copied, let captureTarget {
-                    self.onTextCommitted?(captureTarget)
-                }
-                self.currentSession = nil
-                self.transcriptProcessingTask = nil
-                if result == .copied { self.errorMessage = "Copied — paste manually." }
-                self.setPhase(result == .copied ? .error : .success)
-                self.scheduleIdle()
+                    result: result
+                )
             } catch is CancellationError {
                 return
             } catch {
-                guard let self, self.currentSession?.id == session.id else { return }
+                guard let self,
+                      self.isCurrent(
+                          sessionID: session.id,
+                          generation: generation
+                      ) else { return }
+                if self.shortcut.consumeReturnInterceptionRequest(),
+                   self.insertRawTranscriptionIfPending() {
+                    return
+                }
                 self.currentSession = nil
                 self.transcriptProcessingTask = nil
                 self.fail(error)
@@ -347,8 +397,95 @@ public final class DictationCoordinator {
         }
     }
 
+    @discardableResult
+    public func insertRawTranscriptionIfPending() -> Bool {
+        guard let pendingPromptBypass,
+              phase == .gatheringContext || phase == .generating,
+              currentSession?.id == pendingPromptBypass.session.id else {
+            return false
+        }
+        let generation = UUID()
+        processingGeneration = generation
+        clearPromptBypass()
+        transcriptProcessingTask?.cancel()
+        setPhase(.inserting)
+        let targetProcessIdentifier = insertion.targetApplicationPresentation?
+            .processIdentifier
+        transcriptProcessingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.insertion.insert(
+                    pendingPromptBypass.rawText,
+                    context: pendingPromptBypass.context,
+                    restoreClipboard: true
+                )
+                guard self.isCurrent(
+                    sessionID: pendingPromptBypass.session.id,
+                    generation: generation
+                ) else { return }
+                self.completeInsertion(
+                    text: pendingPromptBypass.rawText,
+                    session: pendingPromptBypass.session,
+                    captureTarget: pendingPromptBypass.captureTarget,
+                    targetProcessIdentifier: targetProcessIdentifier,
+                    result: result
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrent(
+                    sessionID: pendingPromptBypass.session.id,
+                    generation: generation
+                ) else { return }
+                self.currentSession = nil
+                self.transcriptProcessingTask = nil
+                self.fail(error)
+            }
+        }
+        return true
+    }
+
+    private func isCurrent(sessionID: UUID, generation: UUID) -> Bool {
+        currentSession?.id == sessionID && processingGeneration == generation
+    }
+
+    private func clearPromptBypass() {
+        pendingPromptBypass = nil
+        shortcut.clearReturnInterception()
+    }
+
+    private func completeInsertion(
+        text: String,
+        session: DictationSession,
+        captureTarget: ContextCaptureTarget?,
+        targetProcessIdentifier: pid_t?,
+        result: InsertionService.Result
+    ) {
+        clearPromptBypass()
+        lastTranscription = text
+        partialTranscription = ""
+        onPartialTranscriptionChange?("")
+        onTranscriptionCompleted?(Date())
+        if Self.shouldRecordContext(
+            targetProcessIdentifier: targetProcessIdentifier,
+            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+        ) {
+            onSuccessfulTranscription?(text, session.startedAt)
+        }
+        if result != .copied, let captureTarget {
+            onTextCommitted?(captureTarget)
+        }
+        currentSession = nil
+        transcriptProcessingTask = nil
+        if result == .copied { errorMessage = "Copied — paste manually." }
+        setPhase(result == .copied ? .error : .success)
+        scheduleIdle()
+    }
+
     private func fail(_ error: Error) {
         let sessionID = currentSession?.id
+        processingGeneration = UUID()
+        clearPromptBypass()
         audio.cancel()
         partialTranscription = ""
         onPartialTranscriptionChange?("")

@@ -19,10 +19,11 @@ public actor LivePromptContextPreparer: PromptContextPreparing {
         continuousContextEnabled: Bool
     ) async throws -> PromptContextEnvelope {
         guard continuousContextEnabled, let target else {
-            return PromptContextEnvelope(
+            return await repository.promptContext(
                 instruction: instruction,
                 focusedContext: focusedContext,
-                sections: []
+                target: target,
+                includeApplicationContext: false
             )
         }
         let fresh = try await screenContext.refreshForPrompt(target: target)

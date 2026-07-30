@@ -50,6 +50,32 @@ import Testing
     #expect(machine.escape() == .cancelled)
 }
 
+@Test func returnInterceptionIsUnmodifiedAndOneShot() {
+    var state = ReturnInterceptionState()
+    state.setEnabled(true)
+
+    let modifiedReturn = state.consumeKeyDown(
+        keyCode: 36,
+        flags: .maskCommand
+    )
+    let firstReturn = state.consumeKeyDown(keyCode: 36, flags: [])
+    let repeatedReturn = state.consumeKeyDown(keyCode: 36, flags: [])
+    let firstRequest = state.consumeRequest()
+    let repeatedRequest = state.consumeRequest()
+    #expect(!modifiedReturn)
+    #expect(firstReturn)
+    #expect(!repeatedReturn)
+    #expect(firstRequest)
+    #expect(!repeatedRequest)
+
+    state.setEnabled(true)
+    let keypadEnter = state.consumeKeyDown(keyCode: 76, flags: [])
+    #expect(keypadEnter)
+    state.clear()
+    let clearedRequest = state.consumeRequest()
+    #expect(!clearedRequest)
+}
+
 @MainActor
 @Test func explicitMenuCaptureResumesPausedCurrent() {
     let suiteName = "CurrentMenuCaptureTests.\(UUID().uuidString)"
@@ -780,7 +806,14 @@ private func contextTestDate(
     try store.append("Second conversation", at: afternoon)
     try store.append("Tomorrow's context", at: tomorrow)
 
-    #expect(store.documents.map(\.id) == ["2026-07-25", "2026-07-24"])
+    #expect(
+        store.documents.map(\.id) == [
+            ContextStore.aboutMeDocumentID,
+            ContextStore.instructionsDocumentID,
+            "2026-07-25",
+            "2026-07-24",
+        ]
+    )
     let firstDay = try #require(store.document(id: "2026-07-24"))
     #expect(firstDay.markdown.contains("09:05 h"))
     #expect(firstDay.markdown.contains("15:30 h"))
@@ -874,7 +907,7 @@ private func contextTestDate(
 
     let expected = berlin.dateComponents([.year, .month, .day], from: instant)
     let expectedID = String(format: "%04d-%02d-%02d", expected.year!, expected.month!, expected.day!)
-    #expect(store.documents.first?.id == expectedID)
+    #expect(store.document(id: expectedID) != nil)
 }
 
 @MainActor
@@ -895,7 +928,12 @@ private func contextTestDate(
     #expect(store.document(id: document.id)?.markdown.contains("Saved atomically") == true)
 
     try store.moveToTrash(documentID: document.id)
-    #expect(store.documents.isEmpty)
+    #expect(
+        store.documents.map(\.id) == [
+            ContextStore.aboutMeDocumentID,
+            ContextStore.instructionsDocumentID,
+        ]
+    )
     #expect(!FileManager.default.fileExists(atPath: document.url.path))
 
     try store.append("Recreated", at: date)

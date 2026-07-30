@@ -401,7 +401,8 @@ private struct PhaseActivity: View {
     private var kind: ActivityKind {
         switch phase {
         case .armed, .recording: .recording
-        case .transcribing, .inserting: .processing
+        case .transcribing, .classifying, .gatheringContext, .generating,
+             .inserting: .processing
         case .success: .success
         case .cancelled: .cancelled
         case .error: .error

@@ -50,8 +50,52 @@ public struct ShortcutStateMachine: Sendable {
     }
 }
 
+struct ReturnInterceptionState: Sendable {
+    private(set) var isEnabled = false
+    private(set) var wasRequested = false
+
+    mutating func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        if enabled { wasRequested = false }
+    }
+
+    mutating func consumeKeyDown(
+        keyCode: Int64,
+        flags: CGEventFlags
+    ) -> Bool {
+        guard isEnabled,
+              keyCode == 36 || keyCode == 76,
+              Self.hasNoCommandModifiers(flags) else { return false }
+        isEnabled = false
+        wasRequested = true
+        return true
+    }
+
+    mutating func consumeRequest() -> Bool {
+        guard wasRequested else { return false }
+        wasRequested = false
+        return true
+    }
+
+    mutating func clear() {
+        isEnabled = false
+        wasRequested = false
+    }
+
+    private static func hasNoCommandModifiers(_ flags: CGEventFlags) -> Bool {
+        let commandModifiers: CGEventFlags = [
+            .maskCommand,
+            .maskControl,
+            .maskAlternate,
+            .maskShift,
+        ]
+        return flags.intersection(commandModifiers).isEmpty
+    }
+}
+
 public final class ShortcutMonitor: @unchecked Sendable {
     public var onEvent: (@Sendable (ShortcutEvent) -> Void)?
+    public var onReturnKeyDown: (@Sendable () -> Void)?
     public var onKeyboardActivity: (@Sendable () -> Void)?
     public var onUserActivity: (@Sendable (ContextActivityKind) -> Void)?
     public var holdThreshold: Duration = .milliseconds(180)
@@ -63,9 +107,22 @@ public final class ShortcutMonitor: @unchecked Sendable {
     private var state = ShortcutStateMachine()
     private var thresholdTask: Task<Void, Never>?
     private var fallbackIsDown = false
+    private var returnInterception = ReturnInterceptionState()
     private var lastPointerActivity = Date.distantPast
 
     public init() {}
+
+    public func setReturnInterceptionEnabled(_ enabled: Bool) {
+        lock.withLock { returnInterception.setEnabled(enabled) }
+    }
+
+    public func consumeReturnInterceptionRequest() -> Bool {
+        lock.withLock { returnInterception.consumeRequest() }
+    }
+
+    public func clearReturnInterception() {
+        lock.withLock { returnInterception.clear() }
+    }
 
     public func start() throws {
         guard eventTap == nil else { return }
@@ -109,6 +166,7 @@ public final class ShortcutMonitor: @unchecked Sendable {
         lock.withLock {
             state = ShortcutStateMachine()
             fallbackIsDown = false
+            returnInterception.clear()
             lastPointerActivity = .distantPast
         }
     }
@@ -119,6 +177,18 @@ public final class ShortcutMonitor: @unchecked Sendable {
             return false
         }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == .keyDown {
+            let shouldIntercept = lock.withLock {
+                returnInterception.consumeKeyDown(
+                    keyCode: keyCode,
+                    flags: event.flags
+                )
+            }
+            if shouldIntercept {
+                onReturnKeyDown?()
+                return true
+            }
+        }
         if type == .keyDown, keyCode == 49, matchesFallback(event.flags) {
             let shouldStart = lock.withLock { () -> Bool in
                 guard !fallbackIsDown else { return false }

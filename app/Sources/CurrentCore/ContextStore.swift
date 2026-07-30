@@ -4,6 +4,34 @@ import Observation
 public enum ContextDocumentKind: Sendable, Equatable {
     case dailyDictation
     case appSession(AppSessionMetadata)
+    case manual(ManualContextDocumentMetadata)
+}
+
+public enum ManualContextDocumentRole: String, Codable, Sendable, Equatable {
+    case aboutMe
+    case instructions
+    case custom
+}
+
+public struct ManualContextDocumentMetadata: Codable, Sendable, Equatable {
+    public let id: String
+    public var title: String
+    public let createdAt: Date
+    public let role: ManualContextDocumentRole
+
+    public init(
+        id: String,
+        title: String,
+        createdAt: Date,
+        role: ManualContextDocumentRole
+    ) {
+        self.id = id
+        self.title = title
+        self.createdAt = createdAt
+        self.role = role
+    }
+
+    public var isProtected: Bool { role != .custom }
 }
 
 public struct ContextDocument: Identifiable, Sendable, Equatable {
@@ -41,6 +69,15 @@ public struct ContextDocument: Identifiable, Sendable, Equatable {
         guard case .appSession(let metadata) = kind else { return nil }
         return metadata
     }
+
+    public var manualMetadata: ManualContextDocumentMetadata? {
+        guard case .manual(let metadata) = kind else { return nil }
+        return metadata
+    }
+
+    public var isProtected: Bool {
+        manualMetadata?.isProtected == true
+    }
 }
 
 @MainActor
@@ -53,20 +90,23 @@ public final class ContextStore {
     }
 
     private struct DocumentMetadataFile: Codable {
-        var version = 2
+        var version = 3
         var aliases: [String: String] = [:]
         var appSessions: [String: PersistedAppSession] = [:]
+        var manualDocuments: [String: ManualContextDocumentMetadata] = [:]
 
         private enum CodingKeys: String, CodingKey {
-            case version, aliases, appSessions
+            case version, aliases, appSessions, manualDocuments
         }
 
         init(
             aliases: [String: String] = [:],
-            appSessions: [String: PersistedAppSession] = [:]
+            appSessions: [String: PersistedAppSession] = [:],
+            manualDocuments: [String: ManualContextDocumentMetadata] = [:]
         ) {
             self.aliases = aliases
             self.appSessions = appSessions
+            self.manualDocuments = manualDocuments
         }
 
         init(from decoder: Decoder) throws {
@@ -80,8 +120,15 @@ public final class ContextStore {
                 [String: PersistedAppSession].self,
                 forKey: .appSessions
             ) ?? [:]
+            manualDocuments = try container.decodeIfPresent(
+                [String: ManualContextDocumentMetadata].self,
+                forKey: .manualDocuments
+            ) ?? [:]
         }
     }
+
+    public static let aboutMeDocumentID = "manual:about-me"
+    public static let instructionsDocumentID = "manual:instructions"
 
     public private(set) var documents: [ContextDocument] = []
     public private(set) var lastError: String?
@@ -93,12 +140,16 @@ public final class ContextStore {
     public var appIconsDirectory: URL {
         directory.appendingPathComponent("App Icons", isDirectory: true)
     }
+    public var manualDocumentsDirectory: URL {
+        directory.appendingPathComponent("Documents", isDirectory: true)
+    }
     private var calendar: Calendar
     private let locale: Locale
     private let fileManager: FileManager
     private let trashHandler: ((URL) throws -> Void)?
     private var aliases: [String: String] = [:]
     private var persistedAppSessions: [String: PersistedAppSession] = [:]
+    private var persistedManualDocuments: [String: ManualContextDocumentMetadata] = [:]
     private var metadataURL: URL {
         directory.appendingPathComponent("Document Metadata.json")
     }
@@ -134,6 +185,8 @@ public final class ContextStore {
             let persistedMetadata = loadDocumentMetadata()
             aliases = persistedMetadata.aliases
             persistedAppSessions = persistedMetadata.appSessions
+            persistedManualDocuments = persistedMetadata.manualDocuments
+            try ensureBuiltInManualDocuments()
             let rootURLs = try fileManager.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -144,6 +197,11 @@ public final class ContextStore {
                 try migrateLegacyDocumentIfNeeded(at: url)
             }
             var loaded = try dailyURLs.compactMap(loadDailyDocument)
+            for metadata in persistedManualDocuments.values {
+                if let document = try loadManualDocument(metadata: metadata) {
+                    loaded.append(document)
+                }
+            }
             if fileManager.fileExists(atPath: appSessionsDirectory.path),
                let enumerator = fileManager.enumerator(
                    at: appSessionsDirectory,
@@ -157,10 +215,14 @@ public final class ContextStore {
                     }
                 }
             }
-            documents = loaded.sorted {
-                if $0.date != $1.date { return $0.date > $1.date }
-                return $0.modifiedAt > $1.modifiedAt
-            }
+            let sorted = chronologicallySorted(loaded)
+            let standingIDs = [
+                Self.aboutMeDocumentID,
+                Self.instructionsDocumentID,
+            ]
+            documents = standingIDs.compactMap { id in
+                sorted.first { $0.id == id }
+            } + sorted.filter { !standingIDs.contains($0.id) }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -214,6 +276,8 @@ public final class ContextStore {
         switch document.kind {
         case .dailyDictation:
             try write(markdown, to: document.url)
+        case .manual:
+            try write(markdown, to: document.url)
         case .appSession(let metadata):
             try writeAppSession(
                 metadata: metadata,
@@ -240,7 +304,7 @@ public final class ContextStore {
     public func filteredDocuments(matching query: String) -> [ContextDocument] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return documents }
-        return documents.filter { document in
+        return chronologicallySorted(documents.filter { document in
             displayTitle(for: document.date).localizedStandardContains(needle)
                 || document.id.localizedStandardContains(needle)
                 || document.customDisplayName?
@@ -250,18 +314,63 @@ public final class ContextStore {
                 || document.appSessionMetadata?.bundleIdentifier?
                     .localizedStandardContains(needle) == true
                 || document.markdown.localizedStandardContains(needle)
+        })
+    }
+
+    @discardableResult
+    public func createManualDocument(
+        title: String,
+        at date: Date = Date()
+    ) throws -> ContextDocument {
+        let normalized = try normalizedDisplayName(title)
+        try fileManager.createDirectory(
+            at: manualDocumentsDirectory,
+            withIntermediateDirectories: true
+        )
+        let id = "manual:\(UUID().uuidString.lowercased())"
+        let metadata = ManualContextDocumentMetadata(
+            id: id,
+            title: normalized,
+            createdAt: date,
+            role: .custom
+        )
+        let url = manualDocumentURL(for: metadata)
+        try write("", to: url)
+        persistedManualDocuments[id] = metadata
+        do {
+            try persistDocumentMetadata()
+        } catch {
+            try? fileManager.removeItem(at: url)
+            persistedManualDocuments.removeValue(forKey: id)
+            throw error
+        }
+        reload()
+        guard let document = document(id: id) else {
+            throw ContextStoreError.documentUnavailable
+        }
+        return document
+    }
+
+    public func standingPromptDocuments() -> [ContextDocument] {
+        [Self.instructionsDocumentID, Self.aboutMeDocumentID].compactMap {
+            document(id: $0)
         }
     }
 
     public func rename(documentID: String, displayName: String) throws {
-        guard documents.contains(where: { $0.id == documentID }) else {
+        guard let document = document(id: documentID) else {
             throw ContextStoreError.documentUnavailable
         }
-        let normalized = displayName
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty, normalized.count <= 120 else {
-            throw ContextStoreError.invalidDisplayName
+        let normalized = try normalizedDisplayName(displayName)
+        if case .manual(var metadata) = document.kind {
+            guard !metadata.isProtected else {
+                throw ContextStoreError.protectedDocument
+            }
+            metadata.title = normalized
+            persistedManualDocuments[documentID] = metadata
+            try persistDocumentMetadata()
+            reload()
+            return
         }
         aliases[documentID] = normalized
         try persistAliases()
@@ -271,6 +380,9 @@ public final class ContextStore {
     public func moveToTrash(documentID: String) throws {
         guard let document = documents.first(where: { $0.id == documentID }) else {
             throw ContextStoreError.documentUnavailable
+        }
+        guard !document.isProtected else {
+            throw ContextStoreError.protectedDocument
         }
         if let trashHandler {
             try trashHandler(document.url)
@@ -284,6 +396,10 @@ public final class ContextStore {
            persistedAppSessions.removeValue(
                forKey: metadata.sessionID.rawValue
            ) != nil {
+            try persistDocumentMetadata()
+        }
+        if case .manual = document.kind,
+           persistedManualDocuments.removeValue(forKey: documentID) != nil {
             try persistDocumentMetadata()
         }
         reload()
@@ -946,6 +1062,125 @@ public final class ContextStore {
             .joined(separator: "\n")
     }
 
+    private func ensureBuiltInManualDocuments() throws {
+        try fileManager.createDirectory(
+            at: manualDocumentsDirectory,
+            withIntermediateDirectories: true
+        )
+        let hardware = HardwareChecker().current()
+        let memory = ByteCountFormatter.string(
+            fromByteCount: Int64(clamping: hardware.memoryBytes),
+            countStyle: .memory
+        )
+        let fullName = NSFullUserName()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let aboutMe = """
+        - Name: \(fullName.isEmpty ? NSUserName() : fullName)
+        - Mac: \(hardware.modelName)
+        - Memory: \(memory)
+        - macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
+        """
+        let instructions = """
+        Current is a local macOS voice dictation and writing tool. When a spoken request is a prompt, generate only the final text that should be pasted into the active app.
+
+        - Follow the user's spoken instruction.
+        - Use About me and the available application context when relevant.
+        - Match the requested language, tone, and format.
+        - Preserve names, dates, numbers, URLs, and known facts.
+        - Do not mention the context, these instructions, or your reasoning.
+        - Do not invent missing facts.
+        """
+        var metadataChanged = false
+        for definition in [
+            (
+                id: Self.aboutMeDocumentID,
+                title: "About me",
+                role: ManualContextDocumentRole.aboutMe,
+                markdown: aboutMe
+            ),
+            (
+                id: Self.instructionsDocumentID,
+                title: "Instructions",
+                role: ManualContextDocumentRole.instructions,
+                markdown: instructions
+            ),
+        ] {
+            let existing = persistedManualDocuments[definition.id]
+            let metadata = ManualContextDocumentMetadata(
+                id: definition.id,
+                title: definition.title,
+                createdAt: existing?.createdAt ?? Date(),
+                role: definition.role
+            )
+            if existing != metadata {
+                persistedManualDocuments[definition.id] = metadata
+                metadataChanged = true
+            }
+            let url = manualDocumentURL(for: metadata)
+            if !fileManager.fileExists(atPath: url.path) {
+                try write(definition.markdown + "\n", to: url)
+            }
+        }
+        if metadataChanged {
+            try persistDocumentMetadata()
+        }
+    }
+
+    private func loadManualDocument(
+        metadata: ManualContextDocumentMetadata
+    ) throws -> ContextDocument? {
+        let url = manualDocumentURL(for: metadata)
+        let values = try? url.resourceValues(
+            forKeys: [.contentModificationDateKey, .isRegularFileKey]
+        )
+        guard values?.isRegularFile == true else { return nil }
+        return ContextDocument(
+            id: metadata.id,
+            date: metadata.createdAt,
+            url: url,
+            markdown: try String(contentsOf: url, encoding: .utf8),
+            modifiedAt: values?.contentModificationDate ?? metadata.createdAt,
+            kind: .manual(metadata),
+            customDisplayName: metadata.title
+        )
+    }
+
+    private func manualDocumentURL(
+        for metadata: ManualContextDocumentMetadata
+    ) -> URL {
+        let filename = switch metadata.role {
+        case .aboutMe: "About me"
+        case .instructions: "Instructions"
+        case .custom:
+            String(metadata.id.dropFirst("manual:".count))
+        }
+        return manualDocumentsDirectory
+            .appendingPathComponent(filename)
+            .appendingPathExtension("md")
+    }
+
+    private func chronologicallySorted(
+        _ input: [ContextDocument]
+    ) -> [ContextDocument] {
+        input.sorted {
+            if $0.date != $1.date { return $0.date > $1.date }
+            if $0.modifiedAt != $1.modifiedAt {
+                return $0.modifiedAt > $1.modifiedAt
+            }
+            return $0.id < $1.id
+        }
+    }
+
+    private func normalizedDisplayName(_ displayName: String) throws -> String {
+        let normalized = displayName
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized.count <= 120 else {
+            throw ContextStoreError.invalidDisplayName
+        }
+        return normalized
+    }
+
     private func loadDailyDocument(at url: URL) throws -> ContextDocument? {
         guard url.pathExtension.lowercased() == "md",
               let date = date(fromDocumentID: url.deletingPathExtension().lastPathComponent) else {
@@ -988,7 +1223,8 @@ public final class ContextStore {
         try encoder.encode(
             DocumentMetadataFile(
                 aliases: aliases,
-                appSessions: persistedAppSessions
+                appSessions: persistedAppSessions,
+                manualDocuments: persistedManualDocuments
             )
         ).write(to: metadataURL, options: .atomic)
     }
@@ -1098,6 +1334,7 @@ public enum ContextStoreError: LocalizedError, Sendable, Equatable {
     case emptyTranscription
     case documentUnavailable
     case invalidDisplayName
+    case protectedDocument
 
     public var errorDescription: String? {
         switch self {
@@ -1105,6 +1342,8 @@ public enum ContextStoreError: LocalizedError, Sendable, Equatable {
         case .documentUnavailable: "The context document is no longer available."
         case .invalidDisplayName:
             "Choose a name between 1 and 120 characters."
+        case .protectedDocument:
+            "About me and Instructions cannot be renamed or moved to Trash."
         }
     }
 }

@@ -154,8 +154,31 @@ public actor ContextRepository {
         instruction: String,
         focusedContext: DictationContext,
         target captureTarget: ContextCaptureTarget? = nil,
-        freshObservation: ContextObservation? = nil
+        freshObservation: ContextObservation? = nil,
+        includeApplicationContext: Bool = true
     ) async -> PromptContextEnvelope {
+        var sections: [PromptContextSection] = []
+        for document in await store.standingPromptDocuments() {
+            guard let role = document.manualMetadata?.role else { continue }
+            let kind: PromptContextSection.Kind
+            switch role {
+            case .instructions: kind = .standingInstructions
+            case .aboutMe: kind = .aboutMe
+            case .custom: continue
+            }
+            sections.append(.init(
+                kind: kind,
+                title: document.customDisplayName ?? "Standing context",
+                content: document.markdown
+            ))
+        }
+        guard includeApplicationContext else {
+            return PromptContextEnvelope(
+                instruction: instruction,
+                focusedContext: focusedContext,
+                sections: sections
+            )
+        }
         let live = snapshot()
         let target = live.first {
             if let captureTarget {
@@ -172,7 +195,6 @@ public actor ContextRepository {
         } else {
             nil
         }
-        var sections: [PromptContextSection] = []
         if let freshObservation {
             sections.append(.init(
                 kind: .freshTargetObservation,

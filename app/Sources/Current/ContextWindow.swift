@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 private final class ContextSearchWindow: NSWindow {
     var presentSearch: (() -> Void)?
+    var presentNewDocument: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([
@@ -19,6 +20,11 @@ private final class ContextSearchWindow: NSWindow {
             presentSearch?()
             return true
         }
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "n" {
+            presentNewDocument?()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -30,6 +36,8 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
     private let auxiliaryWindowID = UUID()
     private var window: NSWindow?
     private var viewModel: ContextViewModel?
+    private weak var newDocumentMenuItem: NSMenuItem?
+    private weak var newDocumentMenuSeparator: NSMenuItem?
 
     init(runtime: AppRuntime, store: ContextStore) {
         self.runtime = runtime
@@ -55,6 +63,9 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
             window.presentSearch = { [weak viewModel] in
                 viewModel?.presentSearch()
             }
+            window.presentNewDocument = { [weak viewModel] in
+                viewModel?.presentNewDocument()
+            }
             window.title = "Context"
             window.styleMask = [
                 .titled,
@@ -75,6 +86,7 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: true)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        installNewDocumentMenuItem()
     }
 
     func append(_ transcription: String, at date: Date) {
@@ -93,7 +105,45 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         viewModel?.flush()
+        removeNewDocumentMenuItem()
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        installNewDocumentMenuItem()
+    }
+
+    @objc private func newContextDocument(_ sender: Any?) {
+        window?.makeKeyAndOrderFront(sender)
+        viewModel?.presentNewDocument()
+    }
+
+    private func installNewDocumentMenuItem() {
+        guard newDocumentMenuItem == nil,
+              let fileMenu = NSApp.mainMenu?.items.first(where: {
+                  $0.title == "File" || $0.submenu?.title == "File"
+              })?.submenu else { return }
+        let item = NSMenuItem(
+            title: "New Context Document",
+            action: #selector(newContextDocument(_:)),
+            keyEquivalent: "n"
+        )
+        item.keyEquivalentModifierMask = .command
+        item.target = self
+        let separator = NSMenuItem.separator()
+        fileMenu.insertItem(separator, at: 0)
+        fileMenu.insertItem(item, at: 0)
+        newDocumentMenuItem = item
+        newDocumentMenuSeparator = separator
+    }
+
+    private func removeNewDocumentMenuItem() {
+        if let item = newDocumentMenuItem {
+            item.menu?.removeItem(item)
+        }
+        if let separator = newDocumentMenuSeparator {
+            separator.menu?.removeItem(separator)
+        }
     }
 }
 
@@ -110,6 +160,9 @@ final class ContextViewModel {
     private let repository: ContextRepository
     var searchText = ""
     var isSearchPresented = false
+    var isNewDocumentPresented = false
+    var newDocumentTitle = ""
+    private(set) var editorFocusRequest = UUID()
     private(set) var selectedDocumentID: String?
     var richText = AttributedString()
     var selection = AttributedTextSelection()
@@ -149,6 +202,29 @@ final class ContextViewModel {
         }
     }
 
+    func presentNewDocument() {
+        newDocumentTitle = ""
+        isNewDocumentPresented = true
+    }
+
+    func createManualDocument() {
+        isNewDocumentPresented = false
+        do {
+            let document = try store.createManualDocument(
+                title: newDocumentTitle
+            )
+            selectedDocumentID = document.id
+            searchText = ""
+            loadSelection()
+            Task { [weak self] in
+                await Task.yield()
+                self?.editorFocusRequest = UUID()
+            }
+        } catch {
+            show(error)
+        }
+    }
+
     func displayTitle(for document: ContextDocument) -> String {
         if let alias = document.customDisplayName {
             return alias
@@ -158,6 +234,8 @@ final class ContextViewModel {
             store.displayTitle(for: document.date)
         case .appSession(let metadata):
             metadata.applicationName
+        case .manual(let metadata):
+            metadata.title
         }
     }
 
@@ -174,6 +252,17 @@ final class ContextViewModel {
                 return "\(started)–\(endedAt.formatted(date: .omitted, time: .shortened)) · \(document.wordCount) words"
             }
             return "\(started) · Active · \(document.wordCount) words"
+        case .manual:
+            return "\(document.wordCount) words"
+        }
+    }
+
+    func symbolName(for document: ContextDocument) -> String {
+        switch document.manualMetadata?.role {
+        case .aboutMe: "person.crop.circle"
+        case .instructions: "checklist"
+        case .custom: "doc.text"
+        case nil: "calendar"
         }
     }
 
@@ -399,6 +488,7 @@ enum RichBlockStyle: Equatable {
 
 private struct ContextManagementView: View {
     @Bindable var model: ContextViewModel
+    @FocusState private var editorFocused: Bool
     @State private var pendingDeletion: ContextDocument?
     @State private var showingLinkEditor = false
     @State private var linkURL = ""
@@ -421,6 +511,21 @@ private struct ContextManagementView: View {
                     .frame(minWidth: 520)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .alert(
+            "New Context Document",
+            isPresented: $model.isNewDocumentPresented
+        ) {
+            TextField("Title", text: $model.newDocumentTitle)
+            Button("Cancel", role: .cancel) {
+                model.isNewDocumentPresented = false
+            }
+            Button("Create") {
+                model.createManualDocument()
+            }
+            .disabled(!isValidNewDocumentTitle)
+        } message: {
+            Text("Choose a title for the new Markdown context document.")
         }
         .alert(
             "Context Couldn’t Be Saved",
@@ -503,23 +608,35 @@ private struct ContextManagementView: View {
                         Button("Copy Contents", systemImage: "doc.on.doc") {
                             model.copyMarkdown(documentID: document.id)
                         }
-                        Button("Rename…", systemImage: "pencil") {
-                            pendingRename = document
-                            renameText = model.displayTitle(for: document)
-                        }
-                        Divider()
-                        Button(
-                            "Move to Trash",
-                            systemImage: "trash",
-                            role: .destructive
-                        ) {
-                            pendingDeletion = document
+                        if !document.isProtected {
+                            Button("Rename…", systemImage: "pencil") {
+                                pendingRename = document
+                                renameText = model.displayTitle(for: document)
+                            }
+                            Divider()
+                            Button(
+                                "Move to Trash",
+                                systemImage: "trash",
+                                role: .destructive
+                            ) {
+                                pendingDeletion = document
+                            }
                         }
                     }
             }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    model.presentNewDocument()
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .help("New Context Document")
+            }
+        }
         .searchable(
             text: $model.searchText,
             isPresented: $model.isSearchPresented,
@@ -537,7 +654,7 @@ private struct ContextManagementView: View {
                         .resizable()
                         .scaledToFit()
                 } else {
-                    Image(systemName: "calendar")
+                    Image(systemName: model.symbolName(for: document))
                         .resizable()
                         .scaledToFit()
                         .padding(4)
@@ -572,11 +689,22 @@ private struct ContextManagementView: View {
                     .padding(.top, 10)
                     .padding(.bottom, 12)
                     .focusEffectDisabled()
+                    .focused($editorFocused)
                     .onChange(of: model.richText) { _, _ in model.textChanged() }
+                    .onChange(of: model.editorFocusRequest) { _, _ in
+                        editorFocused = true
+                    }
             }
         } else {
             Color.clear
         }
+    }
+
+    private var isValidNewDocumentTitle: Bool {
+        let title = model.newDocumentTitle
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !title.isEmpty && title.count <= 120
     }
 
     private var editorToolbar: some View {

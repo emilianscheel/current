@@ -541,6 +541,8 @@ public enum PromptGenerationBackend: String, Codable, Sendable, Equatable {
 public struct PromptContextSection: Codable, Sendable, Equatable, Identifiable {
     public enum Kind: String, Codable, Sendable, CaseIterable {
         case focusedText
+        case standingInstructions
+        case aboutMe
         case freshTargetObservation
         case targetCurrentState
         case targetRecentActivity

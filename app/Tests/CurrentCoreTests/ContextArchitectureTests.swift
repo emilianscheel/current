@@ -413,7 +413,12 @@ private actor PromptScreenStub: ScreenContextProviding {
         target: target,
         continuousContextEnabled: false
     )
-    #expect(disabled.sections.isEmpty)
+    #expect(
+        disabled.sections.map(\.kind) == [
+            .standingInstructions,
+            .aboutMe,
+        ]
+    )
     #expect(await screen.refreshCount == 0)
 
     let enabled = try await preparer.prepare(
@@ -422,8 +427,18 @@ private actor PromptScreenStub: ScreenContextProviding {
         target: target,
         continuousContextEnabled: true
     )
-    #expect(enabled.sections.first?.kind == .freshTargetObservation)
-    #expect(enabled.sections.first?.content.contains("Tuesday at 10") == true)
+    #expect(
+        enabled.sections.prefix(3).map(\.kind) == [
+            .standingInstructions,
+            .aboutMe,
+            .freshTargetObservation,
+        ]
+    )
+    #expect(
+        enabled.sections.first(where: {
+            $0.kind == .freshTargetObservation
+        })?.content.contains("Tuesday at 10") == true
+    )
     #expect(await screen.refreshCount == 1)
     #expect(await screen.activityCount == 1)
 }
@@ -807,6 +822,96 @@ private actor PromptScreenStub: ScreenContextProviding {
             ).path
         )
     )
+}
+
+@MainActor
+@Test func standingDocumentsSeedOnceAndAreProtected() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-standing-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(
+        directory: root,
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    store.reload()
+
+    #expect(
+        store.documents.prefix(2).map(\.id) == [
+            ContextStore.aboutMeDocumentID,
+            ContextStore.instructionsDocumentID,
+        ]
+    )
+    let about = try #require(
+        store.document(id: ContextStore.aboutMeDocumentID)
+    )
+    #expect(about.markdown.contains("- Name:"))
+    #expect(about.markdown.contains("- Mac:"))
+    #expect(about.markdown.contains("- Memory:"))
+    #expect(about.markdown.contains("- macOS:"))
+    #expect(about.isProtected)
+
+    try store.save(
+        documentID: ContextStore.aboutMeDocumentID,
+        markdown: "My edited profile\n"
+    )
+    store.reload()
+    #expect(
+        store.document(id: ContextStore.aboutMeDocumentID)?.markdown
+            == "My edited profile\n"
+    )
+    #expect(throws: ContextStoreError.self) {
+        try store.rename(
+            documentID: ContextStore.aboutMeDocumentID,
+            displayName: "Profile"
+        )
+    }
+    #expect(throws: ContextStoreError.self) {
+        try store.moveToTrash(
+            documentID: ContextStore.instructionsDocumentID
+        )
+    }
+
+    try FileManager.default.removeItem(at: about.url)
+    store.reload()
+    #expect(
+        store.document(id: ContextStore.aboutMeDocumentID)?.markdown
+            .contains("- Name:") == true
+    )
+}
+
+@MainActor
+@Test func customManualDocumentsRoundTripAndSearchWithoutPinning() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-manual-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(
+        directory: root,
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    store.reload()
+    let created = try store.createManualDocument(
+        title: "Context scratchpad",
+        at: Date().addingTimeInterval(60)
+    )
+    #expect(created.markdown.isEmpty)
+    #expect(created.manualMetadata?.role == .custom)
+    #expect(!created.isProtected)
+    try store.save(documentID: created.id, markdown: "Project context\n")
+    try store.rename(documentID: created.id, displayName: "Project notes")
+
+    store.reload()
+    let roundTripped = try #require(store.document(id: created.id))
+    #expect(roundTripped.customDisplayName == "Project notes")
+    #expect(roundTripped.markdown == "Project context\n")
+    #expect(store.documents.first?.id == ContextStore.aboutMeDocumentID)
+    #expect(
+        store.filteredDocuments(matching: "context").first?.id == created.id
+    )
+
+    try store.moveToTrash(documentID: created.id)
+    #expect(store.document(id: created.id) == nil)
 }
 
 @MainActor

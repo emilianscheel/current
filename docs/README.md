@@ -80,7 +80,7 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - Current's own process is excluded at the capture and repository boundaries. Other visible sensitive information may be retained when macOS exposes it.
 - Screen Recording permission remains required, and macOS controls whether its screen-capture privacy indicator appears.
 - Context files stay local until edited or moved to Trash.
-- No analytics, crash upload, account, update check, or cloud inference is included.
+- Production builds check a signed GitHub appcast once per day and download verified app updates when available. They send no system profile; no analytics, crash upload, account, context synchronization, or cloud inference is included. Development and ad-hoc builds never contact the production update feed.
 - The last successful result is held in memory for recovery and can be cleared from Settings.
 - Accessibility insertion is attempted first. If the target rejects it, Current uses a temporary pasteboard and Command-V; when configured, it restores the previous pasteboard after a short delay.
 - Secure or inaccessible controls fall back to **Copied — paste manually**.
@@ -109,6 +109,7 @@ Instruments signposts contain durations only, never prompt content. The coordina
 - ServiceManagement `SMAppService` for launch at login
 - Swift Testing for core behavior
 - Hardened Runtime with the audio-input entitlement; App Sandbox is intentionally not enabled because Current must manipulate focused controls in other applications
+- Sparkle 2 for Ed25519-signed, Developer ID-validated automatic updates in production builds
 
 The coordinator owns a single session-tagged voice-interaction flow:
 
@@ -166,10 +167,12 @@ The script:
 2. Runs the test suite.
 3. Builds optimized arm64 executables.
 4. Compiles the Icon Composer source into adaptive and standalone app-icon resources, then assembles `Current.app`.
-5. Signs with Hardened Runtime.
+5. Embeds and signs Sparkle while explicitly disabling its production feed in local builds.
 6. Gracefully stops the old copy, installs to `~/Applications/Current.app`, verifies the signature, and relaunches it.
 
 It never calls `tccutil`, resets UserDefaults, or removes model data.
+
+Local development and ad-hoc assemblies set `CurrentUpdateMode` to `disabled`, omit every active Sparkle feed key, and do not construct the updater at runtime. They therefore cannot replace themselves with the latest production release. Only `release.sh` creates a `production` update bundle.
 
 ### Stable local signing
 
@@ -274,7 +277,20 @@ Development builds are intentionally different: the installed local app uses a s
      --password "APP-SPECIFIC-PASSWORD"
    ```
 
-4. Validate all release prerequisites:
+4. Resolve dependencies and generate Current's Sparkle Ed25519 signing key once:
+
+   ```sh
+   cd app
+   swift package --disable-sandbox resolve
+   .build/artifacts/sparkle/Sparkle/bin/generate_keys \
+     --account com.emilianscheel.current
+   ```
+
+   The private key remains in the login Keychain. Store an encrypted backup with the tool's `-x` option and keep it outside the repository. `Packaging/SparklePublicKey.txt` contains only the matching public key.
+
+   Run `./app/release.sh --setup` once afterward and choose **Always Allow** if Keychain asks whether Sparkle's `sign_update` tool may use the private key. The setup check signs only an empty temporary probe and fails before a release build if signing access is unavailable.
+
+5. Validate all release prerequisites:
 
    ```sh
    ./app/release.sh --setup
@@ -292,8 +308,10 @@ First push `main`, ensure the worktree is clean, and run:
 ./app/release.sh v0.2.0
 ```
 
-The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates a compact drag-to-Applications Finder layout and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
+The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions, enables the production updater, signs every executable from the inside out, creates and signs `Current.dmg`, notarizes and staples it, and checks the mounted image with Gatekeeper. It then generates an Ed25519-signed `appcast.xml`, creates and pushes the annotated tag, uploads both assets to a draft, verifies their downloaded checksums, publishes the release, and verifies GitHub's stable latest-asset URLs.
 
 Use `app/release.sh` rather than creating or pushing release tags manually. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
 
-Every release uses the asset name `Current.dmg`, so the website and README keep using GitHub's permanent latest-release URL.
+Every release uses the asset names `Current.dmg` and `appcast.xml`. The website and README use GitHub's permanent latest-DMG URL, while production apps use `https://github.com/emilianscheel/current/releases/latest/download/appcast.xml`.
+
+Production builds check once per day, download updates silently, and wait to install until Current is idle, none of its windows are open, and the Mac has received no keyboard or mouse input for five minutes. Sparkle then uses Current's graceful termination path, atomically replaces the app, and relaunches it. A non-writable installation may still require macOS authorization.

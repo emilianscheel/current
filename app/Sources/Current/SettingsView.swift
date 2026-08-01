@@ -148,7 +148,7 @@ struct SettingsView: View {
         }
         Section("Local processing") {
             Label("Audio is held in memory only", systemImage: "memorychip")
-            Label("Model downloads use the network during setup; inference remains local", systemImage: "network.slash")
+            Label("Model and production app updates use the network; inference remains local", systemImage: "network")
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
             Label("Screenshots are discarded after OCR; extracted text and metadata are retained", systemImage: "internaldrive")

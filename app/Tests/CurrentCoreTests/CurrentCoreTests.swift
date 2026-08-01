@@ -16,6 +16,49 @@ import Testing
     #expect(HardwareChecker.appleSiliconGeneration(from: "Mac15,6") == nil)
 }
 
+@Test func automaticUpdateRequiresSafeIdleWindow() {
+    let ready = AutomaticUpdateInstallationState(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput:
+            AutomaticUpdateInstallationPolicy.requiredUserIdleTime
+    )
+    #expect(AutomaticUpdateInstallationPolicy.canInstall(ready))
+    #expect(AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .paused,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .recording,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        isBackgroundGenerationActive: true,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: true,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 299
+    )))
+
+    var gate = AutomaticUpdateInstallationGate()
+    let firstDecision = gate.shouldInstall(ready)
+    let secondDecision = gate.shouldInstall(ready)
+    #expect(firstDecision)
+    #expect(!secondDecision)
+    #expect(gate.hasAllowedInstallation)
+}
+
 @Test func shortcutTapDoesNotRecord() {
     var machine = ShortcutStateMachine()
     #expect(machine.fnChanged(isDown: true) == .armed)

@@ -23,6 +23,58 @@ public enum DictationPhase: String, Sendable, Codable, CaseIterable {
     }
 }
 
+public struct AutomaticUpdateInstallationState: Sendable, Equatable {
+    public var dictationPhase: DictationPhase
+    public var isBackgroundGenerationActive: Bool
+    public var hasVisibleCurrentWindows: Bool
+    public var secondsSinceUserInput: TimeInterval
+
+    public init(
+        dictationPhase: DictationPhase,
+        isBackgroundGenerationActive: Bool = false,
+        hasVisibleCurrentWindows: Bool,
+        secondsSinceUserInput: TimeInterval
+    ) {
+        self.dictationPhase = dictationPhase
+        self.isBackgroundGenerationActive = isBackgroundGenerationActive
+        self.hasVisibleCurrentWindows = hasVisibleCurrentWindows
+        self.secondsSinceUserInput = secondsSinceUserInput
+    }
+}
+
+public enum AutomaticUpdateInstallationPolicy {
+    public static let requiredUserIdleTime: TimeInterval = 5 * 60
+
+    public static func canInstall(
+        _ state: AutomaticUpdateInstallationState
+    ) -> Bool {
+        guard !state.isBackgroundGenerationActive,
+              !state.hasVisibleCurrentWindows,
+              state.secondsSinceUserInput >= requiredUserIdleTime else {
+            return false
+        }
+        return state.dictationPhase == .idle
+            || state.dictationPhase == .paused
+    }
+}
+
+public struct AutomaticUpdateInstallationGate: Sendable {
+    public private(set) var hasAllowedInstallation = false
+
+    public init() {}
+
+    public mutating func shouldInstall(
+        _ state: AutomaticUpdateInstallationState
+    ) -> Bool {
+        guard !hasAllowedInstallation,
+              AutomaticUpdateInstallationPolicy.canInstall(state) else {
+            return false
+        }
+        hasAllowedInstallation = true
+        return true
+    }
+}
+
 public enum MenuBarPresentation {
     public static func symbol(for _: DictationPhase) -> String { "alternatingcurrent" }
 

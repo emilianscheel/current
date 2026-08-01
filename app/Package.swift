@@ -14,6 +14,10 @@ let package = Package(
         .library(name: "CurrentCore", targets: ["CurrentCore"]),
     ],
     dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle.git",
+            exact: "2.9.4"
+        ),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
         .package(
             url: "https://github.com/simibac/ConfettiSwiftUI.git",
@@ -59,8 +63,15 @@ let package = Package(
                     name: "ConfettiSwiftUI",
                     package: "ConfettiSwiftUI"
                 ),
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
-            resources: [.process("Resources")]
+            resources: [.process("Resources")],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
+                ]),
+            ]
         ),
         .executableTarget(name: "CurrentRelauncher"),
         .executableTarget(

@@ -4,10 +4,15 @@ import CurrentCore
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let runtime: AppRuntime
+    private let updateController: UpdateController?
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-    init(runtime: AppRuntime) {
+    init(
+        runtime: AppRuntime,
+        updateController: UpdateController? = nil
+    ) {
         self.runtime = runtime
+        self.updateController = updateController
         super.init()
         item.button?.image = NSImage(
             systemSymbolName: MenuBarPresentation.symbol(for: runtime.coordinator.phase),
@@ -119,6 +124,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 ? nil : "Disabled",
             to: menu
         )
+        if let updateController {
+            add(
+                "Check for Updates…",
+                to: menu,
+                action: #selector(checkForUpdates),
+                symbol: "arrow.triangle.2.circlepath",
+                enabled: updateController.canCheckForUpdates
+            )
+        }
         add("About Current", to: menu, action: #selector(openAbout), symbol: "info.circle")
         menu.addItem(.separator())
         add("Quit Current", to: menu, action: #selector(quit), key: "q", symbol: "power")
@@ -197,6 +211,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() { runtime.about.show() }
+    @objc private func checkForUpdates() {
+        updateController?.checkForUpdates()
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 

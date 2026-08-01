@@ -359,6 +359,19 @@ final class AppRuntime {
         applyDockPolicy()
     }
 
+    func canInstallAutomaticUpdate(
+        secondsSinceUserInput: TimeInterval,
+        gate: inout AutomaticUpdateInstallationGate
+    ) -> Bool {
+        gate.shouldInstall(.init(
+            dictationPhase: coordinator.phase,
+            isBackgroundGenerationActive:
+                screenContext.backgroundState == .processing,
+            hasVisibleCurrentWindows: !auxiliaryWindowIDs.isEmpty,
+            secondsSinceUserInput: secondsSinceUserInput
+        ))
+    }
+
     func applyDockPolicy() {
         NSApp.setActivationPolicy(!auxiliaryWindowIDs.isEmpty || settings.showDockIcon ? .regular : .accessory)
     }
@@ -388,13 +401,21 @@ final class AppRuntime {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var runtime: AppRuntime?
     private var statusController: StatusItemController?
+    private var updateController: UpdateController?
     private var isFinishingTermination = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let runtime = AppRuntime()
         self.runtime = runtime
         runtime.applyDockPolicy()
-        statusController = StatusItemController(runtime: runtime)
+        let updateController = UpdateController.updatesEnabled
+            ? UpdateController() : nil
+        self.updateController = updateController
+        statusController = StatusItemController(
+            runtime: runtime,
+            updateController: updateController
+        )
+        updateController?.start(runtime: runtime)
         runtime.startPermissionMonitoring()
         runtime.usageMonitor.start()
         runtime.model.prepareIfNeeded()

@@ -4,14 +4,23 @@ set -euo pipefail
 PROJECT_DIR="${0:A:h}"
 REPO_DIR="${PROJECT_DIR:h}"
 DMGBUILD_PROJECT_DIR="$PROJECT_DIR/Packaging/dmgbuild"
+SPARKLE_DISTRIBUTION="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle"
+SPARKLE_GENERATE_KEYS="$SPARKLE_DISTRIBUTION/bin/generate_keys"
+SPARKLE_GENERATE_APPCAST="$SPARKLE_DISTRIBUTION/bin/generate_appcast"
+SPARKLE_SIGN_UPDATE="$SPARKLE_DISTRIBUTION/bin/sign_update"
+SPARKLE_ACCOUNT="com.emilianscheel.current"
+SPARKLE_PUBLIC_KEY_FILE="$PROJECT_DIR/Packaging/SparklePublicKey.txt"
+SPARKLE_PUBLIC_KEY="$(tr -d '\r\n' < "$SPARKLE_PUBLIC_KEY_FILE")"
 REMOTE="origin"
 NOTARY_PROFILE="${CURRENT_NOTARY_PROFILE:-Current-notary}"
 DEVELOPER_ID_OVERRIDE="${CURRENT_DEVELOPER_ID_APPLICATION:-}"
 DIST_DIR="$PROJECT_DIR/dist"
 DMG_PATH="$DIST_DIR/Current.dmg"
+APPCAST_PATH="$DIST_DIR/appcast.xml"
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
 MOUNT_DIR=""
 MOUNTED=false
+APPCAST_SOURCE_DIR=""
 
 cd "$REPO_DIR"
 
@@ -29,6 +38,7 @@ cleanup() {
     hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true
   fi
   [[ -z "$MOUNT_DIR" ]] || rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+  [[ -z "$APPCAST_SOURCE_DIR" ]] || rm -rf "$APPCAST_SOURCE_DIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -41,6 +51,19 @@ developer_id_hashes() {
     | awk '/"Developer ID Application:/{print $2}'
 }
 
+sparkle_signing_access_is_ready() {
+  local signing_probe
+  signing_probe="$(mktemp "${TMPDIR%/}/current-sparkle-signing.XXXXXX")" \
+    || return 1
+  if "$SPARKLE_SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" \
+      -p "$signing_probe" >/dev/null 2>&1; then
+    rm -f "$signing_probe"
+    return 0
+  fi
+  rm -f "$signing_probe"
+  return 1
+}
+
 print_setup_help() {
   print ""
   print "One-time release setup:"
@@ -51,14 +74,24 @@ print_setup_help() {
   print "       gh auth login"
   print "  3. Store notarization credentials in Keychain (use an app-specific password):"
   print "       xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <APPLE-ID> --team-id <TEAM-ID> --password <APP-SPECIFIC-PASSWORD>"
-  print "  4. Re-run: ./app/release.sh --setup"
+  print "  4. Generate Current's Sparkle update key in the login Keychain:"
+  print "       cd app"
+  print "       .build/artifacts/sparkle/Sparkle/bin/generate_keys --account $SPARKLE_ACCOUNT"
+  print "     Keep an encrypted backup using generate_keys --account $SPARKLE_ACCOUNT -x <secure-path>."
+  print "  5. Re-run: ./app/release.sh --setup"
+  print "     If Keychain asks, choose Always Allow for Sparkle's sign_update tool."
   print ""
   print "Secrets are stored by notarytool in Keychain and are never read by this repository."
 }
 
 setup_release_environment() {
-  local failed keychain identity_count
+  local failed keychain identity_count resolved_public_key
   failed=false
+
+  if ! (cd "$PROJECT_DIR" && swift package --disable-sandbox resolve >/dev/null); then
+    print -u2 "Swift package dependencies could not be resolved."
+    failed=true
+  fi
 
   keychain="$(default_keychain)"
   if [[ -z "$keychain" || "$keychain" != /* ]]; then
@@ -104,6 +137,26 @@ setup_release_environment() {
     print "Locked dmgbuild packaging environment is ready."
   fi
 
+  if [[ ! -x "$SPARKLE_GENERATE_KEYS"
+        || ! -x "$SPARKLE_GENERATE_APPCAST"
+        || ! -x "$SPARKLE_SIGN_UPDATE" ]]; then
+    print -u2 "Sparkle's resolved release tools are unavailable."
+    failed=true
+  elif ! resolved_public_key="$(
+    "$SPARKLE_GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p 2>/dev/null
+  )"; then
+    print -u2 "Current's Sparkle signing key is missing from the login Keychain."
+    failed=true
+  elif [[ "$resolved_public_key" != "$SPARKLE_PUBLIC_KEY" ]]; then
+    print -u2 "The Sparkle private key does not match Packaging/SparklePublicKey.txt."
+    failed=true
+  elif ! sparkle_signing_access_is_ready; then
+    print -u2 "Sparkle's sign_update tool cannot use Current's private key."
+    failed=true
+  else
+    print "Sparkle update-signing key '$SPARKLE_ACCOUNT' is ready."
+  fi
+
   if $failed; then
     print_setup_help
     return 1
@@ -122,7 +175,7 @@ TAG="$1"
 VERSION="${TAG#v}"
 TAG_REF="refs/tags/$TAG"
 
-for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum tiffutil uv; do
+for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum stat tiffutil uv curl xmllint; do
   command -v "$required_command" >/dev/null || die "$required_command is required. Run ./app/release.sh --setup for setup instructions."
 done
 [[ "$(uname -m)" == "arm64" ]] || die "Current releases must be built on Apple silicon (arm64)."
@@ -134,6 +187,17 @@ OS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 gh auth status --hostname github.com >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run ./app/release.sh --setup."
 uv run --project "$DMGBUILD_PROJECT_DIR" --isolated --frozen python -c 'import dmgbuild' >/dev/null \
   || die "The locked dmgbuild packaging environment is unavailable. Run ./app/release.sh --setup."
+[[ -x "$SPARKLE_GENERATE_KEYS"
+   && -x "$SPARKLE_GENERATE_APPCAST"
+   && -x "$SPARKLE_SIGN_UPDATE" ]] \
+  || die "Sparkle's release tools are unavailable. Run ./app/release.sh --setup."
+RESOLVED_SPARKLE_PUBLIC_KEY="$(
+  "$SPARKLE_GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p
+)" || die "Current's Sparkle signing key is unavailable. Run ./app/release.sh --setup."
+[[ "$RESOLVED_SPARKLE_PUBLIC_KEY" == "$SPARKLE_PUBLIC_KEY" ]] \
+  || die "The Sparkle private key does not match Packaging/SparklePublicKey.txt."
+sparkle_signing_access_is_ready \
+  || die "Sparkle's sign_update tool cannot use Current's private key. Run ./app/release.sh --setup."
 
 print "Fetching origin/main and release tags…"
 git fetch --prune --tags "$REMOTE" main
@@ -258,7 +322,44 @@ rmdir "$MOUNT_DIR"
 MOUNT_DIR=""
 
 DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+DMG_SIZE="$(stat -f '%z' "$DMG_PATH")"
 print "Verified Current.dmg SHA-256: $DMG_SHA256"
+
+APPCAST_SOURCE_DIR="$(mktemp -d "${TMPDIR%/}/current-appcast.XXXXXX")"
+cp "$DMG_PATH" "$APPCAST_SOURCE_DIR/Current.dmg"
+print "Generating and signing appcast.xml…"
+"$SPARKLE_GENERATE_APPCAST" \
+  --account "$SPARKLE_ACCOUNT" \
+  --download-url-prefix "https://github.com/emilianscheel/current/releases/download/$TAG/" \
+  --link "https://github.com/emilianscheel/current/releases/tag/$TAG" \
+  --maximum-versions 1 \
+  --maximum-deltas 0 \
+  -o "$APPCAST_PATH" \
+  "$APPCAST_SOURCE_DIR"
+xmllint --noout "$APPCAST_PATH"
+"$SPARKLE_SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify "$APPCAST_PATH"
+grep -Fq "<sparkle:version>$BUILD_VERSION</sparkle:version>" "$APPCAST_PATH" \
+  || die "The appcast does not contain the expected build version."
+grep -Fq "<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>" "$APPCAST_PATH" \
+  || die "The appcast does not contain the expected semantic version."
+grep -Fq "https://github.com/emilianscheel/current/releases/download/$TAG/Current.dmg" "$APPCAST_PATH" \
+  || die "The appcast does not reference the tag-specific Current.dmg asset."
+grep -Fq '<sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>' "$APPCAST_PATH" \
+  || die "The appcast does not require macOS 26.0."
+grep -Fq '<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>' "$APPCAST_PATH" \
+  || die "The appcast does not require arm64."
+grep -Eq "<enclosure [^>]*length=\"$DMG_SIZE\"" "$APPCAST_PATH" \
+  || die "The appcast enclosure length does not match Current.dmg."
+grep -Eq 'sparkle:edSignature="[A-Za-z0-9+/=]+"' "$APPCAST_PATH" \
+  || die "The appcast enclosure is missing its Ed25519 signature."
+grep -Fq '<!-- sparkle-signatures:' "$APPCAST_PATH" \
+  || die "The appcast is missing signed-feed metadata."
+grep -Eq '^edSignature: [A-Za-z0-9+/=]+$' "$APPCAST_PATH" \
+  || die "The appcast is missing its signed-feed Ed25519 signature."
+APPCAST_SHA256="$(shasum -a 256 "$APPCAST_PATH" | awk '{print $1}')"
+rm -rf "$APPCAST_SOURCE_DIR"
+APPCAST_SOURCE_DIR=""
+print "Verified signed appcast.xml SHA-256: $APPCAST_SHA256"
 
 if ! $LOCAL_TAG_EXISTS; then
   git tag -a "$TAG" -m "$TAG" "$HEAD_COMMIT"
@@ -293,9 +394,9 @@ if $DRAFT_EXISTS; then
     '
   } > "$NOTES_FILE"
   gh release edit "$TAG" --notes-file "$NOTES_FILE"
-  gh release upload "$TAG" "$DMG_PATH" --clobber
+  gh release upload "$TAG" "$DMG_PATH" "$APPCAST_PATH" --clobber
 else
-  gh release create "$TAG" "$DMG_PATH" \
+  gh release create "$TAG" "$DMG_PATH" "$APPCAST_PATH" \
     --draft \
     --verify-tag \
     --title "$TAG" \
@@ -304,18 +405,33 @@ else
 fi
 
 ASSET_COUNT="$(gh release view "$TAG" --json assets --jq '.assets | length')"
-ASSET_NAME="$(gh release view "$TAG" --json assets --jq '.assets[0].name')"
-[[ "$ASSET_COUNT" == "1" && "$ASSET_NAME" == "Current.dmg" ]] || {
-  die "Draft release must contain exactly one asset named Current.dmg; it remains unpublished for inspection."
+ASSET_NAMES="$(gh release view "$TAG" --json assets --jq '.assets | map(.name) | sort | join(",")')"
+[[ "$ASSET_COUNT" == "2" && "$ASSET_NAMES" == "Current.dmg,appcast.xml" ]] || {
+  die "Draft release must contain exactly Current.dmg and appcast.xml; it remains unpublished for inspection."
 }
 VERIFY_DIR="$(mktemp -d "${TMPDIR%/}/current-release-download.XXXXXX")"
-gh release download "$TAG" --pattern Current.dmg --dir "$VERIFY_DIR"
+gh release download "$TAG" --pattern Current.dmg --pattern appcast.xml --dir "$VERIFY_DIR"
 DOWNLOADED_SHA256="$(shasum -a 256 "$VERIFY_DIR/Current.dmg" | awk '{print $1}')"
+DOWNLOADED_APPCAST_SHA256="$(shasum -a 256 "$VERIFY_DIR/appcast.xml" | awk '{print $1}')"
 rm -rf "$VERIFY_DIR"
 [[ "$DOWNLOADED_SHA256" == "$DMG_SHA256" ]] || die "The uploaded Current.dmg checksum does not match the local artifact; the draft remains unpublished."
+[[ "$DOWNLOADED_APPCAST_SHA256" == "$APPCAST_SHA256" ]] || die "The uploaded appcast.xml checksum does not match the local artifact; the draft remains unpublished."
 
 gh release edit "$TAG" --draft=false --prerelease=false --latest
 [[ "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" == "false" ]] || die "GitHub Release $TAG did not publish successfully."
 RELEASE_URL="$(gh release view "$TAG" --json url --jq '.url')"
+LATEST_VERIFY_DIR="$(mktemp -d "${TMPDIR%/}/current-latest-release.XXXXXX")"
+curl -L --fail --silent --show-error \
+  "https://github.com/emilianscheel/current/releases/latest/download/appcast.xml" \
+  -o "$LATEST_VERIFY_DIR/appcast.xml"
+curl -L --fail --silent --show-error \
+  "https://github.com/emilianscheel/current/releases/latest/download/Current.dmg" \
+  -o "$LATEST_VERIFY_DIR/Current.dmg"
+[[ "$(shasum -a 256 "$LATEST_VERIFY_DIR/appcast.xml" | awk '{print $1}')" == "$APPCAST_SHA256" ]] \
+  || die "GitHub's latest appcast URL does not resolve to the published release."
+[[ "$(shasum -a 256 "$LATEST_VERIFY_DIR/Current.dmg" | awk '{print $1}')" == "$DMG_SHA256" ]] \
+  || die "GitHub's latest DMG URL does not resolve to the published release."
+rm -rf "$LATEST_VERIFY_DIR"
 print "Published Current $VERSION: $RELEASE_URL"
 print "Download: https://github.com/emilianscheel/current/releases/latest/download/Current.dmg"
+print "Appcast: https://github.com/emilianscheel/current/releases/latest/download/appcast.xml"

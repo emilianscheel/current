@@ -280,7 +280,7 @@ Development builds are intentionally different: the installed local app uses a s
    ./app/release.sh --setup
    ```
 
-The first customized DMG build may ask for permission to let the invoking terminal control Finder. Grant that permission in **System Settings → Privacy & Security → Automation**; Finder writes the icon positions, background, and compact window geometry into the disk image.
+DMG layout metadata is generated headlessly from the locked `dmgbuild` packaging environment. Release builds do not need Finder Automation or a logged-in Finder session; install `uv` alongside `gh` during one-time setup.
 
 The default notarization profile is `Current-notary`; override it with `CURRENT_NOTARY_PROFILE`. If the Keychain contains multiple Developer ID Application identities, select one by SHA-1 hash or full certificate name with `CURRENT_DEVELOPER_ID_APPLICATION`.
 

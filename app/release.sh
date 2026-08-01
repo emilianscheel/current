@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${0:A:h}"
 REPO_DIR="${PROJECT_DIR:h}"
+DMGBUILD_PROJECT_DIR="$PROJECT_DIR/Packaging/dmgbuild"
 REMOTE="origin"
 NOTARY_PROFILE="${CURRENT_NOTARY_PROFILE:-Current-notary}"
 DEVELOPER_ID_OVERRIDE="${CURRENT_DEVELOPER_ID_APPLICATION:-}"
@@ -45,8 +46,8 @@ print_setup_help() {
   print "One-time release setup:"
   print "  1. In Xcode Settings → Accounts → Manage Certificates, create Apple Development"
   print "     and Developer ID Application certificates."
-  print "  2. Install and authenticate GitHub CLI:"
-  print "       brew install gh"
+  print "  2. Install uv and authenticate GitHub CLI:"
+  print "       brew install gh uv"
   print "       gh auth login"
   print "  3. Store notarization credentials in Keychain (use an app-specific password):"
   print "       xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <APPLE-ID> --team-id <TEAM-ID> --password <APP-SPECIFIC-PASSWORD>"
@@ -56,7 +57,7 @@ print_setup_help() {
 }
 
 setup_release_environment() {
-  local failed keychain identity_count finder_volume_count
+  local failed keychain identity_count
   failed=false
 
   keychain="$(default_keychain)"
@@ -93,14 +94,14 @@ setup_release_environment() {
     print "Notarization profile '$NOTARY_PROFILE' is ready."
   fi
 
-  if ! finder_volume_count="$(osascript -e 'tell application "Finder" to count (every disk whose name is "Current")' 2>/dev/null)"; then
-    print -u2 "Finder automation is unavailable. Allow the invoking terminal to control Finder in System Settings → Privacy & Security → Automation."
+  if ! command -v uv >/dev/null; then
+    print -u2 "uv is not installed."
     failed=true
-  elif (( finder_volume_count > 0 )); then
-    print -u2 "A volume named 'Current' is mounted. Eject it before creating a release."
+  elif ! uv run --project "$DMGBUILD_PROJECT_DIR" --isolated --frozen python -c 'import dmgbuild' >/dev/null 2>&1; then
+    print -u2 "The locked dmgbuild packaging environment is unavailable."
     failed=true
   else
-    print "Finder automation is ready."
+    print "Locked dmgbuild packaging environment is ready."
   fi
 
   if $failed; then
@@ -121,7 +122,7 @@ TAG="$1"
 VERSION="${TAG#v}"
 TAG_REF="refs/tags/$TAG"
 
-for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum osascript tiffutil SetFile; do
+for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum tiffutil uv; do
   command -v "$required_command" >/dev/null || die "$required_command is required. Run ./app/release.sh --setup for setup instructions."
 done
 [[ "$(uname -m)" == "arm64" ]] || die "Current releases must be built on Apple silicon (arm64)."
@@ -131,6 +132,8 @@ OS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 [[ "$(git branch --show-current)" == "main" ]] || die "Releases must be built from the main branch."
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die "The worktree must be clean before releasing."
 gh auth status --hostname github.com >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run ./app/release.sh --setup."
+uv run --project "$DMGBUILD_PROJECT_DIR" --isolated --frozen python -c 'import dmgbuild' >/dev/null \
+  || die "The locked dmgbuild packaging environment is unavailable. Run ./app/release.sh --setup."
 
 print "Fetching origin/main and release tags…"
 git fetch --prune --tags "$REMOTE" main
@@ -246,7 +249,7 @@ MOUNTED=true
 [[ -d "$MOUNT_DIR/Current.app" ]] || die "Mounted DMG does not contain Current.app."
 [[ "$(readlink "$MOUNT_DIR/Applications")" == "/Applications" ]] || die "Mounted DMG has an invalid Applications shortcut."
 [[ -f "$MOUNT_DIR/.DS_Store" ]] || die "Mounted DMG does not contain Finder layout metadata."
-[[ -f "$MOUNT_DIR/.background/installer-background.tiff" ]] || die "Mounted DMG does not contain its Finder background."
+[[ -f "$MOUNT_DIR/.background.tiff" ]] || die "Mounted DMG does not contain its Finder background."
 codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/Current.app"
 spctl --assess --type execute --verbose=2 "$MOUNT_DIR/Current.app"
 hdiutil detach "$MOUNT_DIR" >/dev/null

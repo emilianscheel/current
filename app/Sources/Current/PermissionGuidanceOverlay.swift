@@ -79,7 +79,7 @@ final class PermissionGuidanceOverlayController: NSObject {
     private let dropAccepted: () -> Void
     private var kind: PermissionKind?
     private var trackingTask: Task<Void, Never>?
-    private var blurPanels: [CGDirectDisplayID: PermissionBlurPanel] = [:]
+    private var blurPanels: [CGDirectDisplayID: FocusOverlayPanel] = [:]
     private var guidePanel: NSPanel?
     private var model: PermissionGuidanceModel?
     private var trackedWindowID: CGWindowID?
@@ -516,7 +516,7 @@ final class PermissionGuidanceOverlayController: NSObject {
             guard let id = Self.displayID(for: screen), blurPanels[id] == nil else {
                 continue
             }
-            blurPanels[id] = PermissionBlurPanel(screenFrame: screen.frame)
+            blurPanels[id] = FocusOverlayPanel(screenFrame: screen.frame)
         }
     }
 
@@ -782,7 +782,20 @@ private final class PermissionGuidePanel: NSPanel {
 }
 
 @MainActor
-private final class PermissionBlurPanel {
+enum FocusOverlayAppearance: Equatable {
+    case permission(grayscaleEnabled: Bool)
+    case stageLight(StageLightSample, showsBeam: Bool)
+
+    var grayscaleEnabled: Bool {
+        switch self {
+        case .permission(let enabled): enabled
+        case .stageLight: true
+        }
+    }
+}
+
+@MainActor
+final class FocusOverlayPanel {
     private enum Placement: Equatable {
         case foreground
         case behind(CGWindowID)
@@ -791,12 +804,12 @@ private final class PermissionBlurPanel {
     private struct Configuration {
         let focusFrames: [CGRect]
         let outlineFrame: CGRect?
-        let grayscaleEnabled: Bool
+        let appearance: FocusOverlayAppearance
         let placement: Placement
     }
 
     let panel: NSPanel
-    private let focusView: PermissionFocusView
+    private let focusView: FocusOverlayView
     private var hasPresented = false
     private var desiredVisible = false
     private var desiredConfiguration: Configuration?
@@ -825,7 +838,9 @@ private final class PermissionBlurPanel {
             .fullScreenAuxiliary,
             .stationary,
         ]
-        focusView = PermissionFocusView(frame: CGRect(origin: .zero, size: screenFrame.size))
+        focusView = FocusOverlayView(
+            frame: CGRect(origin: .zero, size: screenFrame.size)
+        )
         focusView.autoresizingMask = [.width, .height]
         panel.contentView = focusView
     }
@@ -837,13 +852,29 @@ private final class PermissionBlurPanel {
         grayscaleEnabled: Bool,
         behindWindowID: CGWindowID?
     ) {
+        update(
+            screenFrame: screenFrame,
+            focusFrames: focusFrames,
+            outlineFrame: outlineFrame,
+            appearance: .permission(grayscaleEnabled: grayscaleEnabled),
+            behindWindowID: behindWindowID
+        )
+    }
+
+    func update(
+        screenFrame: CGRect,
+        focusFrames: [CGRect],
+        outlineFrame: CGRect?,
+        appearance: FocusOverlayAppearance,
+        behindWindowID: CGWindowID?
+    ) {
         if panel.frame != screenFrame {
             panel.setFrame(screenFrame, display: false)
         }
         let configuration = Configuration(
             focusFrames: focusFrames,
             outlineFrame: outlineFrame,
-            grayscaleEnabled: grayscaleEnabled,
+            appearance: appearance,
             placement: behindWindowID.map(Placement.behind) ?? .foreground
         )
         desiredConfiguration = configuration
@@ -928,6 +959,55 @@ private final class PermissionBlurPanel {
         }
     }
 
+    func beginManualPresentation() {
+        guard let desiredConfiguration else { return }
+        desiredVisible = true
+        isChangingPlacement = false
+        transitionGeneration += 1
+        panel.alphaValue = 0
+        orderPanel(for: appliedPlacement ?? desiredConfiguration.placement)
+        hasPresented = true
+    }
+
+    func setManualPresentationAlpha(_ alpha: CGFloat) {
+        guard desiredVisible else { return }
+        if !panel.isVisible, let desiredConfiguration {
+            orderPanel(for: appliedPlacement ?? desiredConfiguration.placement)
+        }
+        panel.alphaValue = min(max(alpha, 0), 1)
+    }
+
+    func endManualPresentation() {
+        desiredVisible = false
+        isChangingPlacement = false
+        transitionGeneration += 1
+        panel.alphaValue = 0
+        panel.orderOut(nil)
+    }
+
+    func cancelManualPresentation() {
+        guard desiredVisible || panel.isVisible else { return }
+        desiredVisible = false
+        isChangingPlacement = false
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? 0.08 : 0.14
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.transitionGeneration == generation,
+                      !self.desiredVisible else { return }
+                self.panel.alphaValue = 0
+                self.panel.orderOut(nil)
+            }
+        }
+    }
+
     func reassertOrdering() {
         guard desiredVisible, !isChangingPlacement,
               let appliedPlacement,
@@ -951,12 +1031,13 @@ private final class PermissionBlurPanel {
         let generation = transitionGeneration
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if let appliedConfiguration,
-           appliedConfiguration.grayscaleEnabled
-                != desiredConfiguration?.grayscaleEnabled {
+           appliedConfiguration.appearance.grayscaleEnabled
+                != desiredConfiguration?.appearance.grayscaleEnabled {
             focusView.update(
                 focusFrames: appliedConfiguration.focusFrames,
                 outlineFrame: appliedConfiguration.outlineFrame,
-                grayscaleEnabled: desiredConfiguration?.grayscaleEnabled ?? false,
+                appearance: desiredConfiguration?.appearance
+                    ?? .permission(grayscaleEnabled: false),
                 animated: true
             )
         }
@@ -1014,7 +1095,7 @@ private final class PermissionBlurPanel {
         focusView.update(
             focusFrames: configuration.focusFrames,
             outlineFrame: configuration.outlineFrame,
-            grayscaleEnabled: configuration.grayscaleEnabled,
+            appearance: configuration.appearance,
             animated: animated
         )
         appliedConfiguration = configuration
@@ -1032,14 +1113,21 @@ private final class PermissionBlurPanel {
     }
 }
 
-private final class PermissionFocusView: NSView {
+final class FocusOverlayView: NSView {
     private let effectView = NSVisualEffectView()
     private let grayscaleView = NSView()
     private let grayscaleEffectView = NSVisualEffectView()
     private let effectMaskLayer = CAShapeLayer()
     private let grayscaleMaskLayer = CAShapeLayer()
+    private let stageDimmingLayer = CAGradientLayer()
+    private let stageDimmingMaskLayer = CAShapeLayer()
+    private let stageBeamLayer = CAGradientLayer()
+    private let stageBeamMaskLayer = CAShapeLayer()
     private let outlineLayer = CAShapeLayer()
     private var grayscaleEnabled: Bool?
+    private var overlayAppearance = FocusOverlayAppearance.permission(
+        grayscaleEnabled: false
+    )
     private var focusFrames: [CGRect] = []
     private var outlineFrame: CGRect?
 
@@ -1087,6 +1175,29 @@ private final class PermissionFocusView: NSView {
         effectView.layer?.mask = effectMaskLayer
         grayscaleEffectView.layer?.mask = grayscaleMaskLayer
 
+        stageDimmingLayer.type = .radial
+        stageDimmingLayer.colors = [
+            NSColor.black.withAlphaComponent(0.08).cgColor,
+            NSColor.black.withAlphaComponent(0.62).cgColor,
+        ]
+        stageDimmingLayer.locations = [0, 1]
+        stageDimmingLayer.mask = stageDimmingMaskLayer
+        stageDimmingLayer.isHidden = true
+        layer?.addSublayer(stageDimmingLayer)
+
+        stageBeamLayer.type = .axial
+        stageBeamLayer.startPoint = CGPoint(x: 0.5, y: 1)
+        stageBeamLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        stageBeamLayer.colors = [
+            NSColor.white.withAlphaComponent(0.34).cgColor,
+            NSColor.white.withAlphaComponent(0.18).cgColor,
+            NSColor.white.withAlphaComponent(0.06).cgColor,
+        ]
+        stageBeamLayer.locations = [0, 0.58, 1]
+        stageBeamLayer.mask = stageBeamMaskLayer
+        stageBeamLayer.isHidden = true
+        layer?.addSublayer(stageBeamLayer)
+
         layer?.addSublayer(outlineLayer)
         outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
         outlineLayer.strokeColor = NSColor.black.withAlphaComponent(0.78).cgColor
@@ -1104,14 +1215,15 @@ private final class PermissionFocusView: NSView {
     func update(
         focusFrames: [CGRect],
         outlineFrame: CGRect?,
-        grayscaleEnabled: Bool,
+        appearance: FocusOverlayAppearance,
         animated: Bool
     ) {
         self.focusFrames = focusFrames
         self.outlineFrame = outlineFrame
+        overlayAppearance = appearance
         updateGeometryLayers()
         updateGrayscale(
-            enabled: grayscaleEnabled,
+            enabled: appearance.grayscaleEnabled,
             animated: animated
         )
     }
@@ -1119,12 +1231,14 @@ private final class PermissionFocusView: NSView {
     private func updateGeometryLayers() {
         let maskPath = CGMutablePath()
         maskPath.addRect(bounds)
-        for frame in focusFrames {
-            maskPath.addRoundedRect(
-                in: frame.insetBy(dx: -3, dy: -3),
-                cornerWidth: 16,
-                cornerHeight: 16
-            )
+        if case .permission = overlayAppearance {
+            for frame in focusFrames {
+                maskPath.addRoundedRect(
+                    in: frame.insetBy(dx: -3, dy: -3),
+                    cornerWidth: 16,
+                    cornerHeight: 16
+                )
+            }
         }
 
         CATransaction.begin()
@@ -1133,6 +1247,16 @@ private final class PermissionFocusView: NSView {
             maskLayer.frame = bounds
             maskLayer.path = maskPath
         }
+        stageDimmingLayer.frame = bounds
+        stageDimmingMaskLayer.frame = bounds
+        stageDimmingMaskLayer.fillColor = NSColor.black.cgColor
+        stageDimmingMaskLayer.fillRule = .evenOdd
+        stageDimmingMaskLayer.path = maskPath
+        stageBeamLayer.frame = bounds
+        stageBeamMaskLayer.frame = bounds
+        stageBeamMaskLayer.fillColor = NSColor.black.cgColor
+        stageBeamMaskLayer.fillRule = .evenOdd
+        updateStageGeometry()
         outlineLayer.frame = bounds
         if let outlineFrame {
             outlineLayer.path = CGPath(
@@ -1147,6 +1271,65 @@ private final class PermissionFocusView: NSView {
             outlineLayer.path = nil
         }
         CATransaction.commit()
+    }
+
+    private func updateStageGeometry() {
+        guard case .stageLight(let sample, let showsBeam) = overlayAppearance else {
+            stageDimmingLayer.isHidden = true
+            stageBeamLayer.isHidden = true
+            stageBeamMaskLayer.path = nil
+            return
+        }
+
+        stageDimmingLayer.isHidden = false
+        stageDimmingLayer.opacity = 0.82
+        guard let focusFrame = focusFrames.first else {
+            stageDimmingLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+            stageDimmingLayer.endPoint = CGPoint(x: 1.2, y: 1.2)
+            stageBeamLayer.isHidden = true
+            stageBeamMaskLayer.path = nil
+            return
+        }
+
+        let center = CGPoint(
+            x: focusFrame.midX / max(bounds.width, 1),
+            y: focusFrame.midY / max(bounds.height, 1)
+        )
+        stageDimmingLayer.startPoint = center
+        stageDimmingLayer.endPoint = CGPoint(
+            x: center.x + 0.82,
+            y: center.y + 0.82
+        )
+
+        guard showsBeam else {
+            stageBeamLayer.isHidden = true
+            stageBeamMaskLayer.path = nil
+            return
+        }
+
+        let expansion = 42 + 58 * sample.beamExpansion
+        let topHalfWidth = 44 + 38 * sample.beamExpansion
+        let beamPath = CGMutablePath()
+        beamPath.move(to: CGPoint(
+            x: focusFrame.midX - topHalfWidth,
+            y: bounds.maxY
+        ))
+        beamPath.addLine(to: CGPoint(
+            x: focusFrame.midX + topHalfWidth,
+            y: bounds.maxY
+        ))
+        beamPath.addLine(to: CGPoint(
+            x: focusFrame.maxX + expansion,
+            y: focusFrame.maxY + 1
+        ))
+        beamPath.addLine(to: CGPoint(
+            x: focusFrame.minX - expansion,
+            y: focusFrame.maxY + 1
+        ))
+        beamPath.closeSubpath()
+        stageBeamMaskLayer.path = beamPath
+        stageBeamLayer.opacity = Float(sample.beamIntensity)
+        stageBeamLayer.isHidden = false
     }
 
     private func updateGrayscale(enabled: Bool, animated: Bool) {

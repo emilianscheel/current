@@ -25,6 +25,8 @@ final class OnboardingController: NSObject, NSWindowDelegate {
                 self.focusAfterPermissionDrop()
             }
         )
+    @ObservationIgnored private lazy var focusOverlay =
+        OnboardingFocusOverlayController()
     var step: OnboardingStep
     var permissions = PermissionSnapshot()
     var practiceText = ""
@@ -81,7 +83,12 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         }
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: true)
         NSApp.activate(ignoringOtherApps: true)
+        let wasAlreadyKey = window?.isKeyWindow == true
+        window?.center()
         window?.makeKeyAndOrderFront(nil)
+        if wasAlreadyKey, step == .welcome, let window {
+            focusOverlay.presentStage(around: window)
+        }
         startPolling()
     }
 
@@ -92,12 +99,34 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 
     func close() {
         permissionGuidance.dismiss()
+        focusOverlay.dismissAll()
         window?.orderOut(nil)
         onboardingDidHide()
     }
 
     func windowWillClose(_ notification: Notification) {
         onboardingDidHide()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard step == .welcome, let window else { return }
+        focusOverlay.presentStage(around: window)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        focusOverlay.dismissStage()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        focusOverlay.refreshWindowGeometry()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        focusOverlay.refreshWindowGeometry()
+    }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        focusOverlay.refreshWindowGeometry()
     }
 
     func refreshPermissions() {
@@ -116,14 +145,23 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             openSettings(kind)
             return
         }
+        let expectsNativePrompt = permissions.microphone == .notDetermined
+        if expectsNativePrompt {
+            permissionGuidance.dismiss()
+            focusOverlay.beginMicrophonePrompt(excluding: window)
+        }
         Task {
             _ = await runtime.permissions.request(kind)
             refreshPermissions()
+            if expectsNativePrompt {
+                focusOverlay.endMicrophonePrompt()
+            }
             if !permissions[kind].isGranted { openSettings(kind) }
         }
     }
 
     func openSettings(_ kind: PermissionKind) {
+        focusOverlay.dismissAll()
         runtime.permissions.openSettings(for: kind)
         permissionGuidance.present(for: kind)
     }
@@ -148,6 +186,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 
     func restart() {
         permissionGuidance.dismiss()
+        focusOverlay.dismissAll()
         runtime.relaunch()
     }
 
@@ -171,6 +210,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 
     private func onboardingDidHide() {
         permissionGuidance.dismiss()
+        focusOverlay.dismissAll()
         pollTask?.cancel()
         pollTask = nil
         runtime.setAuxiliaryWindow(auxiliaryWindowID, visible: false)
@@ -188,6 +228,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         direction: OnboardingNavigationDirection
     ) {
         permissionGuidance.dismiss()
+        focusOverlay.dismissStage()
         navigationDirection = direction
         let shouldCelebrate = self.step == .preferences
             && step == .complete
@@ -199,6 +240,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             completionCelebration += 1
         }
         runtime.settings.onboardingStep = step
+        if step == .welcome, window?.isKeyWindow == true, let window {
+            focusOverlay.presentStage(around: window)
+        }
     }
 
 }

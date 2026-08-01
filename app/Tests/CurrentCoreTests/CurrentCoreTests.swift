@@ -869,6 +869,117 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     )
 }
 
+@Test func stageLightUsesThreeSecondFadeBloomAndHoldTimeline() {
+    let initial = StageLightAnimation.sample(elapsed: 0, reduceMotion: false)
+    let fadedIn = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.fadeInDuration,
+        reduceMotion: false
+    )
+    let held = StageLightAnimation.sample(elapsed: 1.5, reduceMotion: false)
+    let fadeOutStart = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.duration
+            - StageLightAnimation.fadeOutDuration,
+        reduceMotion: false
+    )
+    let finished = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.duration,
+        reduceMotion: false
+    )
+
+    #expect(initial.overlayOpacity == 0)
+    #expect(fadedIn.overlayOpacity == 1)
+    #expect(held.overlayOpacity == 1)
+    #expect(held.beamExpansion > fadedIn.beamExpansion)
+    #expect(held.beamIntensity > fadedIn.beamIntensity)
+    #expect(fadeOutStart.overlayOpacity == 1)
+    #expect(finished.overlayOpacity == 0)
+}
+
+@Test func reduceMotionStageLightKeepsStaticBeamGeometry() {
+    let samples = [0.2, 1.5, 2.7].map {
+        StageLightAnimation.sample(elapsed: $0, reduceMotion: true)
+    }
+
+    #expect(samples.allSatisfy { $0.beamExpansion == 0 })
+    #expect(samples.allSatisfy { $0.beamIntensity == 0.58 })
+    #expect(samples[0].overlayOpacity < samples[1].overlayOpacity)
+    #expect(samples[2].overlayOpacity < samples[1].overlayOpacity)
+}
+
+@Test func focusPresentationGenerationInvalidatesRapidReplays() {
+    var generation = FocusPresentationGeneration()
+    let first = generation.next()
+    let replay = generation.next()
+
+    #expect(!generation.matches(first))
+    #expect(generation.matches(replay))
+}
+
+@Test func microphonePromptMatcherFindsOnlyNewPermissionCandidates() {
+    let baseline: Set<CGWindowID> = [10]
+    let observations = [
+        FocusWindowObservation(
+            id: 10,
+            processIdentifier: 400,
+            ownerName: "CoreServicesUIAgent",
+            frame: CGRect(x: 100, y: 100, width: 420, height: 260)
+        ),
+        FocusWindowObservation(
+            id: 11,
+            processIdentifier: 999,
+            ownerName: "Unrelated App",
+            frame: CGRect(x: 120, y: 120, width: 400, height: 240)
+        ),
+        FocusWindowObservation(
+            id: 12,
+            processIdentifier: 400,
+            ownerName: "CoreServicesUIAgent",
+            frame: CGRect(x: 140, y: 140, width: 420, height: 260)
+        ),
+        FocusWindowObservation(
+            id: 13,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 160, y: 160, width: 320, height: 180)
+        ),
+    ]
+
+    let candidate = MicrophonePromptMatcher.candidate(
+        baselineWindowIDs: baseline,
+        observations: observations,
+        applicationProcessIdentifier: 42,
+        excludedWindowID: 13
+    )
+    #expect(candidate?.id == 12)
+}
+
+@Test func microphonePromptMatcherRejectsInvisibleAndUnsafeGeometry() {
+    let observations = [
+        FocusWindowObservation(
+            id: 20,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 0, y: 0, width: 180, height: 90)
+        ),
+        FocusWindowObservation(
+            id: 21,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 0, y: 0, width: 420, height: 220),
+            alpha: 0
+        ),
+    ]
+
+    #expect(
+        MicrophonePromptMatcher.candidate(
+            baselineWindowIDs: [],
+            observations: observations,
+            applicationProcessIdentifier: 42,
+            excludedWindowID: nil
+        ) == nil
+    )
+}
+
 @Test func menuBarSymbolStaysDefaultForEveryPhase() {
     for phase in DictationPhase.allCases {
         #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")

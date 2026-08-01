@@ -1,5 +1,6 @@
 import AppKit
 import CurrentCore
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -147,6 +148,58 @@ final class ContextWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+private final class CachedSidebarIcon {
+    let image: NSImage?
+
+    init(image: NSImage?) {
+        self.image = image
+    }
+}
+
+@MainActor
+private final class ContextSidebarIconCache {
+    private let images = NSCache<NSString, CachedSidebarIcon>()
+
+    init() {
+        images.countLimit = 64
+        images.totalCostLimit = 4 * 1_024 * 1_024
+    }
+
+    func image(at url: URL) -> NSImage? {
+        let key = url.path as NSString
+        if let cached = images.object(forKey: key) {
+            return cached.image
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 64,
+        ]
+        let image = CGImageSourceCreateWithURL(url as CFURL, nil)
+            .flatMap {
+                CGImageSourceCreateThumbnailAtIndex(
+                    $0,
+                    0,
+                    options as CFDictionary
+                )
+            }
+            .map {
+                NSImage(
+                    cgImage: $0,
+                    size: NSSize(width: 28, height: 28)
+                )
+            }
+        images.setObject(
+            CachedSidebarIcon(image: image),
+            forKey: key,
+            cost: 64 * 64 * 4
+        )
+        return image
+    }
+}
+
 @MainActor
 @Observable
 final class ContextViewModel {
@@ -173,6 +226,9 @@ final class ContextViewModel {
     private var formattingIdentity = 10_000
     private var isDirty = false
     private var baselineRichText = AttributedString()
+    @ObservationIgnored private let sidebarPresentationCache =
+        ContextSidebarPresentationCache()
+    @ObservationIgnored private let sidebarIconCache = ContextSidebarIconCache()
 
     init(store: ContextStore, repository: ContextRepository) {
         self.store = store
@@ -181,8 +237,8 @@ final class ContextViewModel {
         loadSelection()
     }
 
-    var filteredDocuments: [ContextDocument] {
-        store.filteredDocuments(matching: searchText)
+    var sidebarItems: [ContextSidebarItem] {
+        sidebarPresentationCache.items(in: store, matching: searchText)
     }
 
     var selectedDocument: ContextDocument? {
@@ -225,54 +281,10 @@ final class ContextViewModel {
         }
     }
 
-    func displayTitle(for document: ContextDocument) -> String {
-        if let alias = document.customDisplayName {
-            return alias
-        }
-        return switch document.kind {
-        case .dailyDictation:
-            store.displayTitle(for: document.date)
-        case .appSession(let metadata):
-            metadata.applicationName
-        case .manual(let metadata):
-            metadata.title
-        }
-    }
-
-    func subtitle(for document: ContextDocument) -> String {
-        switch document.kind {
-        case .dailyDictation:
-            return "\(document.wordCount) words"
-        case .appSession(let metadata):
-            let started = metadata.startedAt.formatted(
-                date: .omitted,
-                time: .shortened
-            )
-            if let endedAt = metadata.endedAt {
-                return "\(started)–\(endedAt.formatted(date: .omitted, time: .shortened)) · \(document.wordCount) words"
-            }
-            return "\(started) · Active · \(document.wordCount) words"
-        case .manual:
-            return "\(document.wordCount) words"
-        }
-    }
-
-    func symbolName(for document: ContextDocument) -> String {
-        switch document.manualMetadata?.role {
-        case .aboutMe: "person.crop.circle"
-        case .instructions: "checklist"
-        case .custom: "doc.text"
-        case nil: "calendar"
-        }
-    }
-
-    func appIcon(for document: ContextDocument) -> NSImage? {
-        guard case .appSession(let metadata) = document.kind,
-              let relativePath = metadata.iconRelativePath else {
-            return nil
-        }
-        return NSImage(
-            contentsOf: store.directory.appendingPathComponent(relativePath)
+    func appIcon(relativePath: String?) -> NSImage? {
+        guard let relativePath else { return nil }
+        return sidebarIconCache.image(
+            at: store.directory.appendingPathComponent(relativePath)
         )
     }
 
@@ -489,11 +501,8 @@ enum RichBlockStyle: Equatable {
 private struct ContextManagementView: View {
     @Bindable var model: ContextViewModel
     @FocusState private var editorFocused: Bool
-    @State private var pendingDeletion: ContextDocument?
     @State private var showingLinkEditor = false
     @State private var linkURL = ""
-    @State private var pendingRename: ContextDocument?
-    @State private var renameText = ""
 
     var body: some View {
         NavigationSplitView {
@@ -559,45 +568,6 @@ private struct ContextManagementView: View {
                 Text(message)
             }
         }
-        .confirmationDialog(
-            "Move this context document to Trash?",
-            isPresented: Binding(
-                get: { pendingDeletion != nil },
-                set: { if !$0 { pendingDeletion = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Move to Trash", role: .destructive) {
-                if let pendingDeletion {
-                    model.moveToTrash(documentID: pendingDeletion.id)
-                }
-                pendingDeletion = nil
-            }
-            Button("Cancel", role: .cancel) { pendingDeletion = nil }
-        }
-        .alert(
-            "Rename Context Document",
-            isPresented: Binding(
-                get: { pendingRename != nil },
-                set: { if !$0 { pendingRename = nil } }
-            )
-        ) {
-            TextField("Display name", text: $renameText)
-            Button("Cancel", role: .cancel) {
-                pendingRename = nil
-            }
-            Button("Rename") {
-                if let pendingRename {
-                    model.rename(
-                        documentID: pendingRename.id,
-                        displayName: renameText
-                    )
-                }
-                pendingRename = nil
-            }
-        } message: {
-            Text("This changes the sidebar name without renaming the Markdown file.")
-        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -608,72 +578,7 @@ private struct ContextManagementView: View {
     }
 
     private var sidebar: some View {
-        List(
-            selection: Binding(
-                get: { model.selectedDocumentID },
-                set: { if let documentID = $0 { model.select(documentID) } }
-            )
-        ) {
-            ForEach(model.filteredDocuments) { document in
-                contextRow(document)
-                    .tag(document.id)
-                    .listRowInsets(
-                        EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
-                    )
-                    .contextMenu {
-                        Button("Copy Contents", systemImage: "doc.on.doc") {
-                            model.copyMarkdown(documentID: document.id)
-                        }
-                        if !document.isProtected {
-                            Button("Rename…", systemImage: "pencil") {
-                                pendingRename = document
-                                renameText = model.displayTitle(for: document)
-                            }
-                            Divider()
-                            Button(
-                                "Move to Trash",
-                                systemImage: "trash",
-                                role: .destructive
-                            ) {
-                                pendingDeletion = document
-                            }
-                        }
-                    }
-            }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .tint(Color.gray.opacity(0.18))
-    }
-
-    private func contextRow(_ document: ContextDocument) -> some View {
-        HStack(spacing: 8) {
-            Group {
-                if let icon = model.appIcon(for: document) {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .scaledToFit()
-                } else {
-                    Image(systemName: model.symbolName(for: document))
-                        .resizable()
-                        .scaledToFit()
-                        .padding(4)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 28, height: 28)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.displayTitle(for: document))
-                    .lineLimit(1)
-                Text(model.subtitle(for: document))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-        }
+        ContextSidebarView(model: model)
     }
 
     @ViewBuilder private var detail: some View {
@@ -778,5 +683,119 @@ private struct ContextManagementView: View {
             button
         }
     }
+}
 
+private struct ContextSidebarView: View {
+    @Bindable var model: ContextViewModel
+    @State private var pendingDeletionID: String?
+    @State private var pendingRenameID: String?
+    @State private var renameText = ""
+
+    var body: some View {
+        List(
+            selection: Binding(
+                get: { model.selectedDocumentID },
+                set: { if let documentID = $0 { model.select(documentID) } }
+            )
+        ) {
+            ForEach(model.sidebarItems) { item in
+                contextRow(item)
+                    .tag(item.id)
+                    .listRowInsets(
+                        EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 10)
+                    )
+                    .contextMenu {
+                        Button("Copy Contents", systemImage: "doc.on.doc") {
+                            model.copyMarkdown(documentID: item.id)
+                        }
+                        if !item.isProtected {
+                            Button("Rename…", systemImage: "pencil") {
+                                pendingRenameID = item.id
+                                renameText = item.title
+                            }
+                            Divider()
+                            Button(
+                                "Move to Trash",
+                                systemImage: "trash",
+                                role: .destructive
+                            ) {
+                                pendingDeletionID = item.id
+                            }
+                        }
+                    }
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .tint(Color.gray.opacity(0.18))
+        .confirmationDialog(
+            "Move this context document to Trash?",
+            isPresented: Binding(
+                get: { pendingDeletionID != nil },
+                set: { if !$0 { pendingDeletionID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                if let pendingDeletionID {
+                    model.moveToTrash(documentID: pendingDeletionID)
+                }
+                pendingDeletionID = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeletionID = nil }
+        }
+        .alert(
+            "Rename Context Document",
+            isPresented: Binding(
+                get: { pendingRenameID != nil },
+                set: { if !$0 { pendingRenameID = nil } }
+            )
+        ) {
+            TextField("Display name", text: $renameText)
+            Button("Cancel", role: .cancel) {
+                pendingRenameID = nil
+            }
+            Button("Rename") {
+                if let pendingRenameID {
+                    model.rename(
+                        documentID: pendingRenameID,
+                        displayName: renameText
+                    )
+                }
+                pendingRenameID = nil
+            }
+        } message: {
+            Text("This changes the sidebar name without renaming the Markdown file.")
+        }
+    }
+
+    private func contextRow(_ item: ContextSidebarItem) -> some View {
+        HStack(spacing: 8) {
+            Group {
+                if let icon = model.appIcon(relativePath: item.iconRelativePath) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: item.symbolName)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(4)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+        }
+    }
 }

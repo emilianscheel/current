@@ -1087,6 +1087,81 @@ private actor PromptScreenStub: ScreenContextProviding {
 }
 
 @MainActor
+@Test func contextSidebarPresentationCacheInvalidatesOnlyChangedRows() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-sidebar-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ContextStore(
+        directory: root,
+        trashHandler: { try FileManager.default.removeItem(at: $0) }
+    )
+    store.reload()
+    let cache = ContextSidebarPresentationCache()
+
+    let initialItems = cache.items(in: store, matching: "")
+    let initialGeneration = cache.generationCount
+    #expect(initialGeneration == initialItems.count)
+    #expect(cache.items(in: store, matching: "") == initialItems)
+    #expect(cache.generationCount == initialGeneration)
+
+    let manual = try store.createManualDocument(title: "Scratchpad")
+    var items = cache.items(in: store, matching: "")
+    #expect(cache.generationCount == initialGeneration + 1)
+    #expect(items.first { $0.id == manual.id }?.subtitle == "0 words")
+
+    try store.save(
+        documentID: manual.id,
+        markdown: "Three cached words"
+    )
+    items = cache.items(in: store, matching: "")
+    #expect(cache.generationCount == initialGeneration + 2)
+    #expect(items.first { $0.id == manual.id }?.subtitle == "3 words")
+
+    try store.rename(documentID: manual.id, displayName: "Project notes")
+    items = cache.items(in: store, matching: "")
+    #expect(cache.generationCount == initialGeneration + 3)
+    #expect(items.first { $0.id == manual.id }?.title == "Project notes")
+
+    let filtered = cache.items(in: store, matching: "Project")
+    #expect(filtered.map(\.id) == [manual.id])
+    #expect(cache.generationCount == initialGeneration + 3)
+
+    let startedAt = Date(timeIntervalSince1970: 1_786_000_000)
+    let metadata = AppSessionMetadata(
+        applicationName: "Mail",
+        bundleIdentifier: "com.apple.mail",
+        processIdentifier: 42,
+        startedAt: startedAt,
+        dayIdentifier: "2026-08-01",
+        iconRelativePath: "App Icons/com.apple.mail.png"
+    )
+    let session = try store.applyAppSessionUpdate(
+        metadata: metadata,
+        update: ContextDocumentUpdate(
+            changed: true,
+            currentStateMarkdown: "Reading an email",
+            activityEntryMarkdown: nil
+        ),
+        at: startedAt
+    )
+    items = cache.items(in: store, matching: "")
+    let activeItem = try #require(items.first { $0.id == session.id })
+    #expect(activeItem.subtitle.contains("Active"))
+    #expect(activeItem.iconRelativePath == "App Icons/com.apple.mail.png")
+    let generationBeforeClose = cache.generationCount
+
+    try store.closeAppSession(
+        sessionID: metadata.sessionID,
+        at: startedAt.addingTimeInterval(300)
+    )
+    items = cache.items(in: store, matching: "")
+    let closedItem = try #require(items.first { $0.id == session.id })
+    #expect(!closedItem.subtitle.contains("Active"))
+    #expect(cache.generationCount == generationBeforeClose + 1)
+}
+
+@MainActor
 @Test func aliasOnlyMetadataSchemaRemainsReadable() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
         "current-v1-metadata-\(UUID().uuidString)"

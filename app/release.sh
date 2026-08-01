@@ -56,7 +56,7 @@ print_setup_help() {
 }
 
 setup_release_environment() {
-  local failed keychain identity_count
+  local failed keychain identity_count finder_volume_count
   failed=false
 
   keychain="$(default_keychain)"
@@ -93,6 +93,16 @@ setup_release_environment() {
     print "Notarization profile '$NOTARY_PROFILE' is ready."
   fi
 
+  if ! finder_volume_count="$(osascript -e 'tell application "Finder" to count (every disk whose name is "Current")' 2>/dev/null)"; then
+    print -u2 "Finder automation is unavailable. Allow the invoking terminal to control Finder in System Settings → Privacy & Security → Automation."
+    failed=true
+  elif (( finder_volume_count > 0 )); then
+    print -u2 "A volume named 'Current' is mounted. Eject it before creating a release."
+    failed=true
+  else
+    print "Finder automation is ready."
+  fi
+
   if $failed; then
     print_setup_help
     return 1
@@ -111,7 +121,7 @@ TAG="$1"
 VERSION="${TAG#v}"
 TAG_REF="refs/tags/$TAG"
 
-for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum; do
+for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum osascript tiffutil SetFile; do
   command -v "$required_command" >/dev/null || die "$required_command is required. Run ./app/release.sh --setup for setup instructions."
 done
 [[ "$(uname -m)" == "arm64" ]] || die "Current releases must be built on Apple silicon (arm64)."
@@ -201,13 +211,8 @@ done
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-DMG_ROOT="$(mktemp -d "${TMPDIR%/}/current-dmg-root.XXXXXX")"
-trap 'cleanup; rm -rf "$DMG_ROOT"' EXIT INT TERM
-ditto "$STAGE_APP" "$DMG_ROOT/Current.app"
-ln -s /Applications "$DMG_ROOT/Applications"
-
 print "Creating and signing Current.dmg…"
-hdiutil create -volname Current -srcfolder "$DMG_ROOT" -format UDZO -ov "$DMG_PATH"
+"$PROJECT_DIR/package-dmg.sh" --app "$STAGE_APP" --output "$DMG_PATH"
 codesign --force --timestamp --identifier com.emilianscheel.current.dmg \
   --keychain "$KEYCHAIN_PATH" --sign "$SIGNING_IDENTITY" "$DMG_PATH"
 codesign --verify --verbose=2 "$DMG_PATH"
@@ -240,6 +245,8 @@ hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_DIR" >/dev/nu
 MOUNTED=true
 [[ -d "$MOUNT_DIR/Current.app" ]] || die "Mounted DMG does not contain Current.app."
 [[ "$(readlink "$MOUNT_DIR/Applications")" == "/Applications" ]] || die "Mounted DMG has an invalid Applications shortcut."
+[[ -f "$MOUNT_DIR/.DS_Store" ]] || die "Mounted DMG does not contain Finder layout metadata."
+[[ -f "$MOUNT_DIR/.background/installer-background.tiff" ]] || die "Mounted DMG does not contain its Finder background."
 codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/Current.app"
 spctl --assess --type execute --verbose=2 "$MOUNT_DIR/Current.app"
 hdiutil detach "$MOUNT_DIR" >/dev/null

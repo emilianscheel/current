@@ -131,6 +131,7 @@ public final class ContextStore {
     public static let instructionsDocumentID = "manual:instructions"
 
     public private(set) var documents: [ContextDocument] = []
+    public private(set) var revision: UInt64 = 0
     public private(set) var lastError: String?
     @ObservationIgnored public var onDocumentsChanged: (([ContextDocument]) -> Void)?
 
@@ -224,6 +225,7 @@ public final class ContextStore {
             documents = standingIDs.compactMap { id in
                 sorted.first { $0.id == id }
             } + sorted.filter { !standingIDs.contains($0.id) }
+            revision &+= 1
             lastError = nil
             onDocumentsChanged?(documents)
         } catch {

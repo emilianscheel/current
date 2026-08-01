@@ -136,6 +136,7 @@ app/Assets/                      Editable SVG artwork and legacy app-icon rendit
 app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion tests
 app/assemble-app.sh              Shared test, optimized build, assembly, and signing workflow
 app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
+app/package-dmg.sh               Finder layout and compressed DMG packaging workflow
 app/release.sh                   Developer ID signing, notarization, tag, and GitHub release workflow
 ```
 
@@ -279,6 +280,8 @@ Development builds are intentionally different: the installed local app uses a s
    ./app/release.sh --setup
    ```
 
+The first customized DMG build may ask for permission to let the invoking terminal control Finder. Grant that permission in **System Settings → Privacy & Security → Automation**; Finder writes the icon positions, background, and compact window geometry into the disk image.
+
 The default notarization profile is `Current-notary`; override it with `CURRENT_NOTARY_PROFILE`. If the Keychain contains multiple Developer ID Application identities, select one by SHA-1 hash or full certificate name with `CURRENT_DEVELOPER_ID_APPLICATION`.
 
 ### Publish a release
@@ -289,7 +292,7 @@ First push `main`, ensure the worktree is clean, and run:
 ./app/release.sh v0.2.0
 ```
 
-The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
+The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates a compact drag-to-Applications Finder layout and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
 
 Use `app/release.sh` rather than creating or pushing release tags manually. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
 

@@ -51,11 +51,11 @@ if $ASSEMBLE_ONLY; then
   )
 else
   CHIP_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip:/{print $2; exit}')"
-  if [[ ! "$CHIP_NAME" =~ 'Apple M([0-9]+)' ]] || (( match[1] < 3 )); then
-    die "Current requires an Apple M3 or newer chip (found: ${CHIP_NAME:-unknown})."
+  if [[ ! "$CHIP_NAME" =~ 'Apple M([0-9]+)' ]] || (( match[1] < 1 )); then
+    die "Current requires an Apple M1 or newer chip (found: ${CHIP_NAME:-unknown})."
   fi
   MEMORY_BYTES="$(sysctl -n hw.memsize)"
-  (( MEMORY_BYTES >= 17179869184 )) || die "Current requires at least 16 GiB of unified memory."
+  (( MEMORY_BYTES >= 8589934592 )) || die "Current requires at least 8 GiB of unified memory."
 
   USER_NAME="$(id -un)"
   USER_HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"

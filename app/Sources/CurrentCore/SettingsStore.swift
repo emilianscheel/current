@@ -67,5 +67,11 @@ public final class SettingsStore {
         onboardingStep = OnboardingStep(rawValue: defaults.string(forKey: "onboardingStep") ?? "") ?? .welcome
     }
 
+    public func applyHardwareCapabilities(_ hardware: HardwareSupport) {
+        contextWorkerEnabled = hardware.contextWorkerEnabled(
+            requested: contextWorkerEnabled
+        )
+    }
+
     private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: key) }
 }

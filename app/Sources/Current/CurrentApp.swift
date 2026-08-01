@@ -29,7 +29,8 @@ final class AppRuntime {
         subsystem: "com.emilianscheel.current",
         category: "ContextWorkerMode"
     )
-    var settings = SettingsStore.shared
+    var settings: SettingsStore
+    let hardware: HardwareSupport
     let permissions = PermissionManager()
     let model = ModelManager()
     let contextWorker = ContextWorkerClient()
@@ -75,7 +76,6 @@ final class AppRuntime {
         promptContextPreparer: promptContextPreparer,
         conversationContext: conversationContext
     )
-    let hardware = HardwareChecker().current()
     @ObservationIgnored lazy var overlay = NotchOverlayController(audio: coordinator.audio, settings: settings)
     @ObservationIgnored lazy var onboarding = OnboardingController(runtime: self)
     @ObservationIgnored lazy var context = ContextWindowController(runtime: self, store: contextStore)
@@ -94,7 +94,13 @@ final class AppRuntime {
     @ObservationIgnored private var lastPermissionSnapshot: PermissionSnapshot?
     private(set) var inputMonitoringRestartRequired = false
 
-    init() {
+    init(
+        settings: SettingsStore = .shared,
+        hardware: HardwareSupport = HardwareChecker().current()
+    ) {
+        self.settings = settings
+        self.hardware = hardware
+        settings.applyHardwareCapabilities(hardware)
         contextStore.reload()
         scheduleRetrievalReindex()
         contextStore.onDocumentsChanged = { [weak self] _ in
@@ -304,7 +310,8 @@ final class AppRuntime {
     }
 
     func scheduleRetrievalReindex() {
-        guard ContextEngineeringFeatureFlags.localRetrieval else { return }
+        guard settings.contextWorkerEnabled,
+              ContextEngineeringFeatureFlags.localRetrieval else { return }
         let documents = contextStore.documents
         Task.detached(priority: .utility) { [retrievalIndex] in
             try? await retrievalIndex.synchronize(
@@ -315,10 +322,13 @@ final class AppRuntime {
     }
 
     func setContextWorkerEnabled(_ enabled: Bool) {
-        guard settings.contextWorkerEnabled != enabled else { return }
-        settings.contextWorkerEnabled = enabled
+        let effectiveEnabled = hardware.contextWorkerEnabled(
+            requested: enabled
+        )
+        guard settings.contextWorkerEnabled != effectiveEnabled else { return }
+        settings.contextWorkerEnabled = effectiveEnabled
         Task { @MainActor [weak self] in
-            await self?.applyContextWorkerMode(enabled)
+            await self?.applyContextWorkerMode(effectiveEnabled)
         }
     }
 
@@ -337,6 +347,7 @@ final class AppRuntime {
             "Context worker mode changed to \(enabled ? "rich" : "fast", privacy: .public)"
         )
         if enabled {
+            scheduleRetrievalReindex()
             contextModel.prepareIfNeeded()
             await intentRouter.setEnabled(settings.isEnabled)
             applyContinuousContextPreference()

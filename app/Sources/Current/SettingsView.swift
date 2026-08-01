@@ -98,8 +98,14 @@ struct SettingsView: View {
             )
             LabeledContent(
                 "State",
-                value: modelState(runtime.contextModel.state)
+                value: runtime.hardware.supportsContextWorker
+                    ? modelState(runtime.contextModel.state)
+                    : "Unavailable · Requires 16 GiB"
             )
+            if !runtime.hardware.supportsContextWorker {
+                Text("This Mac uses dictation-first mode. Speech recognition and insertion remain available without Gemma, prompt writing, or screen context.")
+                    .foregroundStyle(.secondary)
+            }
             if case .failed(let reason) = runtime.contextModel.state {
                 Text(reason).foregroundStyle(.red)
                 Button("Retry") { runtime.contextModel.retry() }
@@ -132,7 +138,11 @@ struct SettingsView: View {
             )
             .disabled(!runtime.settings.contextWorkerEnabled)
             if !runtime.settings.contextWorkerEnabled {
-                Text("Enable Context Worker from the menu bar to use contextual processing.")
+                Text(
+                    runtime.hardware.supportsContextWorker
+                        ? "Enable Context Worker from the menu bar to use contextual processing."
+                        : "Context features require at least 16 GiB of unified memory. Dictation remains available."
+                )
                     .foregroundStyle(.secondary)
             }
             LabeledContent(
@@ -175,6 +185,9 @@ struct SettingsView: View {
     }
 
     private var contextWorkerState: String {
+        guard runtime.hardware.supportsContextWorker else {
+            return "Unavailable · Requires 16 GiB"
+        }
         guard runtime.settings.contextWorkerEnabled else { return "Disabled" }
         return switch runtime.screenContext.backgroundState {
         case .idle: "Idle"

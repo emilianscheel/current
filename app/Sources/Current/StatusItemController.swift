@@ -100,16 +100,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleEnabled),
             symbol: runtime.settings.isEnabled ? "pause" : "play"
         )
-        add(
-            runtime.settings.contextWorkerEnabled
-                ? "Pause Context Worker"
-                : "Resume Context Worker",
-            to: menu,
-            action: #selector(toggleContextWorker),
-            symbol: runtime.settings.contextWorkerEnabled
-                ? "pause"
-                : "play"
-        )
+        if runtime.hardware.supportsContextWorker {
+            add(
+                runtime.settings.contextWorkerEnabled
+                    ? "Pause Context Worker"
+                    : "Resume Context Worker",
+                to: menu,
+                action: #selector(toggleContextWorker),
+                symbol: runtime.settings.contextWorkerEnabled
+                    ? "pause"
+                    : "play"
+            )
+        } else {
+            add(
+                "Context Worker Unavailable — Requires 16 GiB",
+                to: menu,
+                symbol: "memorychip",
+                enabled: false
+            )
+        }
         addModel(
             "Parakeet TDT v3 Multilingual",
             category: "Speech model",
@@ -120,8 +129,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             "Gemma 4 E2B 4-bit",
             category: "Context model",
             state: runtime.contextModel.state,
-            statusOverride: runtime.settings.contextWorkerEnabled
-                ? nil : "Disabled",
+            statusOverride: runtime.hardware.supportsContextWorker
+                ? (runtime.settings.contextWorkerEnabled ? nil : "Disabled")
+                : "Unavailable · Requires 16 GiB",
             to: menu
         )
         if let updateController {

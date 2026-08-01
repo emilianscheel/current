@@ -252,6 +252,10 @@ public enum ModelState: Sendable, Equatable {
 }
 
 public struct HardwareSupport: Sendable, Equatable {
+    public static let minimumMemoryBytes: UInt64 = 8 * 1_073_741_824
+    public static let contextWorkerMinimumMemoryBytes: UInt64 =
+        16 * 1_073_741_824
+
     public let isAppleSilicon: Bool
     public let generation: Int?
     public let memoryBytes: UInt64
@@ -265,13 +269,28 @@ public struct HardwareSupport: Sendable, Equatable {
     }
 
     public var isSupported: Bool {
-        isAppleSilicon && (generation ?? 0) >= 3 && memoryBytes >= 16 * 1_073_741_824
+        isAppleSilicon
+            && (generation ?? 0) >= 1
+            && memoryBytes >= Self.minimumMemoryBytes
+    }
+
+    public var supportsContextWorker: Bool {
+        isSupported && memoryBytes >= Self.contextWorkerMinimumMemoryBytes
+    }
+
+    public func contextWorkerEnabled(requested: Bool) -> Bool {
+        requested && supportsContextWorker
     }
 
     public var reason: String {
         if !isAppleSilicon { return "Current requires an Apple-silicon Mac." }
-        if (generation ?? 0) < 3 { return "Current requires an M3 or newer Apple chip." }
-        if memoryBytes < 16 * 1_073_741_824 { return "Current requires at least 16 GB of unified memory." }
+        if (generation ?? 0) < 1 { return "Current requires an Apple M1 or newer chip." }
+        if memoryBytes < Self.minimumMemoryBytes {
+            return "Current requires at least 8 GB of unified memory."
+        }
+        if !supportsContextWorker {
+            return "Dictation-first mode. Context features require at least 16 GB of unified memory."
+        }
         return "Supported"
     }
 }

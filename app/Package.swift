@@ -66,6 +66,17 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             resources: [.process("Resources")],
+            swiftSettings: [
+                // macOS 26.5 can crash inside Swift's generated MainActor
+                // executor checks before AppKit callbacks enter their method
+                // bodies. Keep those checks in debug builds and in CurrentCore,
+                // but omit them from the shipped AppKit executable until the
+                // runtime issue is fixed upstream.
+                .unsafeFlags(
+                    ["-disable-dynamic-actor-isolation"],
+                    .when(configuration: .release)
+                ),
+            ],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-rpath",

@@ -4,10 +4,49 @@ import Foundation
 import Testing
 @testable import CurrentCore
 
-@Test func supportedHardwareRequiresM3And16GB() {
-    #expect(HardwareSupport(isAppleSilicon: true, generation: 3, memoryBytes: 16 * 1_073_741_824, modelName: "Apple M3").isSupported)
-    #expect(!HardwareSupport(isAppleSilicon: true, generation: 2, memoryBytes: 32 * 1_073_741_824, modelName: "Apple M2").isSupported)
-    #expect(!HardwareSupport(isAppleSilicon: true, generation: 4, memoryBytes: 8 * 1_073_741_824, modelName: "Apple M4").isSupported)
+@Test func appleSiliconHardwareUsesMemoryBasedCapabilityTiers() {
+    let gibibyte = UInt64(1_073_741_824)
+    for generation in 1...5 {
+        let eightGB = HardwareSupport(
+            isAppleSilicon: true,
+            generation: generation,
+            memoryBytes: 8 * gibibyte,
+            modelName: "Apple M\(generation)"
+        )
+        #expect(eightGB.isSupported)
+        #expect(!eightGB.supportsContextWorker)
+        #expect(!eightGB.contextWorkerEnabled(requested: true))
+        #expect(eightGB.reason.contains("Dictation-first mode"))
+
+        let sixteenGB = HardwareSupport(
+            isAppleSilicon: true,
+            generation: generation,
+            memoryBytes: 16 * gibibyte,
+            modelName: "Apple M\(generation)"
+        )
+        #expect(sixteenGB.isSupported)
+        #expect(sixteenGB.supportsContextWorker)
+        #expect(sixteenGB.contextWorkerEnabled(requested: true))
+    }
+
+    #expect(!HardwareSupport(
+        isAppleSilicon: false,
+        generation: nil,
+        memoryBytes: 32 * gibibyte,
+        modelName: "Intel"
+    ).isSupported)
+    #expect(!HardwareSupport(
+        isAppleSilicon: true,
+        generation: nil,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Unknown Mac"
+    ).isSupported)
+    #expect(!HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 4 * gibibyte,
+        modelName: "Apple M1"
+    ).isSupported)
 }
 
 @Test func hardwareGenerationParser() {
@@ -1120,6 +1159,36 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(restored.continuousContextEnabled)
 }
 
+@MainActor
+@Test func hardwareCapabilitiesReconcilePersistedContextWorkerMode() {
+    let suiteName = "CurrentHardwareCapabilities.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let gibibyte = UInt64(1_073_741_824)
+
+    defaults.set(true, forKey: "contextWorkerEnabled")
+    let constrained = SettingsStore(defaults: defaults)
+    constrained.applyHardwareCapabilities(HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 8 * gibibyte,
+        modelName: "Apple M1"
+    ))
+    #expect(!constrained.contextWorkerEnabled)
+    #expect(!defaults.bool(forKey: "contextWorkerEnabled"))
+
+    defaults.set(true, forKey: "contextWorkerEnabled")
+    let rich = SettingsStore(defaults: defaults)
+    rich.applyHardwareCapabilities(HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Apple M1"
+    ))
+    #expect(rich.contextWorkerEnabled)
+    #expect(defaults.bool(forKey: "contextWorkerEnabled"))
+}
+
 @Test func fastModeOnboardingSkipsScreenRecordingAndGemmaRequirement() {
     let fastPermissions = PermissionSnapshot(
         microphone: .granted,
@@ -1226,6 +1295,46 @@ private func contextTestDate(
     #expect(firstDay.markdown.contains("**Friday, July 24, 2026 15:30 h**\nSecond conversation"))
     #expect(store.filteredDocuments(matching: "Second").map(\.id) == ["2026-07-24"])
     #expect(store.filteredDocuments(matching: "July 25").map(\.id) == ["2026-07-25"])
+}
+
+@MainActor
+@Test func contextStoreRepeatedlyReloadsAndSearchesMixedDirectoryContents() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-context-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: true
+    )
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_US")
+    )
+    try Data("ignored".utf8).write(
+        to: root.appendingPathComponent("not-context.txt")
+    )
+    try store.append(
+        "Stable reload marker",
+        at: contextTestDate(2026, 7, 24, 9, 5, calendar: calendar)
+    )
+
+    for _ in 0..<100 {
+        store.reload()
+        #expect(store.lastError == nil)
+        #expect(
+            store.documents.prefix(2).map(\.id) == [
+                ContextStore.aboutMeDocumentID,
+                ContextStore.instructionsDocumentID,
+            ]
+        )
+        #expect(
+            store.filteredDocuments(matching: "reload marker").map(\.id)
+                == ["2026-07-24"]
+        )
+    }
 }
 
 @MainActor

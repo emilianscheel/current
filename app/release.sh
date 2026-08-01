@@ -375,7 +375,7 @@ VERIFIED_REMOTE_COMMIT="$(git ls-remote "$REMOTE" "$TAG_REF^{}" | awk 'NR == 1 {
 METADATA_FILE="$DIST_DIR/release-metadata.md"
 {
   print '<!-- current-release-metadata:start -->'
-  print 'Requires macOS 26 or newer, an Apple M3 or newer chip, and at least 16 GiB of unified memory.'
+  print 'Requires macOS 26 or newer, an Apple M1 or newer chip, and at least 8 GiB of unified memory. Context features require 16 GiB.'
   print ''
   print "**Current.dmg SHA-256:** \`$DMG_SHA256\`"
   print '<!-- current-release-metadata:end -->'

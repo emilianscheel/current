@@ -326,11 +326,22 @@ struct OnboardingView: View {
 
     @ViewBuilder private func content(for step: OnboardingStep) -> some View {
         if !runtime.hardware.isSupported {
-            StepLayout(symbol: "macbook", title: "This Mac isn’t supported") { EmptyView() }
+            StepLayout(symbol: "macbook", title: "This Mac isn’t supported") {
+                Text(runtime.hardware.reason)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         } else {
             switch step {
             case .welcome:
-                StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.") { EmptyView() }
+                StepLayout(symbol: "alternatingcurrent", title: "Speak. Release. Done.") {
+                    if !runtime.hardware.supportsContextWorker {
+                        Text("This Mac will use dictation-first mode. Local speech recognition and insertion are available; memory-intensive prompt writing and screen context require at least 16 GiB of unified memory.")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 460)
+                    }
+                }
             case .microphone: permissionStep(.microphone)
             case .accessibility: permissionStep(.accessibility)
             case .screenRecording: permissionStep(.screenRecording)

@@ -37,7 +37,7 @@ private func render(scale: Int, to outputURL: URL) throws {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
 
-    NSColor.white.setFill()
+    NSColor.clear.setFill()
     NSBezierPath(rect: NSRect(origin: .zero, size: logicalSize)).fill()
 
     let sizeConfiguration = NSImage.SymbolConfiguration(

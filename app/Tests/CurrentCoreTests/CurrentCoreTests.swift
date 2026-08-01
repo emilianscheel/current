@@ -1204,6 +1204,14 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     )
     #expect(
         OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: true,
+            canGoBack: true,
+            canAdvance: true
+        ) == .back
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
             for: .right,
             isEditingText: true,
             canGoBack: true,

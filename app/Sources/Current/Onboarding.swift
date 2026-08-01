@@ -9,6 +9,28 @@ enum OnboardingNavigationDirection {
     case backward
 }
 
+private final class OnboardingWindow: NSWindow {
+    var handleArrowKey: ((OnboardingArrowKey) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection([
+                .command, .control, .option, .shift,
+              ]).isEmpty else {
+            super.sendEvent(event)
+            return
+        }
+        let key: OnboardingArrowKey?
+        switch event.keyCode {
+        case 123: key = .left
+        case 124: key = .right
+        default: key = nil
+        }
+        if let key, handleArrowKey?(key) == true { return }
+        super.sendEvent(event)
+    }
+}
+
 @MainActor
 @Observable
 final class OnboardingController: NSObject, NSWindowDelegate {
@@ -67,7 +89,13 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         if window == nil {
             let view = OnboardingView(controller: self, runtime: runtime)
             let controller = NSHostingController(rootView: view)
-            let window = NSWindow(contentViewController: controller)
+            let window = OnboardingWindow(contentViewController: controller)
+            window.handleArrowKey = { [weak self, weak window] key in
+                self?.handleArrowKey(
+                    key,
+                    isEditingText: window?.firstResponder is NSTextView
+                ) ?? false
+            }
             window.title = "Welcome to Current"
             window.styleMask = [
                 .titled,
@@ -201,6 +229,34 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         setStep(previous, direction: .backward)
     }
 
+    func handleArrowKey(
+        _ key: OnboardingArrowKey,
+        isEditingText: Bool
+    ) -> Bool {
+        let action = OnboardingKeyboardNavigation.action(
+            for: key,
+            isEditingText: isEditingText,
+            canGoBack: OnboardingFlow.adjacentStep(
+                from: step,
+                direction: -1,
+                permissions: permissions,
+                contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
+                restartRequired: restartRequired
+            ) != nil,
+            canAdvance: canAdvanceWithKeyboard
+        )
+        switch action {
+        case .back:
+            back()
+            return true
+        case .advance:
+            step == .complete ? finish() : next()
+            return true
+        case nil:
+            return false
+        }
+    }
+
     func restart() {
         permissionGuidance.dismiss()
         focusOverlay.dismissAll()
@@ -259,6 +315,22 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         runtime.settings.onboardingStep = step
         if step == .welcome, window?.isKeyWindow == true, let window {
             focusOverlay.presentStage(around: window)
+        }
+    }
+
+    private var canAdvanceWithKeyboard: Bool {
+        guard runtime.hardware.isSupported else { return false }
+        return switch step {
+        case .microphone: permissions.microphone.isGranted
+        case .accessibility: permissions.accessibility.isGranted
+        case .screenRecording: permissions.screenRecording.isGranted
+        case .inputMonitoring: permissions.inputMonitoring.isGranted
+        case .restart: false
+        case .model:
+            runtime.model.state.isReady
+                && (!runtime.settings.contextWorkerEnabled
+                    || runtime.contextModel.state.isReady)
+        default: true
         }
     }
 
@@ -342,25 +414,6 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.light)
-        .onKeyPress(keys: [.leftArrow, .rightArrow]) { keyPress in
-            let key: OnboardingArrowKey
-            switch keyPress.key {
-            case .leftArrow: key = .left
-            case .rightArrow: key = .right
-            default: return .ignored
-            }
-            guard let action = OnboardingKeyboardNavigation.action(
-                for: key,
-                isEditingText: NSApp.keyWindow?.firstResponder is NSTextView,
-                canGoBack: canGoBack,
-                canAdvance: canAdvance
-            ) else { return .ignored }
-            switch action {
-            case .back: controller.back()
-            case .advance: advance()
-            }
-            return .handled
-        }
     }
 
     @ViewBuilder private func content(for step: OnboardingStep) -> some View {

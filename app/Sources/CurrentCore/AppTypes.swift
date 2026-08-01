@@ -406,10 +406,9 @@ public enum OnboardingKeyboardNavigation {
         canGoBack: Bool,
         canAdvance: Bool
     ) -> OnboardingKeyboardAction? {
-        guard !isEditingText else { return nil }
         return switch key {
         case .left where canGoBack: .back
-        case .right where canAdvance: .advance
+        case .right where !isEditingText && canAdvance: .advance
         default: nil
         }
     }

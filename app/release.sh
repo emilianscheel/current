@@ -109,6 +109,7 @@ fi
 TAG="$1"
 [[ "$TAG" =~ '^v[0-9]+\.[0-9]+\.[0-9]+$' ]] || die "Release tag must use vX.Y.Z numeric format." 64
 VERSION="${TAG#v}"
+TAG_REF="refs/tags/$TAG"
 
 for required_command in git gh swift codesign security xcrun xcodebuild hdiutil ditto plutil spctl shasum; do
   command -v "$required_command" >/dev/null || die "$required_command is required. Run ./app/release.sh --setup for setup instructions."
@@ -130,14 +131,14 @@ BUILD_VERSION="$(git rev-list --count HEAD)"
 [[ "$BUILD_VERSION" =~ '^[0-9]+$' ]] && (( BUILD_VERSION > 0 )) || die "Could not derive a positive numeric build version from Git history."
 
 LOCAL_TAG_EXISTS=false
-if git show-ref --verify --quiet "refs/tags/$TAG"; then
+if git show-ref --verify --quiet "$TAG_REF"; then
   LOCAL_TAG_EXISTS=true
-  [[ "$(git cat-file -t "refs/tags/$TAG")" == "tag" ]] || die "Existing tag $TAG is lightweight; releases require an annotated tag."
+  [[ "$(git cat-file -t "$TAG_REF")" == "tag" ]] || die "Existing tag $TAG is lightweight; releases require an annotated tag."
   [[ "$(git rev-list -n 1 "$TAG")" == "$HEAD_COMMIT" ]] || die "Existing tag $TAG points to a different commit."
 fi
 
-REMOTE_TAG_OBJECT="$(git ls-remote --refs "$REMOTE" "refs/tags/$TAG" | awk 'NR == 1 { print $1 }')"
-REMOTE_TAG_COMMIT="$(git ls-remote "$REMOTE" "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')"
+REMOTE_TAG_OBJECT="$(git ls-remote --refs "$REMOTE" "$TAG_REF" | awk 'NR == 1 { print $1 }')"
+REMOTE_TAG_COMMIT="$(git ls-remote "$REMOTE" "$TAG_REF^{}" | awk 'NR == 1 { print $1 }')"
 if [[ -n "$REMOTE_TAG_OBJECT" ]]; then
   [[ -n "$REMOTE_TAG_COMMIT" ]] || die "Remote tag $TAG is not annotated."
   [[ "$REMOTE_TAG_COMMIT" == "$HEAD_COMMIT" ]] || die "Remote tag $TAG points to a different commit."
@@ -255,9 +256,9 @@ if ! $LOCAL_TAG_EXISTS; then
 fi
 if [[ -z "$REMOTE_TAG_OBJECT" ]]; then
   print "Pushing annotated tag $TAG…"
-  git push "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG"
+  git push "$REMOTE" "${TAG_REF}:${TAG_REF}"
 fi
-VERIFIED_REMOTE_COMMIT="$(git ls-remote "$REMOTE" "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')"
+VERIFIED_REMOTE_COMMIT="$(git ls-remote "$REMOTE" "$TAG_REF^{}" | awk 'NR == 1 { print $1 }')"
 [[ "$VERIFIED_REMOTE_COMMIT" == "$HEAD_COMMIT" ]] || die "GitHub does not resolve $TAG to the expected commit."
 
 METADATA_FILE="$DIST_DIR/release-metadata.md"

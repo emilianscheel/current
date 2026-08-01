@@ -52,7 +52,7 @@ On first launch, or whenever a required permission is missing, Current opens a S
 3. Accessibility
 4. Screen Recording on Macs with 16 GiB or more
 5. Input Monitoring
-6. One required restart
+6. A restart only when a newly granted permission requires it
 7. Model readiness (Parakeet only in dictation-first mode; Parakeet and Gemma in rich mode)
 8. Practice dictation
 9. Launch-at-login and sound preferences
@@ -66,7 +66,7 @@ Current polls permission state and automatically advances when a grant is detect
 | Screen Recording (16 GiB rich mode only) | Read visible screen text for per-app context | `CGPreflightScreenCaptureAccess()` |
 | Input Monitoring | Receive global `secondaryFn` events and detect when typing settles | `CGPreflightListenEventAccess()` |
 
-macOS requires Current to restart after Input Monitoring is enabled. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
+macOS can require Current to restart after Input Monitoring is enabled. Current shows the restart step only while such a permission remains unresolved; once all required permissions are granted, normal Back and Continue navigation skips it. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
 
 Denied or revoked permissions never prevent the menu from opening. Choose **Permissions & Onboarding…** to repair access.
 

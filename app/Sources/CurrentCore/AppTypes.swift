@@ -306,10 +306,17 @@ public enum OnboardingFlow {
         completed: Bool,
         permissions: PermissionSnapshot,
         modelInstalled: Bool,
-        contextWorkerEnabled: Bool = true
+        contextWorkerEnabled: Bool = true,
+        restartRequired: Bool = false
     ) -> OnboardingStep {
-        let saved = !contextWorkerEnabled && saved == .screenRecording
+        var saved = !contextWorkerEnabled && saved == .screenRecording
             ? OnboardingStep.inputMonitoring : saved
+        let steps = visibleSteps(
+            permissions: permissions,
+            contextWorkerEnabled: contextWorkerEnabled,
+            restartRequired: restartRequired
+        )
+        if !steps.contains(saved) { saved = .model }
         if !completed, saved == .welcome { return .welcome }
         if let missing = permissions.firstMissing(
             contextWorkerEnabled: contextWorkerEnabled
@@ -329,30 +336,81 @@ public enum OnboardingFlow {
     public static func automaticDestination(
         from step: OnboardingStep,
         permissions: PermissionSnapshot,
-        contextWorkerEnabled: Bool = true
+        contextWorkerEnabled: Bool = true,
+        restartRequired: Bool = false
     ) -> OnboardingStep? {
-        switch step {
-        case .microphone where permissions.microphone.isGranted: .accessibility
-        case .accessibility where permissions.accessibility.isGranted:
-            contextWorkerEnabled ? .screenRecording : .inputMonitoring
-        case .screenRecording where permissions.screenRecording.isGranted: .inputMonitoring
-        case .inputMonitoring where permissions.inputMonitoring.isGranted: .restart
-        default: nil
+        let permissionGranted = switch step {
+        case .microphone: permissions.microphone.isGranted
+        case .accessibility: permissions.accessibility.isGranted
+        case .screenRecording: permissions.screenRecording.isGranted
+        case .inputMonitoring: permissions.inputMonitoring.isGranted
+        default: false
         }
+        guard permissionGranted else { return nil }
+        return adjacentStep(
+            from: step,
+            direction: 1,
+            permissions: permissions,
+            contextWorkerEnabled: contextWorkerEnabled,
+            restartRequired: restartRequired
+        )
     }
 
     public static func adjacentStep(
         from step: OnboardingStep,
         direction: Int,
-        contextWorkerEnabled: Bool
+        permissions: PermissionSnapshot,
+        contextWorkerEnabled: Bool,
+        restartRequired: Bool = false
     ) -> OnboardingStep? {
-        var steps = OnboardingStep.allCases
-        if !contextWorkerEnabled {
-            steps.removeAll { $0 == .screenRecording }
-        }
+        let steps = visibleSteps(
+            permissions: permissions,
+            contextWorkerEnabled: contextWorkerEnabled,
+            restartRequired: restartRequired
+        )
         guard let index = steps.firstIndex(of: step) else { return nil }
         let destination = index + direction
         guard steps.indices.contains(destination) else { return nil }
         return steps[destination]
+    }
+
+    private static func visibleSteps(
+        permissions: PermissionSnapshot,
+        contextWorkerEnabled: Bool,
+        restartRequired: Bool
+    ) -> [OnboardingStep] {
+        OnboardingStep.allCases.filter { step in
+            if step == .screenRecording { return contextWorkerEnabled }
+            if step == .restart {
+                return restartRequired && !permissions.allGranted(
+                    contextWorkerEnabled: contextWorkerEnabled
+                )
+            }
+            return true
+        }
+    }
+}
+
+public enum OnboardingArrowKey: Sendable {
+    case left, right
+}
+
+public enum OnboardingKeyboardAction: Equatable, Sendable {
+    case back, advance
+}
+
+public enum OnboardingKeyboardNavigation {
+    public static func action(
+        for key: OnboardingArrowKey,
+        isEditingText: Bool,
+        canGoBack: Bool,
+        canAdvance: Bool
+    ) -> OnboardingKeyboardAction? {
+        guard !isEditingText else { return nil }
+        return switch key {
+        case .left where canGoBack: .back
+        case .right where canAdvance: .advance
+        default: nil
+        }
     }
 }

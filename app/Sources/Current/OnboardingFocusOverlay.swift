@@ -111,17 +111,17 @@ final class OnboardingFocusOverlayController {
                       self.generation.matches(presentationGeneration) else {
                     return
                 }
-                let promptFrame = self.appKitPromptFrame(
+                let promptTarget = self.appKitPromptTarget(
                     excluding: onboardingWindow
                 ) ?? MicrophonePromptMatcher.candidate(
                     baselineWindowIDs: baseline,
                     observations: Self.windowObservations(),
                     applicationProcessIdentifier: applicationPID,
                     excludedWindowID: excludedWindowID
-                )?.frame
+                ).map(MicrophonePromptOverlayTarget.init(observation:))
 
-                if let promptFrame {
-                    self.renderPermissionPrompt(frame: promptFrame)
+                if let promptTarget {
+                    self.renderPermissionPrompt(target: promptTarget)
                 } else {
                     self.panels.values.forEach { $0.hide() }
                 }
@@ -179,21 +179,23 @@ final class OnboardingFocusOverlayController {
         }
     }
 
-    private func renderPermissionPrompt(frame: CGRect) {
+    private func renderPermissionPrompt(target: MicrophonePromptOverlayTarget) {
         ensurePanels()
         for screen in NSScreen.screens {
             guard let id = Self.displayID(for: screen),
                   let panel = panels[id] else { continue }
-            let focusFrame = PermissionGuidanceLayout.localIntersection(
-                of: frame,
-                in: screen.frame
-            )
+            let focusFrame = target.foregroundFocusFrame.flatMap {
+                PermissionGuidanceLayout.localIntersection(
+                    of: $0,
+                    in: screen.frame
+                )
+            }
             panel.update(
                 screenFrame: screen.frame,
                 focusFrames: focusFrame.map { [$0] } ?? [],
                 outlineFrame: nil,
                 appearance: .permission(grayscaleEnabled: true),
-                behindWindowID: nil
+                behindWindowID: target.windowID
             )
             panel.present()
         }
@@ -248,7 +250,9 @@ final class OnboardingFocusOverlayController {
         }
     }
 
-    private func appKitPromptFrame(excluding window: NSWindow?) -> CGRect? {
+    private func appKitPromptTarget(
+        excluding window: NSWindow?
+    ) -> MicrophonePromptOverlayTarget? {
         let candidates = [window?.attachedSheet, NSApp.modalWindow]
             .compactMap { $0 }
             .filter { candidate in
@@ -256,9 +260,14 @@ final class OnboardingFocusOverlayController {
                     && candidate.frame.width >= 220
                     && candidate.frame.height >= 100
             }
-        return candidates.min {
+        guard let candidate = candidates.min(by: {
             $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
-        }?.frame
+        }) else { return nil }
+        let windowNumber = candidate.windowNumber
+        return MicrophonePromptOverlayTarget(
+            frame: candidate.frame,
+            windowID: windowNumber > 0 ? CGWindowID(windowNumber) : nil
+        )
     }
 
     private static func windowObservations() -> [FocusWindowObservation] {

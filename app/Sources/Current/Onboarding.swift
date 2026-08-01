@@ -36,6 +36,15 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     var completionCelebration = 0
     private var hasCelebratedCompletion = false
 
+    var restartRequired: Bool {
+        runtime.inputMonitoringRestartRequired
+            || (requestedInputMonitoring
+                && !permissions.inputMonitoring.isGranted)
+            || (runtime.settings.contextWorkerEnabled
+                && requestedScreenRecording
+                && !permissions.screenRecording.isGranted)
+    }
+
     init(runtime: AppRuntime) {
         self.runtime = runtime
         self.step = runtime.settings.onboardingStep
@@ -51,7 +60,8 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             modelInstalled: runtime.model.hasInstalledSnapshot
                 && (!runtime.settings.contextWorkerEnabled
                     || runtime.contextModel.hasInstalledSnapshot),
-            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
+            restartRequired: restartRequired
         )
         runtime.settings.onboardingStep = step
         if window == nil {
@@ -131,6 +141,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 
     func refreshPermissions() {
         permissions = runtime.effectivePermissionSnapshot()
+        if step == .restart, !restartRequired {
+            setStep(.model, direction: .forward)
+        }
     }
 
     func requireInputMonitoringRestart() {
@@ -170,7 +183,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         guard let next = OnboardingFlow.adjacentStep(
             from: step,
             direction: 1,
-            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+            permissions: permissions,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
+            restartRequired: restartRequired
         ) else { return }
         setStep(next, direction: .forward)
     }
@@ -179,7 +194,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         guard let previous = OnboardingFlow.adjacentStep(
             from: step,
             direction: -1,
-            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+            permissions: permissions,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
+            restartRequired: restartRequired
         ) else { return }
         setStep(previous, direction: .backward)
     }
@@ -310,7 +327,10 @@ struct OnboardingView: View {
                 }
                 Divider().opacity(0.5)
                 HStack {
-                    if controller.step != .welcome { Button("Back") { controller.back() }.buttonStyle(.plain) }
+                    if canGoBack {
+                        Button("Back") { controller.back() }
+                            .buttonStyle(.plain)
+                    }
                     Spacer()
                     Button(nextTitle) { advance() }
                         .buttonStyle(.borderedProminent)
@@ -322,6 +342,25 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.light)
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { keyPress in
+            let key: OnboardingArrowKey
+            switch keyPress.key {
+            case .leftArrow: key = .left
+            case .rightArrow: key = .right
+            default: return .ignored
+            }
+            guard let action = OnboardingKeyboardNavigation.action(
+                for: key,
+                isEditingText: NSApp.keyWindow?.firstResponder is NSTextView,
+                canGoBack: canGoBack,
+                canAdvance: canAdvance
+            ) else { return .ignored }
+            switch action {
+            case .back: controller.back()
+            case .advance: advance()
+            }
+            return .handled
+        }
     }
 
     @ViewBuilder private func content(for step: OnboardingStep) -> some View {
@@ -441,9 +480,16 @@ struct OnboardingView: View {
                             .foregroundStyle(.green)
                             .transition(permissionStatusTransition)
                     } else {
-                        Label("Waiting for permission", systemImage: "circle.dotted")
-                            .foregroundStyle(.secondary)
-                            .transition(permissionStatusTransition)
+                        Button { controller.request(kind) } label: {
+                            Label(
+                                "Waiting for permission",
+                                systemImage: "circle.dotted"
+                            )
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .transition(permissionStatusTransition)
                     }
                 }
                 .id(isGranted)
@@ -583,6 +629,15 @@ struct OnboardingView: View {
                     || runtime.contextModel.state.isReady)
         default: true
         }
+    }
+    private var canGoBack: Bool {
+        OnboardingFlow.adjacentStep(
+            from: controller.step,
+            direction: -1,
+            permissions: controller.permissions,
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
+            restartRequired: controller.restartRequired
+        ) != nil
     }
     private var nextTitle: String { controller.step == .complete ? "Done" : "Continue" }
     private func advance() { controller.step == .complete ? controller.finish() : controller.next() }

@@ -127,6 +127,24 @@ package struct FocusWindowObservation: Equatable, Sendable {
     }
 }
 
+package struct MicrophonePromptOverlayTarget: Equatable, Sendable {
+    package let frame: CGRect
+    package let windowID: CGWindowID?
+
+    package init(frame: CGRect, windowID: CGWindowID?) {
+        self.frame = frame
+        self.windowID = windowID
+    }
+
+    package init(observation: FocusWindowObservation) {
+        self.init(frame: observation.frame, windowID: observation.id)
+    }
+
+    package var foregroundFocusFrame: CGRect? {
+        windowID == nil ? frame : nil
+    }
+}
+
 package enum MicrophonePromptMatcher {
     package static func candidate(
         baselineWindowIDs: Set<CGWindowID>,

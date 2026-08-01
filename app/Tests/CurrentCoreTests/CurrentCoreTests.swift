@@ -1050,6 +1050,17 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     )
 }
 
+@Test func microphonePromptOverlayUsesTheModalAsItsSharpMask() {
+    let frame = CGRect(x: 140, y: 140, width: 420, height: 260)
+    let stacked = MicrophonePromptOverlayTarget(frame: frame, windowID: 12)
+    #expect(stacked.windowID == 12)
+    #expect(stacked.foregroundFocusFrame == nil)
+
+    let fallback = MicrophonePromptOverlayTarget(frame: frame, windowID: nil)
+    #expect(fallback.windowID == nil)
+    #expect(fallback.foregroundFocusFrame == frame)
+}
+
 @Test func menuBarSymbolStaysDefaultForEveryPhase() {
     for phase in DictationPhase.allCases {
         #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")
@@ -1121,7 +1132,7 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(OnboardingFlow.initialStep(saved: .practice, completed: true, permissions: permissions, modelInstalled: true) == .accessibility)
 }
 
-@Test func onboardingContinuesPastThePermissionRestart() {
+@Test func onboardingOmitsRestartWhenRequiredPermissionsAreGranted() {
     let granted = PermissionSnapshot(
         microphone: .granted,
         accessibility: .granted,
@@ -1129,7 +1140,84 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
         inputMonitoring: .granted
     )
     #expect(OnboardingFlow.initialStep(saved: .restart, completed: false, permissions: granted, modelInstalled: false) == .model)
-    #expect(OnboardingFlow.automaticDestination(from: .inputMonitoring, permissions: granted) == .restart)
+    #expect(
+        OnboardingFlow.automaticDestination(
+            from: .inputMonitoring,
+            permissions: granted,
+            restartRequired: true
+        ) == .model
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: granted,
+            contextWorkerEnabled: true,
+            restartRequired: true
+        ) == .inputMonitoring
+    )
+}
+
+@Test func onboardingIncludesRestartOnlyForAnUnresolvedRestartRequirement() {
+    let missingInputMonitoring = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .denied
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: missingInputMonitoring,
+            contextWorkerEnabled: true,
+            restartRequired: true
+        ) == .restart
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: missingInputMonitoring,
+            contextWorkerEnabled: true,
+            restartRequired: false
+        ) == .inputMonitoring
+    )
+}
+
+@Test func onboardingKeyboardNavigationRespectsAvailabilityAndTextEditing() {
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: false,
+            canGoBack: true,
+            canAdvance: false
+        ) == .back
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .right,
+            isEditingText: false,
+            canGoBack: false,
+            canAdvance: true
+        ) == .advance
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .right,
+            isEditingText: true,
+            canGoBack: true,
+            canAdvance: true
+        ) == nil
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: false,
+            canGoBack: false,
+            canAdvance: true
+        ) == nil
+    )
 }
 
 @MainActor
@@ -1212,6 +1300,15 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
             permissions: fastPermissions,
             modelInstalled: true,
             contextWorkerEnabled: false
+        ) == .inputMonitoring
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: fastPermissions,
+            contextWorkerEnabled: false,
+            restartRequired: true
         ) == .inputMonitoring
     )
     #expect(

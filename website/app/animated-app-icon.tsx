@@ -4,7 +4,7 @@ import Image from "next/image";
 import { motion, useReducedMotion, useSpring } from "motion/react";
 import { useEffect } from "react";
 
-const MAX_TILT_DEGREES = 12;
+const MAX_TILT_DEGREES = 20;
 const SPRING = { stiffness: 150, damping: 20, mass: 0.4 };
 
 export function AnimatedAppIcon() {

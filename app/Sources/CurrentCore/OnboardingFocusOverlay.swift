@@ -22,6 +22,41 @@ package struct FocusPresentationGeneration: Equatable, Sendable {
     }
 }
 
+package struct StageLightBeamGeometry: Equatable, Sendable {
+    package let sourceLeft: CGPoint
+    package let sourceRight: CGPoint
+    package let destinationLeft: CGPoint
+    package let destinationRight: CGPoint
+
+    package init(
+        bounds: CGRect,
+        focusFrame: CGRect,
+        notchFrame: CGRect?,
+        expansion: CGFloat,
+        lowerExtension: CGFloat
+    ) {
+        let sourceCenterX = notchFrame?.midX ?? bounds.midX
+        let sourceWidth = max(72, (notchFrame?.width ?? 84) * 0.56)
+        let sourceY = bounds.maxY + 72
+        sourceLeft = CGPoint(
+            x: sourceCenterX - sourceWidth / 2,
+            y: sourceY
+        )
+        sourceRight = CGPoint(
+            x: sourceCenterX + sourceWidth / 2,
+            y: sourceY
+        )
+        destinationLeft = CGPoint(
+            x: focusFrame.minX - expansion,
+            y: focusFrame.minY - lowerExtension
+        )
+        destinationRight = CGPoint(
+            x: focusFrame.maxX + expansion,
+            y: focusFrame.minY - lowerExtension
+        )
+    }
+}
+
 package enum StageLightAnimation {
     package static let duration: TimeInterval = 3
     package static let fadeInDuration: TimeInterval = 0.55

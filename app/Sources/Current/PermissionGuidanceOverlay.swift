@@ -784,7 +784,12 @@ private final class PermissionGuidePanel: NSPanel {
 @MainActor
 enum FocusOverlayAppearance: Equatable {
     case permission(grayscaleEnabled: Bool)
-    case stageLight(StageLightSample, showsBeam: Bool)
+    case stageLight(
+        StageLightSample,
+        showsBeam: Bool,
+        sourceFrame: CGRect?,
+        lowerExtension: CGFloat
+    )
 
     var grayscaleEnabled: Bool {
         switch self {
@@ -799,6 +804,7 @@ final class FocusOverlayPanel {
     private enum Placement: Equatable {
         case foreground
         case behind(CGWindowID)
+        case stageBehind(CGWindowID)
     }
 
     private struct Configuration {
@@ -871,11 +877,21 @@ final class FocusOverlayPanel {
         if panel.frame != screenFrame {
             panel.setFrame(screenFrame, display: false)
         }
+        let placement: Placement
+        if let behindWindowID {
+            if case .stageLight = appearance {
+                placement = .stageBehind(behindWindowID)
+            } else {
+                placement = .behind(behindWindowID)
+            }
+        } else {
+            placement = .foreground
+        }
         let configuration = Configuration(
             focusFrames: focusFrames,
             outlineFrame: outlineFrame,
             appearance: appearance,
-            placement: behindWindowID.map(Placement.behind) ?? .foreground
+            placement: placement
         )
         desiredConfiguration = configuration
 
@@ -1109,6 +1125,11 @@ final class FocusOverlayPanel {
         case let .behind(windowID):
             panel.level = .normal
             panel.order(.below, relativeTo: Int(windowID))
+        case let .stageBehind(windowID):
+            panel.level = NSWindow.Level(
+                rawValue: Int(CGWindowLevelForKey(.screenSaverWindow))
+            )
+            panel.order(.below, relativeTo: Int(windowID))
         }
     }
 }
@@ -1117,12 +1138,15 @@ final class FocusOverlayView: NSView {
     private let effectView = NSVisualEffectView()
     private let grayscaleView = NSView()
     private let grayscaleEffectView = NSVisualEffectView()
+    private let overlayView = NSView()
     private let effectMaskLayer = CAShapeLayer()
     private let grayscaleMaskLayer = CAShapeLayer()
     private let stageDimmingLayer = CAGradientLayer()
     private let stageDimmingMaskLayer = CAShapeLayer()
     private let stageBeamLayer = CAGradientLayer()
     private let stageBeamMaskLayer = CAShapeLayer()
+    private let stageFalloffLayer = CAGradientLayer()
+    private let stageFalloffMaskLayer = CAShapeLayer()
     private let outlineLayer = CAShapeLayer()
     private var grayscaleEnabled: Bool?
     private var overlayAppearance = FocusOverlayAppearance.permission(
@@ -1177,28 +1201,55 @@ final class FocusOverlayView: NSView {
 
         stageDimmingLayer.type = .radial
         stageDimmingLayer.colors = [
-            NSColor.black.withAlphaComponent(0.08).cgColor,
-            NSColor.black.withAlphaComponent(0.62).cgColor,
+            NSColor.black.withAlphaComponent(0.58).cgColor,
+            NSColor.black.withAlphaComponent(0.90).cgColor,
         ]
         stageDimmingLayer.locations = [0, 1]
+        overlayView.frame = bounds
+        overlayView.autoresizingMask = [.width, .height]
+        overlayView.wantsLayer = true
+        addSubview(overlayView)
+
         stageDimmingLayer.mask = stageDimmingMaskLayer
         stageDimmingLayer.isHidden = true
-        layer?.addSublayer(stageDimmingLayer)
+        overlayView.layer?.addSublayer(stageDimmingLayer)
+        let curtainBlur = CIFilter.gaussianBlur()
+        curtainBlur.radius = 56
+        stageDimmingMaskLayer.filters = [curtainBlur]
 
         stageBeamLayer.type = .axial
         stageBeamLayer.startPoint = CGPoint(x: 0.5, y: 1)
         stageBeamLayer.endPoint = CGPoint(x: 0.5, y: 0)
         stageBeamLayer.colors = [
-            NSColor.white.withAlphaComponent(0.34).cgColor,
-            NSColor.white.withAlphaComponent(0.18).cgColor,
-            NSColor.white.withAlphaComponent(0.06).cgColor,
+            NSColor.white.withAlphaComponent(0.28).cgColor,
+            NSColor.white.withAlphaComponent(0.13).cgColor,
+            NSColor.white.withAlphaComponent(0.025).cgColor,
         ]
         stageBeamLayer.locations = [0, 0.58, 1]
         stageBeamLayer.mask = stageBeamMaskLayer
         stageBeamLayer.isHidden = true
-        layer?.addSublayer(stageBeamLayer)
+        overlayView.layer?.addSublayer(stageBeamLayer)
+        let beamBlur = CIFilter.gaussianBlur()
+        beamBlur.radius = 56
+        stageBeamMaskLayer.filters = [beamBlur]
 
-        layer?.addSublayer(outlineLayer)
+        stageFalloffLayer.type = .axial
+        stageFalloffLayer.startPoint = CGPoint(x: 0.5, y: 1)
+        stageFalloffLayer.endPoint = CGPoint(x: 0.5, y: 0)
+        stageFalloffLayer.colors = [
+            NSColor.black.withAlphaComponent(0).cgColor,
+            NSColor.black.withAlphaComponent(0.08).cgColor,
+            NSColor.black.withAlphaComponent(0.68).cgColor,
+        ]
+        stageFalloffLayer.locations = [0, 0.48, 1]
+        stageFalloffLayer.mask = stageFalloffMaskLayer
+        stageFalloffLayer.isHidden = true
+        overlayView.layer?.addSublayer(stageFalloffLayer)
+        let falloffBlur = CIFilter.gaussianBlur()
+        falloffBlur.radius = 56
+        stageFalloffMaskLayer.filters = [falloffBlur]
+
+        overlayView.layer?.addSublayer(outlineLayer)
         outlineLayer.fillColor = NSColor.black.withAlphaComponent(0.045).cgColor
         outlineLayer.strokeColor = NSColor.black.withAlphaComponent(0.78).cgColor
         outlineLayer.lineWidth = 2
@@ -1256,6 +1307,9 @@ final class FocusOverlayView: NSView {
         stageBeamMaskLayer.frame = bounds
         stageBeamMaskLayer.fillColor = NSColor.black.cgColor
         stageBeamMaskLayer.fillRule = .evenOdd
+        stageFalloffLayer.frame = bounds
+        stageFalloffMaskLayer.frame = bounds
+        stageFalloffMaskLayer.fillColor = NSColor.black.cgColor
         updateStageGeometry()
         outlineLayer.frame = bounds
         if let outlineFrame {
@@ -1274,20 +1328,29 @@ final class FocusOverlayView: NSView {
     }
 
     private func updateStageGeometry() {
-        guard case .stageLight(let sample, let showsBeam) = overlayAppearance else {
+        guard case .stageLight(
+            let sample,
+            let showsBeam,
+            let sourceFrame,
+            let lowerExtension
+        ) = overlayAppearance else {
             stageDimmingLayer.isHidden = true
             stageBeamLayer.isHidden = true
             stageBeamMaskLayer.path = nil
+            stageFalloffLayer.isHidden = true
+            stageFalloffMaskLayer.path = nil
             return
         }
 
         stageDimmingLayer.isHidden = false
-        stageDimmingLayer.opacity = 0.82
+        stageDimmingLayer.opacity = 1
         guard let focusFrame = focusFrames.first else {
             stageDimmingLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
             stageDimmingLayer.endPoint = CGPoint(x: 1.2, y: 1.2)
             stageBeamLayer.isHidden = true
             stageBeamMaskLayer.path = nil
+            stageFalloffLayer.isHidden = true
+            stageFalloffMaskLayer.path = nil
             return
         }
 
@@ -1304,32 +1367,41 @@ final class FocusOverlayView: NSView {
         guard showsBeam else {
             stageBeamLayer.isHidden = true
             stageBeamMaskLayer.path = nil
+            stageFalloffLayer.isHidden = true
+            stageFalloffMaskLayer.path = nil
             return
         }
 
-        let expansion = 42 + 58 * sample.beamExpansion
-        let topHalfWidth = 44 + 38 * sample.beamExpansion
-        let beamPath = CGMutablePath()
-        beamPath.move(to: CGPoint(
-            x: focusFrame.midX - topHalfWidth,
-            y: bounds.maxY
-        ))
-        beamPath.addLine(to: CGPoint(
-            x: focusFrame.midX + topHalfWidth,
-            y: bounds.maxY
-        ))
-        beamPath.addLine(to: CGPoint(
-            x: focusFrame.maxX + expansion,
-            y: focusFrame.maxY + 1
-        ))
-        beamPath.addLine(to: CGPoint(
-            x: focusFrame.minX - expansion,
-            y: focusFrame.maxY + 1
-        ))
-        beamPath.closeSubpath()
+        let expansion = 54 + 72 * sample.beamExpansion
+        let geometry = StageLightBeamGeometry(
+            bounds: bounds,
+            focusFrame: focusFrame,
+            notchFrame: sourceFrame,
+            expansion: expansion,
+            lowerExtension: lowerExtension
+        )
+        let beamPath = Self.beamPath(geometry)
+        let curtainMaskPath = CGMutablePath()
+        curtainMaskPath.addRect(bounds.insetBy(dx: -96, dy: -96))
+        curtainMaskPath.addPath(beamPath)
+        stageDimmingMaskLayer.path = curtainMaskPath
         stageBeamMaskLayer.path = beamPath
         stageBeamLayer.opacity = Float(sample.beamIntensity)
         stageBeamLayer.isHidden = false
+        stageFalloffMaskLayer.path = beamPath
+        stageFalloffLayer.isHidden = false
+    }
+
+    private static func beamPath(
+        _ geometry: StageLightBeamGeometry
+    ) -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: geometry.sourceLeft)
+        path.addLine(to: geometry.sourceRight)
+        path.addLine(to: geometry.destinationRight)
+        path.addLine(to: geometry.destinationLeft)
+        path.closeSubpath()
+        return path
     }
 
     private func updateGrayscale(enabled: Bool, animated: Bool) {

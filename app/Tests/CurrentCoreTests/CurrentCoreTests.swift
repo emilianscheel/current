@@ -906,6 +906,37 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(samples[2].overlayOpacity < samples[1].overlayOpacity)
 }
 
+@Test func stageLightBeamStartsOffscreenAndEndsBelowWindow() {
+    let notch = CGRect(x: 620, y: 868, width: 200, height: 32)
+    let window = CGRect(x: 360, y: 180, width: 720, height: 560)
+    let geometry = StageLightBeamGeometry(
+        bounds: CGRect(x: 0, y: 0, width: 1_440, height: 900),
+        focusFrame: window,
+        notchFrame: notch,
+        expansion: 60,
+        lowerExtension: 50
+    )
+
+    #expect(geometry.sourceLeft == CGPoint(x: 664, y: 972))
+    #expect(geometry.sourceRight == CGPoint(x: 776, y: 972))
+    #expect(geometry.destinationLeft == CGPoint(x: 300, y: 130))
+    #expect(geometry.destinationRight == CGPoint(x: 1_140, y: 130))
+}
+
+@Test func stageLightBeamUsesCenteredFallbackWithoutANotch() {
+    let geometry = StageLightBeamGeometry(
+        bounds: CGRect(x: 0, y: 0, width: 1_440, height: 900),
+        focusFrame: CGRect(x: 360, y: 180, width: 720, height: 560),
+        notchFrame: nil,
+        expansion: 60,
+        lowerExtension: 50
+    )
+
+    #expect(geometry.sourceLeft.x == 684)
+    #expect(geometry.sourceRight.x == 756)
+    #expect(geometry.sourceLeft.y == 972)
+}
+
 @Test func focusPresentationGenerationInvalidatesRapidReplays() {
     var generation = FocusPresentationGeneration()
     let first = generation.next()

@@ -7,7 +7,7 @@ import QuartzCore
 final class OnboardingFocusOverlayController {
     private enum Mode {
         case idle
-        case stage(window: NSWindow)
+        case stage(window: NSWindow, originalLevel: NSWindow.Level)
         case microphone
     }
 
@@ -44,7 +44,9 @@ final class OnboardingFocusOverlayController {
         cancelMicrophoneTracking(hidePanels: true)
         cancelStage(hidePanels: true)
         let presentationGeneration = generation.next()
-        mode = .stage(window: window)
+        let originalLevel = window.level
+        mode = .stage(window: window, originalLevel: originalLevel)
+        window.level = Self.stageWindowLevel
         ensurePanels()
 
         let reduceMotion = NSWorkspace.shared
@@ -86,7 +88,7 @@ final class OnboardingFocusOverlayController {
     }
 
     func refreshWindowGeometry() {
-        guard case .stage(let window) = mode else { return }
+        guard case .stage(let window, _) = mode else { return }
         renderStage(window: window, sample: latestStageSample, begin: false)
     }
 
@@ -140,6 +142,7 @@ final class OnboardingFocusOverlayController {
         stageTask = nil
         microphoneTask?.cancel()
         microphoneTask = nil
+        restoreStageWindowLevel()
         mode = .idle
         panels.values.forEach { $0.hide() }
     }
@@ -164,7 +167,10 @@ final class OnboardingFocusOverlayController {
                 outlineFrame: nil,
                 appearance: .stageLight(
                     sample,
-                    showsBeam: id == beamDisplayID
+                    showsBeam: id == beamDisplayID,
+                    sourceFrame: id == beamDisplayID
+                        ? Self.localNotchFrame(for: screen) : nil,
+                    lowerExtension: 100 / screen.backingScaleFactor
                 ),
                 behindWindowID: CGWindowID(window.windowNumber)
             )
@@ -196,7 +202,10 @@ final class OnboardingFocusOverlayController {
     private func finishStagePresentation() {
         stageTask = nil
         panels.values.forEach { $0.endManualPresentation() }
-        if case .stage = mode { mode = .idle }
+        if case .stage = mode {
+            restoreStageWindowLevel()
+            mode = .idle
+        }
     }
 
     private func cancelStage(hidePanels: Bool) {
@@ -206,6 +215,7 @@ final class OnboardingFocusOverlayController {
         if hidePanels {
             panels.values.forEach { $0.cancelManualPresentation() }
         }
+        restoreStageWindowLevel()
     }
 
     private func cancelMicrophoneTracking(hidePanels: Bool) {
@@ -218,7 +228,7 @@ final class OnboardingFocusOverlayController {
     private func screensDidChange() {
         ensurePanels()
         switch mode {
-        case .stage(let window):
+        case .stage(let window, _):
             renderStage(window: window, sample: latestStageSample, begin: false)
         case .microphone, .idle:
             break
@@ -305,5 +315,31 @@ final class OnboardingFocusOverlayController {
     private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
             as? NSNumber)?.uint32Value
+    }
+
+    private func restoreStageWindowLevel() {
+        guard case .stage(let window, let originalLevel) = mode else { return }
+        window.level = originalLevel
+    }
+
+    private static let stageWindowLevel = NSWindow.Level(
+        rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)) + 1
+    )
+
+    private static func localNotchFrame(for screen: NSScreen) -> CGRect? {
+        guard let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea,
+              right.minX > left.maxX,
+              screen.safeAreaInsets.top > 0 else { return nil }
+        let notchFrame = CGRect(
+            x: left.maxX,
+            y: screen.frame.maxY - screen.safeAreaInsets.top,
+            width: right.minX - left.maxX,
+            height: screen.safeAreaInsets.top
+        )
+        return PermissionGuidanceLayout.localIntersection(
+            of: notchFrame,
+            in: screen.frame
+        )
     }
 }

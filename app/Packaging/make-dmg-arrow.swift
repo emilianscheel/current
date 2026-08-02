@@ -3,9 +3,8 @@
 import AppKit
 import Foundation
 
-private let logicalSize = NSSize(width: 660, height: 400)
+private let logicalSize = NSSize(width: 112, height: 112)
 private let arrowPointSize: CGFloat = 42
-private let arrowVerticalOffset: CGFloat = 30
 private let arrowColor = NSColor(calibratedWhite: 0.62, alpha: 1)
 
 private func die(_ message: String) -> Never {
@@ -26,12 +25,12 @@ private func render(scale: Int, to outputURL: URL) throws {
         bytesPerRow: 0,
         bitsPerPixel: 0
     ) else {
-        die("Could not allocate the DMG background bitmap.")
+        die("Could not allocate the DMG arrow bitmap.")
     }
 
     bitmap.size = logicalSize
     guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
-        die("Could not create the DMG background drawing context.")
+        die("Could not create the DMG arrow drawing context.")
     }
 
     NSGraphicsContext.saveGraphicsState()
@@ -54,7 +53,7 @@ private func render(scale: Int, to outputURL: URL) throws {
 
     let arrowRect = NSRect(
         x: (logicalSize.width - arrow.size.width) / 2,
-        y: (logicalSize.height - arrow.size.height) / 2 + arrowVerticalOffset,
+        y: (logicalSize.height - arrow.size.height) / 2,
         width: arrow.size.width,
         height: arrow.size.height
     )
@@ -64,18 +63,18 @@ private func render(scale: Int, to outputURL: URL) throws {
     NSGraphicsContext.restoreGraphicsState()
 
     guard let png = bitmap.representation(using: .png, properties: [:]) else {
-        die("Could not encode the DMG background PNG.")
+        die("Could not encode the DMG arrow PNG.")
     }
     try png.write(to: outputURL, options: .atomic)
 }
 
 guard CommandLine.arguments.count == 3 else {
-    die("Usage: make-dmg-background.swift <1x-output.png> <2x-output.png>")
+    die("Usage: make-dmg-arrow.swift <1x-output.png> <2x-output.png>")
 }
 
 do {
     try render(scale: 1, to: URL(fileURLWithPath: CommandLine.arguments[1]))
     try render(scale: 2, to: URL(fileURLWithPath: CommandLine.arguments[2]))
 } catch {
-    die("Could not write the DMG background: \(error.localizedDescription)")
+    die("Could not write the DMG arrow: \(error.localizedDescription)")
 }

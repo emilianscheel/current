@@ -16,6 +16,7 @@ NOTARY_PROFILE="${CURRENT_NOTARY_PROFILE:-Current-notary}"
 DEVELOPER_ID_OVERRIDE="${CURRENT_DEVELOPER_ID_APPLICATION:-}"
 DIST_DIR="$PROJECT_DIR/dist"
 DMG_PATH="$DIST_DIR/Current.dmg"
+DMG_ARROW_ITEM_NAME=$'\u2063.tiff'
 APPCAST_PATH="$DIST_DIR/appcast.xml"
 STAGE_APP="$PROJECT_DIR/.build/Current.app-staging"
 MOUNT_DIR=""
@@ -313,7 +314,7 @@ MOUNTED=true
 [[ -d "$MOUNT_DIR/Current.app" ]] || die "Mounted DMG does not contain Current.app."
 [[ "$(readlink "$MOUNT_DIR/Applications")" == "/Applications" ]] || die "Mounted DMG has an invalid Applications shortcut."
 [[ -f "$MOUNT_DIR/.DS_Store" ]] || die "Mounted DMG does not contain Finder layout metadata."
-[[ -f "$MOUNT_DIR/.background.tiff" ]] || die "Mounted DMG does not contain its Finder background."
+[[ -f "$MOUNT_DIR/$DMG_ARROW_ITEM_NAME" ]] || die "Mounted DMG does not contain its installer arrow."
 codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/Current.app"
 spctl --assess --type execute --verbose=2 "$MOUNT_DIR/Current.app"
 hdiutil detach "$MOUNT_DIR" >/dev/null

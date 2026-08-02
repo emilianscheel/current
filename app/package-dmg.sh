@@ -5,6 +5,7 @@ PROJECT_DIR="${0:A:h}"
 DMGBUILD_PROJECT_DIR="$PROJECT_DIR/Packaging/dmgbuild"
 DMGBUILD_SETTINGS="$DMGBUILD_PROJECT_DIR/settings.py"
 VOLUME_NAME="Current"
+ARROW_ITEM_NAME=$'\u2063.tiff'
 APP_PATH=""
 OUTPUT_PATH=""
 WORK_DIR=""
@@ -67,18 +68,18 @@ done
 
 mkdir -p "${OUTPUT_PATH:h}"
 WORK_DIR="$(mktemp -d "${TMPDIR%/}/current-dmg.XXXXXX")"
-BACKGROUND_1X="$WORK_DIR/installer-background.png"
-BACKGROUND_2X="$WORK_DIR/installer-background@2x.png"
-BACKGROUND_TIFF="$WORK_DIR/installer-background.tiff"
+ARROW_1X="$WORK_DIR/installer-arrow.png"
+ARROW_2X="$WORK_DIR/installer-arrow@2x.png"
+ARROW_TIFF="$WORK_DIR/installer-arrow.tiff"
 MODULE_CACHE_DIR="$WORK_DIR/module-cache"
 MOUNT_DIR="$WORK_DIR/verify-mount"
 mkdir -p "$MODULE_CACHE_DIR" "$MOUNT_DIR"
 
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_DIR" \
 SWIFT_MODULECACHE_PATH="$MODULE_CACHE_DIR" \
-  swift "$PROJECT_DIR/Packaging/make-dmg-background.swift" "$BACKGROUND_1X" "$BACKGROUND_2X"
-tiffutil -cathidpicheck "$BACKGROUND_1X" "$BACKGROUND_2X" \
-  -out "$BACKGROUND_TIFF" >/dev/null
+  swift "$PROJECT_DIR/Packaging/make-dmg-arrow.swift" "$ARROW_1X" "$ARROW_2X"
+tiffutil -cathidpicheck "$ARROW_1X" "$ARROW_2X" \
+  -out "$ARROW_TIFF" >/dev/null
 
 uv run \
   --project "$DMGBUILD_PROJECT_DIR" \
@@ -87,7 +88,7 @@ uv run \
   dmgbuild \
   -s "$DMGBUILD_SETTINGS" \
   -D "app=$APP_PATH" \
-  -D "background=$BACKGROUND_TIFF" \
+  -D "arrow=$ARROW_TIFF" \
   "$VOLUME_NAME" \
   "$OUTPUT_PATH"
 
@@ -106,8 +107,13 @@ MOUNTED=true
 [[ "$(readlink "$MOUNT_DIR/Applications")" == "/Applications" ]] \
   || die "Packaged DMG has an invalid Applications shortcut."
 [[ -f "$MOUNT_DIR/.DS_Store" ]] || die "Packaged DMG does not contain Finder layout metadata."
-[[ -f "$MOUNT_DIR/.background.tiff" ]] \
-  || die "Packaged DMG does not contain its Finder background."
+[[ -f "$MOUNT_DIR/$ARROW_ITEM_NAME" ]] \
+  || die "Packaged DMG does not contain its installer arrow."
+uv run \
+  --project "$DMGBUILD_PROJECT_DIR" \
+  --isolated \
+  --frozen \
+  python "$DMGBUILD_PROJECT_DIR/verify_layout.py" "$MOUNT_DIR/.DS_Store"
 
 hdiutil detach "$MOUNT_DIR" >/dev/null
 MOUNTED=false

@@ -131,6 +131,7 @@ public final class ContextStore {
     public static let instructionsDocumentID = "manual:instructions"
 
     public private(set) var documents: [ContextDocument] = []
+    public private(set) var revision: UInt64 = 0
     public private(set) var lastError: String?
     @ObservationIgnored public var onDocumentsChanged: (([ContextDocument]) -> Void)?
 
@@ -193,11 +194,19 @@ public final class ContextStore {
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles]
             )
-            let dailyURLs = rootURLs.filter { $0.pathExtension.lowercased() == "md" }
+            var dailyURLs: [URL] = []
+            for url in rootURLs where url.pathExtension.lowercased() == "md" {
+                dailyURLs.append(url)
+            }
             for url in dailyURLs {
                 try migrateLegacyDocumentIfNeeded(at: url)
             }
-            var loaded = try dailyURLs.compactMap(loadDailyDocument)
+            var loaded: [ContextDocument] = []
+            for url in dailyURLs {
+                if let document = try loadDailyDocument(at: url) {
+                    loaded.append(document)
+                }
+            }
             for metadata in persistedManualDocuments.values {
                 if let document = try loadManualDocument(metadata: metadata) {
                     loaded.append(document)
@@ -216,14 +225,22 @@ public final class ContextStore {
                     }
                 }
             }
-            let sorted = chronologicallySorted(loaded)
+            let sorted = Self.chronologicallySorted(loaded)
             let standingIDs = [
                 Self.aboutMeDocumentID,
                 Self.instructionsDocumentID,
             ]
-            documents = standingIDs.compactMap { id in
-                sorted.first { $0.id == id }
-            } + sorted.filter { !standingIDs.contains($0.id) }
+            var ordered: [ContextDocument] = []
+            for id in standingIDs {
+                if let document = Self.document(id: id, in: sorted) {
+                    ordered.append(document)
+                }
+            }
+            for document in sorted where !standingIDs.contains(document.id) {
+                ordered.append(document)
+            }
+            documents = ordered
+            revision &+= 1
             lastError = nil
             onDocumentsChanged?(documents)
         } catch {
@@ -237,9 +254,12 @@ public final class ContextStore {
         guard case .appSession(let metadata) = document.kind else {
             return false
         }
-        return metadata.bundleIdentifier.map(
-            ContextApplicationExclusions.bundleIdentifiers.contains
-        ) == true
+        guard let bundleIdentifier = metadata.bundleIdentifier else {
+            return false
+        }
+        return ContextApplicationExclusions.bundleIdentifiers.contains(
+            bundleIdentifier
+        )
     }
 
     @discardableResult
@@ -265,14 +285,14 @@ public final class ContextStore {
             + "\(Self.escapedLiteralMarkdown(text))\n"
         try write(markdown, to: url)
         reload()
-        guard let document = documents.first(where: { $0.id == id }) else {
+        guard let document = document(id: id) else {
             throw ContextStoreError.documentUnavailable
         }
         return document
     }
 
     public func save(documentID: String, markdown: String) throws {
-        guard let document = documents.first(where: { $0.id == documentID }) else {
+        guard let document = document(id: documentID) else {
             throw ContextStoreError.documentUnavailable
         }
         switch document.kind {
@@ -300,14 +320,15 @@ public final class ContextStore {
     }
 
     public func document(id: String) -> ContextDocument? {
-        documents.first { $0.id == id }
+        Self.document(id: id, in: documents)
     }
 
     public func filteredDocuments(matching query: String) -> [ContextDocument] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return documents }
-        return chronologicallySorted(documents.filter { document in
-            displayTitle(for: document.date).localizedStandardContains(needle)
+        var matches: [ContextDocument] = []
+        for document in documents {
+            if displayTitle(for: document.date).localizedStandardContains(needle)
                 || document.id.localizedStandardContains(needle)
                 || document.customDisplayName?
                     .localizedStandardContains(needle) == true
@@ -315,8 +336,11 @@ public final class ContextStore {
                     .localizedStandardContains(needle) == true
                 || document.appSessionMetadata?.bundleIdentifier?
                     .localizedStandardContains(needle) == true
-                || document.markdown.localizedStandardContains(needle)
-        })
+                || document.markdown.localizedStandardContains(needle) {
+                matches.append(document)
+            }
+        }
+        return Self.chronologicallySorted(matches)
     }
 
     @discardableResult
@@ -354,9 +378,13 @@ public final class ContextStore {
     }
 
     public func standingPromptDocuments() -> [ContextDocument] {
-        [Self.instructionsDocumentID, Self.aboutMeDocumentID].compactMap {
-            document(id: $0)
+        var result: [ContextDocument] = []
+        for id in [Self.instructionsDocumentID, Self.aboutMeDocumentID] {
+            if let document = document(id: id) {
+                result.append(document)
+            }
         }
+        return result
     }
 
     public func rename(documentID: String, displayName: String) throws {
@@ -380,7 +408,7 @@ public final class ContextStore {
     }
 
     public func moveToTrash(documentID: String) throws {
-        guard let document = documents.first(where: { $0.id == documentID }) else {
+        guard let document = document(id: documentID) else {
             throw ContextStoreError.documentUnavailable
         }
         guard !document.isProtected else {
@@ -410,32 +438,45 @@ public final class ContextStore {
     public func appSessionDocument(
         sessionID: AppSessionID
     ) -> ContextDocument? {
-        documents.first {
-            guard case .appSession(let metadata) = $0.kind else { return false }
-            return metadata.sessionID == sessionID
+        for document in documents {
+            guard case .appSession(let metadata) = document.kind else {
+                continue
+            }
+            if metadata.sessionID == sessionID { return document }
         }
+        return nil
     }
 
     public func appSessionDocuments(
         bundleIdentifier: String? = nil,
         activeOnly: Bool = false
     ) -> [ContextDocument] {
-        documents.filter { document in
-            guard case .appSession(let metadata) = document.kind else { return false }
-            if activeOnly, !metadata.isActive { return false }
-            if let bundleIdentifier {
-                return metadata.bundleIdentifier == bundleIdentifier
+        var result: [ContextDocument] = []
+        for document in documents {
+            guard case .appSession(let metadata) = document.kind else {
+                continue
             }
-            return true
+            if activeOnly, !metadata.isActive { continue }
+            if let bundleIdentifier {
+                guard metadata.bundleIdentifier == bundleIdentifier else {
+                    continue
+                }
+            }
+            result.append(document)
         }
+        return result
     }
 
     public func appSessionDocumentsRequiringMigration()
         -> [ContextDocument] {
-        appSessionDocuments().filter {
-            Self.tableValue("Session ID", in: $0.markdown) != nil
-                && Self.tableValue("Format Version", in: $0.markdown) != "2"
+        var result: [ContextDocument] = []
+        for document in appSessionDocuments() {
+            if Self.tableValue("Session ID", in: document.markdown) != nil,
+               Self.tableValue("Format Version", in: document.markdown) != "2" {
+                result.append(document)
+            }
         }
+        return result
     }
 
     public func migrateAppSessionDocument(
@@ -479,7 +520,11 @@ public final class ContextStore {
         let existingMarkdown = existing?.markdown
             ?? (try? String(contentsOf: url, encoding: .utf8))
             ?? ""
-        let compact = existing.map(isCompactAppSession) ?? true
+        let compact = if let existing {
+            isCompactAppSession(existing)
+        } else {
+            true
+        }
         let currentState = ContextBulletNormalizer.bullets(
             update.currentStateMarkdown.components(separatedBy: .newlines),
             maximumCount: 24
@@ -526,20 +571,42 @@ public final class ContextStore {
         at date: Date = Date()
     ) throws -> ContextDocument {
         let existing = appSessionDocument(sessionID: metadata.sessionID)
-        let currentState = existing.map {
-            Self.section(named: "Current state", in: $0.markdown)
-        } ?? ""
-        let activity = existing.map {
-            Self.section(named: "Activity", in: $0.markdown)
-        } ?? ""
-        var unprocessed = existing.map {
-            Self.section(named: "Unprocessed observations", in: $0.markdown)
-        } ?? ""
-        let text = observations.map { observation in
-            let title = observation.windowTitle.map { " — \($0)" } ?? ""
-            return "### \(timeWithSeconds(for: observation.capturedAt))\(title)\n\n"
-                + observation.blocks.map(\.text).joined(separator: "\n")
-        }.joined(separator: "\n\n")
+        let currentState: String
+        let activity: String
+        var unprocessed: String
+        if let existing {
+            currentState = Self.section(
+                named: "Current state",
+                in: existing.markdown
+            )
+            activity = Self.section(named: "Activity", in: existing.markdown)
+            unprocessed = Self.section(
+                named: "Unprocessed observations",
+                in: existing.markdown
+            )
+        } else {
+            currentState = ""
+            activity = ""
+            unprocessed = ""
+        }
+        var observationSections: [String] = []
+        for observation in observations {
+            let title: String
+            if let windowTitle = observation.windowTitle {
+                title = " — \(windowTitle)"
+            } else {
+                title = ""
+            }
+            var blockText: [String] = []
+            for block in observation.blocks {
+                blockText.append(block.text)
+            }
+            observationSections.append(
+                "### \(timeWithSeconds(for: observation.capturedAt))\(title)\n\n"
+                    + blockText.joined(separator: "\n")
+            )
+        }
+        let text = observationSections.joined(separator: "\n\n")
         if !unprocessed.isEmpty, !text.isEmpty { unprocessed += "\n\n" }
         unprocessed += text
         let url = existing?.url ?? appSessionURL(for: metadata)
@@ -547,12 +614,17 @@ public final class ContextStore {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        let compact = if let existing {
+            isCompactAppSession(existing)
+        } else {
+            true
+        }
         try writeAppSession(
             metadata: metadata,
             currentState: currentState,
             activity: activity,
             unprocessed: unprocessed,
-            compact: existing.map(isCompactAppSession) ?? true,
+            compact: compact,
             displayedThrough: date,
             to: url
         )
@@ -567,13 +639,16 @@ public final class ContextStore {
         processIdentifier: pid_t? = nil,
         at date: Date = Date()
     ) throws {
-        let sessions = appSessionDocuments(activeOnly: true).compactMap { document
-            -> (ContextDocument, AppSessionMetadata)? in
-            guard case .appSession(let metadata) = document.kind,
-                  processIdentifier == nil || metadata.processIdentifier == processIdentifier else {
-                return nil
+        var sessions: [(ContextDocument, AppSessionMetadata)] = []
+        for document in appSessionDocuments(activeOnly: true) {
+            guard case .appSession(let metadata) = document.kind else {
+                continue
             }
-            return (document, metadata)
+            if let processIdentifier,
+               metadata.processIdentifier != processIdentifier {
+                continue
+            }
+            sessions.append((document, metadata))
         }
         for (document, var metadata) in sessions {
             metadata.endedAt = date
@@ -682,13 +757,18 @@ public final class ContextStore {
         unprocessed: String
     ) -> String {
         let formatter = ISO8601DateFormatter()
-        let ended = metadata.endedAt.map(formatter.string) ?? "Active"
+        let ended = if let endedAt = metadata.endedAt {
+            formatter.string(from: endedAt)
+        } else {
+            "Active"
+        }
         let bundleIdentifier = metadata.bundleIdentifier ?? ""
         let icon = metadata.iconRelativePath ?? ""
-        let sources = metadata.sources
-            .map(\.rawValue)
-            .sorted()
-            .joined(separator: ", ")
+        var sourceNames: [String] = []
+        for source in metadata.sources {
+            sourceNames.append(source.rawValue)
+        }
+        let sources = sourceNames.sorted().joined(separator: ", ")
         var markdown = """
         # \(Self.tableEscaped(metadata.applicationName)) — App Session
 
@@ -726,10 +806,11 @@ public final class ContextStore {
         unprocessed: String,
         displayedThrough: Date
     ) -> String {
-        var body: [String] = currentState
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        var body: [String] = []
+        for line in currentState.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { body.append(trimmed) }
+        }
         body.append(contentsOf: compactHistoryLines(from: activity))
         body.append(contentsOf: compactHistoryLines(from: unprocessed))
 
@@ -766,7 +847,7 @@ public final class ContextStore {
             guard !line.isEmpty, let timestamp else { continue }
             let content = Self.removingBulletPrefix(from: line)
             guard !content.isEmpty else { continue }
-            let prefix = context.map { "\($0) — " } ?? ""
+            let prefix = if let context { "\(context) — " } else { "" }
             output.append("\(timestamp) — \(prefix)\(content)")
         }
         return output
@@ -784,7 +865,7 @@ public final class ContextStore {
         dateFormatter.timeStyle = .none
 
         let end = metadata.endedAt
-        let endLabel = end.map { timeTitle(for: $0) } ?? "Active"
+        let endLabel = if let end { timeTitle(for: end) } else { "Active" }
         let elapsedTo = max(metadata.startedAt, end ?? displayedThrough)
         let elapsedMinutes = max(
             0,
@@ -838,16 +919,24 @@ public final class ContextStore {
             return nil
         }
         let endedString = Self.tableValue("Ended", in: markdown)
-        let endedAt = endedString.flatMap {
-            $0 == "Active" ? nil : ISO8601DateFormatter().date(from: $0)
+        let endedAt: Date?
+        if let endedString, endedString != "Active" {
+            endedAt = ISO8601DateFormatter().date(from: endedString)
+        } else {
+            endedAt = nil
         }
         let bundle = Self.tableValue("Bundle ID", in: markdown)
         let icon = Self.tableValue("Icon", in: markdown)
-        let sources = Set(
-            (Self.tableValue("Sources", in: markdown) ?? "")
-                .split(separator: ",")
-                .compactMap { ContextSource(rawValue: $0.trimmingCharacters(in: .whitespaces)) }
-        )
+        var sources: Set<ContextSource> = []
+        let sourceValues = (Self.tableValue("Sources", in: markdown) ?? "")
+            .split(separator: ",")
+        for value in sourceValues {
+            if let source = ContextSource(
+                rawValue: value.trimmingCharacters(in: .whitespaces)
+            ) {
+                sources.insert(source)
+            }
+        }
         let metadata = AppSessionMetadata(
             sessionID: AppSessionID(rawValue: sessionID),
             applicationName: appName,
@@ -1161,7 +1250,7 @@ public final class ContextStore {
             .appendingPathExtension("md")
     }
 
-    private func chronologicallySorted(
+    private nonisolated static func chronologicallySorted(
         _ input: [ContextDocument]
     ) -> [ContextDocument] {
         input.sorted {
@@ -1171,6 +1260,16 @@ public final class ContextStore {
             }
             return $0.id < $1.id
         }
+    }
+
+    private nonisolated static func document(
+        id: String,
+        in documents: [ContextDocument]
+    ) -> ContextDocument? {
+        for document in documents where document.id == id {
+            return document
+        }
+        return nil
     }
 
     private func normalizedDisplayName(_ displayName: String) throws -> String {
@@ -1266,9 +1365,12 @@ public final class ContextStore {
         }
         guard !entries.isEmpty else { return nil }
 
-        return entries.map { entry in
-            "\(displayTitle(for: date)) \(entry.time) h **\(entry.text)**"
-        }.joined(separator: "\n\n") + "\n"
+        var migratedEntries: [String] = []
+        let title = displayTitle(for: date)
+        for entry in entries {
+            migratedEntries.append("\(title) \(entry.time) h **\(entry.text)**")
+        }
+        return migratedEntries.joined(separator: "\n\n") + "\n"
     }
 
     private func write(_ markdown: String, to url: URL) throws {
@@ -1286,7 +1388,11 @@ public final class ContextStore {
     }
 
     private func date(fromDocumentID id: String) -> Date? {
-        let parts = id.split(separator: "-").compactMap { Int($0) }
+        var parts: [Int] = []
+        for part in id.split(separator: "-") {
+            guard let value = Int(part) else { return nil }
+            parts.append(value)
+        }
         guard parts.count == 3 else { return nil }
         var components = DateComponents()
         components.calendar = calendar

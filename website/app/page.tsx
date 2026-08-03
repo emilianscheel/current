@@ -1,4 +1,4 @@
-import Image from "next/image";
+import { AnimatedAppIcon } from "./animated-app-icon";
 
 export default function Home() {
   return (
@@ -7,14 +7,7 @@ export default function Home() {
         className="flex w-full max-w-3xl flex-col items-center text-center"
         aria-labelledby="page-title"
       >
-        <Image
-          className="h-auto w-26 sm:w-30 md:w-32"
-          src="/current-icon.png"
-          alt="current app icon"
-          width={128}
-          height={128}
-          priority
-        />
+        <AnimatedAppIcon />
 
         <h1
           id="page-title"

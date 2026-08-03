@@ -611,11 +611,16 @@ public enum ContextBulletNormalizer {
 @Observable
 public final class GemmaContextModelManager: ContextStructuringProviding {
     public private(set) var state: ModelState = .notInstalled
+    public private(set) var downloadMetrics: ModelDownloadMetrics?
     public private(set) var lastLoadDuration: Duration?
 
     private let locations: GemmaModelLocations
     private let worker: ContextWorkerClient
     private var preparationTask: Task<Void, Never>?
+    private var speedExpiryTask: Task<Void, Never>?
+    private var metricsTracker = ModelDownloadMetricsTracker()
+    private var acceptsDownloadProgress = false
+    private var preparationGeneration = UUID()
     private var memoryPressureSource: DispatchSourceMemoryPressure?
 
     public init(
@@ -650,7 +655,23 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
 
     public func prepareIfNeeded() {
         guard preparationTask == nil, !state.isReady else { return }
-        state = .downloading(progress: hasInstalledSnapshot ? 1 : 0.01)
+        let generation = UUID()
+        preparationGeneration = generation
+        metricsTracker.reset()
+        let installedBytes = downloadedSizeBytes
+        let initialFraction = hasInstalledSnapshot ? 1.0 : min(
+            Double(installedBytes)
+                / Double(GemmaContextModel.approximateDownloadBytes),
+            1
+        )
+        downloadMetrics = metricsTracker.update(
+            fractionCompleted: initialFraction,
+            downloadedBytes: installedBytes,
+            totalBytes: GemmaContextModel.approximateDownloadBytes,
+            stage: .listing
+        )
+        state = .downloading(progress: initialFraction)
+        acceptsDownloadProgress = true
         let locations = locations
         let clock = ContinuousClock()
         preparationTask = Task { [weak self] in
@@ -671,12 +692,18 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
                         revision: GemmaContextModel.revision,
                         maxConcurrentDownloads: 4
                     ) { [weak self] progress in
-                        self?.state = .downloading(
-                            progress: progress.fractionCompleted
+                        self?.applyDownloadProgress(
+                            fractionCompleted: progress.fractionCompleted,
+                            downloadedBytes: progress.completedUnitCount,
+                            totalBytes: progress.totalUnitCount,
+                            generation: generation
                         )
                     }
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      preparationGeneration == generation else { return }
+                acceptsDownloadProgress = false
+                expireDownloadSpeed()
                 state = .verifying
                 try GemmaModelValidator.validateOrCreateManifest(
                     locations: locations
@@ -684,17 +711,68 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
                 lastLoadDuration = start.duration(to: clock.now)
                 state = .ready
             } catch {
+                guard preparationGeneration == generation else { return }
+                acceptsDownloadProgress = false
+                expireDownloadSpeed()
                 state = .failed(error.localizedDescription)
             }
-            preparationTask = nil
+            if preparationGeneration == generation {
+                preparationTask = nil
+            }
         }
     }
 
     public func retry() {
+        preparationGeneration = UUID()
         preparationTask?.cancel()
         preparationTask = nil
+        acceptsDownloadProgress = false
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        metricsTracker.reset()
+        downloadMetrics = nil
         state = .notInstalled
         prepareIfNeeded()
+    }
+
+    private func applyDownloadProgress(
+        fractionCompleted: Double,
+        downloadedBytes: Int64,
+        totalBytes: Int64,
+        generation: UUID
+    ) {
+        guard acceptsDownloadProgress,
+              preparationGeneration == generation else { return }
+        let metrics = metricsTracker.update(
+            fractionCompleted: fractionCompleted,
+            downloadedBytes: downloadedBytes,
+            totalBytes: totalBytes,
+            stage: .downloading
+        )
+        downloadMetrics = metrics
+        state = .downloading(progress: metrics.fractionCompleted)
+        scheduleSpeedExpiry(for: metrics)
+    }
+
+    private func scheduleSpeedExpiry(for metrics: ModelDownloadMetrics) {
+        speedExpiryTask?.cancel()
+        guard metrics.bytesPerSecond != nil else { return }
+        let downloadedBytes = metrics.downloadedBytes
+        speedExpiryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled,
+                  let self,
+                  self.downloadMetrics?.downloadedBytes == downloadedBytes else {
+                return
+            }
+            self.expireDownloadSpeed()
+        }
+    }
+
+    private func expireDownloadSpeed() {
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        downloadMetrics = downloadMetrics?.hidingSpeed()
     }
 
     public func setVoiceInteractionActive(_ active: Bool) {
@@ -729,8 +807,14 @@ public final class GemmaContextModelManager: ContextStructuringProviding {
     }
 
     public func unload(force: Bool = false) async {
+        preparationGeneration = UUID()
         preparationTask?.cancel()
         preparationTask = nil
+        acceptsDownloadProgress = false
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        metricsTracker.reset()
+        downloadMetrics = nil
         await worker.unload(force: force)
         state = hasInstalledSnapshot ? .ready : .notInstalled
     }

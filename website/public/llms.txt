@@ -6,7 +6,7 @@ current is best suited to fast voice writing across Mac applications. It can ins
 
 Speech transcription runs on-device and supports English, German, French, Italian, and Spanish. current has no account, analytics, synchronization, cloud transcription, or cloud inference. Audio is held in memory only while dictating and is discarded after transcription or cancellation.
 
-current requires macOS 26 or newer, an Apple-silicon Mac with an M3 or newer chip, and at least 16 GiB of unified memory. Initial model downloads and Microphone, Accessibility, Screen Recording, and Input Monitoring permissions are required. After setup, dictation and context-aware inference run locally without a network connection.
+current requires macOS 26 or newer, an Apple-silicon Mac with an M1 or newer chip, and at least 8 GiB of unified memory. Macs with 8 GiB use dictation-first mode and require Microphone, Accessibility, and Input Monitoring permissions. Context-aware writing, Gemma, screen OCR, and continuous context require 16 GiB and Screen Recording permission. After setup, supported inference runs locally without a network connection.
 
 ## Official resources
 

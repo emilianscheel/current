@@ -4,10 +4,18 @@ import CurrentCore
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let runtime: AppRuntime
+    private let updateController: UpdateController?
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private weak var speechModelItemView: ModelMenuItemView?
+    private weak var contextModelItemView: ModelMenuItemView?
+    private var modelRefreshTimer: Timer?
 
-    init(runtime: AppRuntime) {
+    init(
+        runtime: AppRuntime,
+        updateController: UpdateController? = nil
+    ) {
         self.runtime = runtime
+        self.updateController = updateController
         super.init()
         item.button?.image = NSImage(
             systemSymbolName: MenuBarPresentation.symbol(for: runtime.coordinator.phase),
@@ -21,7 +29,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let permissions = runtime.permissions.snapshot()
+        speechModelItemView = nil
+        contextModelItemView = nil
+        let permissions = runtime.effectivePermissionSnapshot()
         let onboardingTitle = MenuBarPresentation.onboardingActionTitle(
             completed: runtime.settings.onboardingComplete,
             permissions: permissions,
@@ -35,11 +45,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         if onboardingTitle != nil {
             add(
-                permissions.allGranted(
-                    contextWorkerEnabled: runtime.settings.contextWorkerEnabled
-                )
-                    ? "Permissions: Ready"
-                    : "Permissions: Action needed",
+                permissionStatusTitle(permissions),
                 to: menu,
                 symbol: permissions.allGranted(
                     contextWorkerEnabled: runtime.settings.contextWorkerEnabled
@@ -52,7 +58,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             captureTitle,
             to: menu,
             action: #selector(toggleCapture),
-            symbol: runtime.coordinator.phase == .recording ? "stop.circle" : "waveform"
+            symbol: runtime.coordinator.phase == .recording ? "stop" : "waveform",
+            enabled: !runtime.inputMonitoringRestartRequired
         )
         add(
             "Paste Last Transcription",
@@ -75,8 +82,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbol: "arrow.uturn.backward",
             enabled: runtime.coordinator.insertion.canUndoLastInsertion
         )
-        add("Context…", to: menu, action: #selector(openContext), symbol: "doc.text.magnifyingglass")
-        add("Usage Statistics…", to: menu, action: #selector(openUsageStatistics), symbol: "chart.bar")
+        add(
+            "Context…", to: menu, action: #selector(openContext), symbol: "doc.text.magnifyingglass"
+        )
+        add(
+            "Usage Statistics…", to: menu, action: #selector(openUsageStatistics),
+            symbol: "chart.bar")
         if let onboardingTitle {
             add(
                 onboardingTitle,
@@ -94,31 +105,75 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleEnabled),
             symbol: runtime.settings.isEnabled ? "pause" : "play"
         )
-        add(
-            runtime.settings.contextWorkerEnabled
-                ? "Disable Context Worker"
-                : "Enable Context Worker",
-            to: menu,
-            action: #selector(toggleContextWorker),
-            symbol: "brain"
-        )
+        if runtime.hardware.supportsContextWorker {
+            add(
+                runtime.settings.contextWorkerEnabled
+                    ? "Pause Context Worker"
+                    : "Resume Context Worker",
+                to: menu,
+                action: #selector(toggleContextWorker),
+                symbol: runtime.settings.contextWorkerEnabled
+                    ? "pause"
+                    : "play"
+            )
+        } else {
+            add(
+                "Context Worker Unavailable — Requires 16 GiB",
+                to: menu,
+                symbol: "memorychip",
+                enabled: false
+            )
+        }
         addModel(
             "Parakeet TDT v3 Multilingual",
             category: "Speech model",
             state: runtime.model.state,
+            metrics: runtime.model.downloadMetrics,
+            itemView: &speechModelItemView,
             to: menu
         )
         addModel(
             "Gemma 4 E2B 4-bit",
             category: "Context model",
             state: runtime.contextModel.state,
-            statusOverride: runtime.settings.contextWorkerEnabled
-                ? nil : "Disabled",
+            metrics: runtime.contextModel.downloadMetrics,
+            statusOverride: runtime.hardware.supportsContextWorker
+                ? (runtime.settings.contextWorkerEnabled ? nil : "Disabled")
+                : "Unavailable · Requires 16 GiB",
+            itemView: &contextModelItemView,
             to: menu
         )
+        if let updateController {
+            add(
+                "Check for Updates…",
+                to: menu,
+                action: #selector(checkForUpdates),
+                symbol: "arrow.triangle.2.circlepath",
+                enabled: updateController.canCheckForUpdates
+            )
+        }
         add("About Current", to: menu, action: #selector(openAbout), symbol: "info.circle")
         menu.addItem(.separator())
         add("Quit Current", to: menu, action: #selector(quit), key: "q", symbol: "power")
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshModelMenuItems()
+        modelRefreshTimer?.invalidate()
+        let timer = Timer(
+            timeInterval: 0.5,
+            target: self,
+            selector: #selector(refreshModelMenuItems),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        modelRefreshTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        modelRefreshTimer?.invalidate()
+        modelRefreshTimer = nil
     }
 
     private var captureTitle: String {
@@ -126,10 +181,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return "Stop and Transcribe"
         }
         if !runtime.settings.isEnabled
-            || runtime.coordinator.phase == .paused {
+            || runtime.coordinator.phase == .paused
+        {
             return "Resume and Start Dictation"
         }
         return "Start Dictation"
+    }
+
+    private func permissionStatusTitle(
+        _ permissions: PermissionSnapshot
+    ) -> String {
+        if runtime.inputMonitoringRestartRequired {
+            return "Permissions: Restart required"
+        }
+        return permissions.allGranted(
+            contextWorkerEnabled: runtime.settings.contextWorkerEnabled
+        ) ? "Permissions: Ready" : "Permissions: Action needed"
     }
 
     private func add(
@@ -157,16 +224,43 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         _ title: String,
         category: String,
         state: ModelState,
+        metrics: ModelDownloadMetrics?,
         statusOverride: String? = nil,
+        itemView: inout ModelMenuItemView?,
         to menu: NSMenu
     ) {
-        let status = statusOverride
-            ?? MenuBarPresentation.modelStatusTitle(for: state)
-        let subtitle = "\(category) · \(status)"
+        let subtitle = MenuBarPresentation.modelSubtitle(
+            category: category,
+            state: state,
+            metrics: metrics,
+            statusOverride: statusOverride
+        )
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
-        item.view = ModelMenuItemView(title: title, subtitle: subtitle)
+        let view = ModelMenuItemView(title: title, subtitle: subtitle)
+        item.view = view
+        itemView = view
         menu.addItem(item)
+    }
+
+    @objc private func refreshModelMenuItems() {
+        speechModelItemView?.updateSubtitle(
+            MenuBarPresentation.modelSubtitle(
+                category: "Speech model",
+                state: runtime.model.state,
+                metrics: runtime.model.downloadMetrics
+            )
+        )
+        contextModelItemView?.updateSubtitle(
+            MenuBarPresentation.modelSubtitle(
+                category: "Context model",
+                state: runtime.contextModel.state,
+                metrics: runtime.contextModel.downloadMetrics,
+                statusOverride: runtime.hardware.supportsContextWorker
+                    ? (runtime.settings.contextWorkerEnabled ? nil : "Disabled")
+                    : "Unavailable · Requires 16 GiB"
+            )
+        )
     }
 
     @objc private func toggleCapture() { runtime.coordinator.beginFromMenu() }
@@ -181,6 +275,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() { runtime.about.show() }
+    @objc private func checkForUpdates() {
+        updateController?.checkForUpdates()
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
@@ -189,13 +286,15 @@ private final class ModelMenuItemView: NSView {
     private static let horizontalPadding: CGFloat = 18
     private static let verticalPadding: CGFloat = 5
     private static let lineSpacing: CGFloat = 1
+    private let titleLabel: NSTextField
+    private let subtitleLabel: NSTextField
 
     init(title: String, subtitle: String) {
-        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .menuFont(ofSize: 0)
         titleLabel.textColor = .disabledControlTextColor
 
-        let subtitleLabel = NSTextField(labelWithString: subtitle)
+        subtitleLabel = NSTextField(labelWithString: subtitle)
         subtitleLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         subtitleLabel.textColor = .disabledControlTextColor
 
@@ -203,7 +302,8 @@ private final class ModelMenuItemView: NSView {
             titleLabel.intrinsicContentSize.width,
             subtitleLabel.intrinsicContentSize.width
         )
-        let contentHeight = titleLabel.intrinsicContentSize.height
+        let contentHeight =
+            titleLabel.intrinsicContentSize.height
             + Self.lineSpacing
             + subtitleLabel.intrinsicContentSize.height
 
@@ -224,13 +324,30 @@ private final class ModelMenuItemView: NSView {
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalPadding),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalPadding),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: Self.lineSpacing),
+            titleLabel.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: Self.horizontalPadding),
+            titleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
+            subtitleLabel.topAnchor.constraint(
+                equalTo: titleLabel.bottomAnchor, constant: Self.lineSpacing),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
-            subtitleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalPadding),
+            subtitleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor, constant: -Self.horizontalPadding),
+            subtitleLabel.bottomAnchor.constraint(
+                equalTo: bottomAnchor, constant: -Self.verticalPadding),
         ])
+    }
+
+    func updateSubtitle(_ subtitle: String) {
+        guard subtitleLabel.stringValue != subtitle else { return }
+        subtitleLabel.stringValue = subtitle
+        let requiredWidth = max(
+            titleLabel.intrinsicContentSize.width,
+            subtitleLabel.intrinsicContentSize.width
+        ) + (Self.horizontalPadding * 2)
+        if requiredWidth > frame.width {
+            setFrameSize(NSSize(width: requiredWidth, height: frame.height))
+        }
     }
 
     @available(*, unavailable)

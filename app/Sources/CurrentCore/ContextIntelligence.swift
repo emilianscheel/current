@@ -433,6 +433,7 @@ public enum ContextBackgroundState: String, Codable, Sendable, Equatable {
     case waitingForIdle
     case processing
     case suspendedDuringDictation
+    case permissionRequired
     case deferredForPower
     case degraded
 }

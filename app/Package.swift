@@ -14,7 +14,15 @@ let package = Package(
         .library(name: "CurrentCore", targets: ["CurrentCore"]),
     ],
     dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle.git",
+            exact: "2.9.4"
+        ),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
+        .package(
+            url: "https://github.com/simibac/ConfettiSwiftUI.git",
+            exact: "3.0.0"
+        ),
         .package(
             url: "https://github.com/ml-explore/mlx-swift-lm.git",
             exact: "3.31.4"
@@ -49,8 +57,32 @@ let package = Package(
         .systemLibrary(name: "CSQLite"),
         .executableTarget(
             name: "Current",
-            dependencies: ["CurrentCore"],
-            resources: [.process("Resources")]
+            dependencies: [
+                "CurrentCore",
+                .product(
+                    name: "ConfettiSwiftUI",
+                    package: "ConfettiSwiftUI"
+                ),
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            resources: [.process("Resources")],
+            swiftSettings: [
+                // macOS 26.5 can crash inside Swift's generated MainActor
+                // executor checks before AppKit callbacks enter their method
+                // bodies. Keep those checks in debug builds and in CurrentCore,
+                // but omit them from the shipped AppKit executable until the
+                // runtime issue is fixed upstream.
+                .unsafeFlags(
+                    ["-disable-dynamic-actor-isolation"],
+                    .when(configuration: .release)
+                ),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
+                ]),
+            ]
         ),
         .executableTarget(name: "CurrentRelauncher"),
         .executableTarget(

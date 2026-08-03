@@ -1,6 +1,13 @@
 import AppKit
 import Foundation
 
+package enum ContextProcessingRetryPolicy {
+    package static func delay(forAttempt attempt: Int) -> TimeInterval {
+        let delays: [TimeInterval] = [30, 60, 120, 300]
+        return delays[min(max(1, attempt) - 1, delays.count - 1)]
+    }
+}
+
 public actor ContextRepository {
     private struct SessionKey: Hashable {
         let processIdentifier: pid_t
@@ -16,8 +23,13 @@ public actor ContextRepository {
     private var liveContexts: [SessionKey: LiveAppContext] = [:]
     private var processingSessions: Set<SessionKey> = []
     private var processingTasks: [SessionKey: Task<Void, Never>] = [:]
+    private var readyProcessingKeys: Set<SessionKey> = []
+    private var activeProcessingKey: SessionKey?
+    private var isBackgroundProcessingSuspended = false
     private var firstPendingAt: [SessionKey: Date] = [:]
     private var failureCounts: [SessionKey: Int] = [:]
+    private var retryAttempts: [SessionKey: Int] = [:]
+    private var retryNotBefore: [SessionKey: Date] = [:]
     private var unprocessedFailureBatches: [SessionKey: Set<String>] = [:]
     private var suppressedSessions: Set<SessionKey> = []
     private var closingSessions: Set<AppSessionID> = []
@@ -73,6 +85,7 @@ public actor ContextRepository {
         // The later background job must still flush that retained observation.
         guard accepted || liveContexts[key]?.pendingObservations.isEmpty == false
         else { return false }
+        guard !isBackgroundProcessingSuspended else { return true }
         processingTasks.removeValue(forKey: key)?.cancel()
         await processPending(for: key)
         return true
@@ -429,6 +442,9 @@ public actor ContextRepository {
             await flush(key: key, unprocessedOnFailure: true)
             liveContexts.removeValue(forKey: key)
             failureCounts.removeValue(forKey: key)
+            retryAttempts.removeValue(forKey: key)
+            retryNotBefore.removeValue(forKey: key)
+            readyProcessingKeys.remove(key)
             unprocessedFailureBatches.removeValue(forKey: key)
         }
         suppressedSessions = suppressedSessions.filter {
@@ -441,10 +457,12 @@ public actor ContextRepository {
     }
 
     public func stop(at date: Date = Date()) async {
+        isBackgroundProcessingSuspended = true
         for task in processingTasks.values {
             task.cancel()
         }
         processingTasks.removeAll()
+        readyProcessingKeys.removeAll()
         for key in Array(liveContexts.keys) {
             if let context = liveContexts[key] {
                 closingSessions.insert(context.session.sessionID)
@@ -453,6 +471,23 @@ public actor ContextRepository {
         }
         try? await store.closeAppSessions(at: date)
         processingSessions.removeAll()
+        activeProcessingKey = nil
+    }
+
+    public func suspendBackgroundProcessing() {
+        isBackgroundProcessingSuspended = true
+        for task in processingTasks.values { task.cancel() }
+        processingTasks.removeAll()
+        readyProcessingKeys.removeAll()
+    }
+
+    public func resumeBackgroundProcessing() {
+        guard isBackgroundProcessingSuspended else { return }
+        isBackgroundProcessingSuspended = false
+        for key in liveContexts.keys
+        where liveContexts[key]?.pendingObservations.isEmpty == false {
+            scheduleProcessing(for: key)
+        }
     }
 
     public func discardSession(documentID: String) {
@@ -465,9 +500,12 @@ public actor ContextRepository {
         }
         suppressedSessions.insert(key)
         processingTasks.removeValue(forKey: key)?.cancel()
+        readyProcessingKeys.remove(key)
         processingSessions.remove(key)
         firstPendingAt.removeValue(forKey: key)
         failureCounts.removeValue(forKey: key)
+        retryAttempts.removeValue(forKey: key)
+        retryNotBefore.removeValue(forKey: key)
         unprocessedFailureBatches.removeValue(forKey: key)
         liveContexts.removeValue(forKey: key)
     }
@@ -522,12 +560,24 @@ public actor ContextRepository {
     }
 
     private func scheduleProcessing(for key: SessionKey) {
-        guard !processingSessions.contains(key) else { return }
+        guard !isBackgroundProcessingSuspended,
+              !processingSessions.contains(key),
+              liveContexts[key]?.pendingObservations.isEmpty == false else {
+            return
+        }
+        if activeProcessingKey != nil {
+            readyProcessingKeys.insert(key)
+            return
+        }
         let now = Date()
         let first = firstPendingAt[key] ?? now
         firstPendingAt[key] = first
         let elapsed = now.timeIntervalSince(first)
-        let delay = max(0, min(5, 30 - elapsed))
+        let debounceDelay = max(0, min(5, 30 - elapsed))
+        let retryDelay = retryNotBefore[key].map {
+            max(0, $0.timeIntervalSince(now))
+        } ?? 0
+        let delay = max(debounceDelay, retryDelay)
         processingTasks.removeValue(forKey: key)?.cancel()
         processingTasks[key] = Task { [weak self] in
             try? await Task.sleep(
@@ -637,12 +687,26 @@ public actor ContextRepository {
 
     private func processPending(for key: SessionKey) async {
         processingTasks.removeValue(forKey: key)
-        guard !suppressedSessions.contains(key) else { return }
+        guard !isBackgroundProcessingSuspended,
+              !suppressedSessions.contains(key) else { return }
+        guard activeProcessingKey == nil else {
+            readyProcessingKeys.insert(key)
+            return
+        }
+        activeProcessingKey = key
         processingSessions.insert(key)
         defer {
+            activeProcessingKey = nil
             processingSessions.remove(key)
-            if liveContexts[key]?.pendingObservations.isEmpty == false {
-                scheduleProcessing(for: key)
+            if !isBackgroundProcessingSuspended {
+                if liveContexts[key]?.pendingObservations.isEmpty == false {
+                    readyProcessingKeys.insert(key)
+                }
+                let ready = readyProcessingKeys
+                readyProcessingKeys.removeAll()
+                for readyKey in ready {
+                    scheduleProcessing(for: readyKey)
+                }
             }
         }
         guard var context = liveContexts[key],
@@ -676,17 +740,29 @@ public actor ContextRepository {
                 )
             }
             failureCounts.removeValue(forKey: key)
+            retryAttempts.removeValue(forKey: key)
+            retryNotBefore.removeValue(forKey: key)
             if closingSessions.contains(context.session.sessionID) {
                 try? await store.closeAppSession(
                     sessionID: context.session.sessionID,
                     at: pending.last?.capturedAt ?? Date()
                 )
             }
+        } catch is CancellationError {
+            if var latest = liveContexts[key] {
+                latest.pendingObservations.insert(contentsOf: pending, at: 0)
+                liveContexts[key] = latest
+            }
         } catch {
             if var latest = liveContexts[key] {
                 latest.pendingObservations.insert(contentsOf: pending, at: 0)
                 liveContexts[key] = latest
             }
+            let attempt = (retryAttempts[key] ?? 0) + 1
+            retryAttempts[key] = attempt
+            retryNotBefore[key] = Date().addingTimeInterval(
+                ContextProcessingRetryPolicy.delay(forAttempt: attempt)
+            )
             let count = (failureCounts[key] ?? 0) + 1
             failureCounts[key] = count
             if count >= 3, let context = liveContexts[key] {

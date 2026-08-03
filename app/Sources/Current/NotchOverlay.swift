@@ -2,13 +2,13 @@ import AppKit
 import CoreGraphics
 import CurrentCore
 import Observation
+import QuartzCore
 import SwiftUI
 
 @MainActor
 @Observable
 final class OverlayModel {
     var phase: DictationPhase = .idle
-    var presentationProgress: CGFloat = 0
     var targetApplication: InsertionService.TargetApplicationPresentation?
     var editingWordCount = 0
     var partialTranscript = ""
@@ -25,11 +25,12 @@ final class NotchOverlayController {
     private let audio: AudioCaptureService
     private let settings: SettingsStore
     private var panel: NSPanel?
+    private var surfaceView: NotchOverlaySurfaceView?
     private var autoHideTask: Task<Void, Never>?
-    private var orderOutTask: Task<Void, Never>?
-    private var presentationTask: Task<Void, Never>?
     private var screenObserver: NSObjectProtocol?
     private var sessionDisplayID: CGDirectDisplayID?
+    private var presentation = OverlayPresentationMachine()
+    private lazy var waveform = WaveformLevelDriver(audio: audio)
 
     init(audio: AudioCaptureService, settings: SettingsStore) {
         self.audio = audio
@@ -56,21 +57,22 @@ final class NotchOverlayController {
         case .idle, .paused:
             collapse()
         default:
-            let wasVisible = panel?.isVisible == true
-            model.phase = phase
-            model.partialTranscript = partialTranscript
-            if phase == .armed || phase == .recording {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    model.targetApplication = targetApplication
-                    model.editingWordCount = editingWordCount
-                }
-            }
             ensurePanel()
-            if !wasVisible {
+            surfaceView?.updateContent(
+                phase: phase,
+                targetApplication: targetApplication,
+                editingWordCount: editingWordCount,
+                partialTranscript: partialTranscript
+            )
+            waveform.setActive(
+                phase == .armed || phase == .recording,
+                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            )
+            if presentation.state == .hidden {
                 sessionDisplayID = Self.preferredScreen().flatMap(Self.displayID(for:))
                 repositionPanel()
             }
-            presentIfNeeded(wasVisible: wasVisible)
+            presentIfNeeded()
             scheduleTerminalHide(for: phase)
         }
     }
@@ -90,51 +92,27 @@ final class NotchOverlayController {
         panel.animationBehavior = .none
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        let hostingView = NSHostingView(
-            rootView: NotchOverlayView(model: model, audio: audio, settings: settings)
+        let surfaceView = NotchOverlaySurfaceView(
+            model: model,
+            waveform: waveform,
+            settings: settings
         )
-        // This panel has an explicitly managed, fixed frame. Prevent NSHostingView
-        // from feeding its animated SwiftUI content size back into NSWindow, which
-        // can create a recursive AppKit constraint-update cycle during presentation.
-        hostingView.sizingOptions = []
-        hostingView.autoresizingMask = [.width, .height]
-        hostingView.wantsLayer = true
-        hostingView.layerContentsRedrawPolicy = .duringViewResize
-        panel.contentView = hostingView
+        surfaceView.autoresizingMask = [.width, .height]
+        panel.contentView = surfaceView
+        self.surfaceView = surfaceView
         self.panel = panel
     }
 
-    private func presentIfNeeded(wasVisible: Bool) {
-        guard let panel else { return }
-        orderOutTask?.cancel()
-        orderOutTask = nil
-        presentationTask?.cancel()
-        if wasVisible {
-            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            withAnimation(reduceMotion ? .linear(duration: 0.01) : expansionAnimation) {
-                model.presentationProgress = 1
-            }
-            return
-        }
-
-        model.presentationProgress = 0
+    private func presentIfNeeded() {
+        guard let panel, let surfaceView,
+              case let .present(generation) = presentation.requestVisible(true) else { return }
         panel.orderFrontRegardless()
-        presentationTask = Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self, self.panel?.isVisible == true else { return }
-            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            withAnimation(reduceMotion ? .linear(duration: 0.01) : self.expansionAnimation) {
-                self.model.presentationProgress = 1
-            }
+        surfaceView.present(
+            intensity: settings.animationIntensity,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        ) { [weak self] in
+            _ = self?.presentation.completePresentation(generation: generation)
         }
-    }
-
-    private var expansionAnimation: Animation {
-        let intensity = max(0, min(1, settings.animationIntensity))
-        return .spring(
-            response: 0.32 + (1 - intensity) * 0.05,
-            dampingFraction: 0.9 - intensity * 0.06
-        )
     }
 
     private func scheduleTerminalHide(for phase: DictationPhase) {
@@ -154,30 +132,27 @@ final class NotchOverlayController {
     private func collapse() {
         autoHideTask?.cancel()
         autoHideTask = nil
-        presentationTask?.cancel()
-        presentationTask = nil
-        guard panel?.isVisible == true else {
-            sessionDisplayID = nil
-            model.targetApplication = nil
-            model.editingWordCount = 0
-            model.partialTranscript = ""
+        waveform.setActive(false, reduceMotion: true)
+        guard let panel, let surfaceView,
+              case let .dismiss(generation) = presentation.requestVisible(false) else {
+            if presentation.state == .hidden { clearContent() }
             return
         }
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        withAnimation(reduceMotion ? .linear(duration: 0.01) : .easeInOut(duration: 0.26)) {
-            model.presentationProgress = 0
+        surfaceView.dismiss(
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        ) { [weak self, weak panel] in
+            guard let self,
+                  self.presentation.completeDismissal(generation: generation) else { return }
+            panel?.orderOut(nil)
+            sessionDisplayID = nil
+            clearContent()
         }
+    }
 
-        orderOutTask?.cancel()
-        orderOutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(reduceMotion ? 130 : 280))
-            guard !Task.isCancelled, let self else { return }
-            self.panel?.orderOut(nil)
-            self.sessionDisplayID = nil
-            self.model.targetApplication = nil
-            self.model.editingWordCount = 0
-            self.model.partialTranscript = ""
-        }
+    private func clearContent() {
+        model.targetApplication = nil
+        model.editingWordCount = 0
+        model.partialTranscript = ""
     }
 
     private func repositionPanel() {
@@ -209,6 +184,8 @@ final class NotchOverlayController {
         )
         model.layout = layout
         panel.setFrame(layout.panelFrame, display: false)
+        surfaceView?.updateLayout(layout)
+        waveform.updateScreen(screen)
     }
 
     private static func preferredScreen() -> NSScreen? {
@@ -255,44 +232,306 @@ final class NotchOverlayController {
     }
 }
 
-private struct NotchOverlayView: View {
+@MainActor
+@Observable
+private final class WaveformLevelDriver {
+    private(set) var level: Float = 0
+    private(set) var timestamp: CFTimeInterval = 0
+    @ObservationIgnored private let audio: AudioCaptureService
+    @ObservationIgnored private var displayLink: CADisplayLink?
+    @ObservationIgnored private var smoother = WaveformLevelSmoother()
+    @ObservationIgnored private var lastTimestamp: CFTimeInterval?
+    @ObservationIgnored private var isActive = false
+    @ObservationIgnored private var reduceMotion = false
+    @ObservationIgnored private var screenNumber: NSNumber?
+
+    init(audio: AudioCaptureService) {
+        self.audio = audio
+    }
+
+    func updateScreen(_ screen: NSScreen) {
+        let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        guard displayLink == nil || number != screenNumber else { return }
+        displayLink?.invalidate()
+        let link = screen.displayLink(target: self, selector: #selector(displayLinkDidFire(_:)))
+        link.add(to: .main, forMode: .common)
+        link.isPaused = !isActive || reduceMotion
+        displayLink = link
+        screenNumber = number
+        lastTimestamp = nil
+    }
+
+    func setActive(_ active: Bool, reduceMotion: Bool) {
+        isActive = active
+        self.reduceMotion = reduceMotion
+        lastTimestamp = nil
+        if !active {
+            displayLink?.isPaused = true
+            smoother.reset()
+            level = 0
+            timestamp = 0
+        } else if reduceMotion {
+            displayLink?.isPaused = true
+            level = audio.currentMeterLevel
+        } else {
+            displayLink?.isPaused = false
+        }
+    }
+
+    @objc private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        guard isActive, !reduceMotion else {
+            displayLink.isPaused = true
+            return
+        }
+        let deltaTime = lastTimestamp.map { displayLink.timestamp - $0 } ?? (1.0 / 60.0)
+        lastTimestamp = displayLink.timestamp
+        timestamp = displayLink.timestamp
+        level = smoother.update(target: audio.currentMeterLevel, deltaTime: deltaTime)
+    }
+}
+
+@MainActor
+private final class NotchOverlaySurfaceView: NSView {
+    private let model: OverlayModel
+    private let shapeLayer = CAShapeLayer()
+    private let hostingView: NSHostingView<NotchOverlayContentView>
+    private var layoutValue: OverlayLayout
+
+    override var isFlipped: Bool { true }
+
+    init(model: OverlayModel, waveform: WaveformLevelDriver, settings: SettingsStore) {
+        self.model = model
+        layoutValue = model.layout
+        hostingView = NSHostingView(
+            rootView: NotchOverlayContentView(
+                model: model,
+                waveform: waveform,
+                settings: settings
+            )
+        )
+        super.init(frame: model.layout.panelFrame)
+
+        wantsLayer = true
+        layer = CALayer()
+        layer?.masksToBounds = false
+        shapeLayer.fillColor = NSColor.black.cgColor
+        shapeLayer.actions = ["path": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        layer?.addSublayer(shapeLayer)
+
+        hostingView.sizingOptions = []
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.wantsLayer = true
+        hostingView.layer?.opacity = 0
+        hostingView.layer?.setAffineTransform(CGAffineTransform(scaleX: 0.9, y: 0.9))
+        addSubview(hostingView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        hostingView.frame = bounds
+        shapeLayer.frame = bounds
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        shapeLayer.contentsScale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    func updateLayout(_ layout: OverlayLayout) {
+        layoutValue = layout
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        let expanded = hostingView.layer?.opacity == 1
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shapeLayer.path = path(expanded: expanded)
+        CATransaction.commit()
+    }
+
+    func updateContent(
+        phase: DictationPhase,
+        targetApplication: InsertionService.TargetApplicationPresentation?,
+        editingWordCount: Int,
+        partialTranscript: String
+    ) {
+        model.phase = phase
+        model.partialTranscript = partialTranscript
+        guard phase == .armed || phase == .recording else { return }
+        let targetChanged = model.targetApplication?.processIdentifier
+            != targetApplication?.processIdentifier
+        let wordCountChanged = model.editingWordCount != editingWordCount
+        guard targetChanged || wordCountChanged else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            model.targetApplication = targetApplication
+            model.editingWordCount = editingWordCount
+        }
+    }
+
+    func present(intensity: Double, reduceMotion: Bool, completion: @escaping () -> Void) {
+        animate(
+            expanded: true,
+            intensity: intensity,
+            reduceMotion: reduceMotion,
+            completion: completion
+        )
+    }
+
+    func dismiss(reduceMotion: Bool, completion: @escaping () -> Void) {
+        animate(
+            expanded: false,
+            intensity: 0,
+            reduceMotion: reduceMotion,
+            completion: completion
+        )
+    }
+
+    private func animate(
+        expanded: Bool,
+        intensity: Double,
+        reduceMotion: Bool,
+        completion: @escaping () -> Void
+    ) {
+        layoutSubtreeIfNeeded()
+        let policy = OverlayAnimationPolicy(reduceMotion: reduceMotion)
+        let currentPath = shapeLayer.presentation()?.path ?? shapeLayer.path ?? path(expanded: !expanded)
+        let currentOpacity = hostingView.layer?.presentation()?.opacity
+            ?? hostingView.layer?.opacity ?? (expanded ? 0 : 1)
+        let currentTransform = hostingView.layer?.presentation()?.affineTransform()
+            ?? hostingView.layer?.affineTransform() ?? .identity
+        let targetPath = path(expanded: expanded)
+        let targetOpacity: Float = expanded ? 1 : 0
+        let targetTransform = expanded
+            ? CGAffineTransform.identity
+            : CGAffineTransform(scaleX: 0.9, y: 0.9)
+
+        shapeLayer.removeAllAnimations()
+        hostingView.layer?.removeAllAnimations()
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock(completion)
+        CATransaction.setDisableActions(true)
+        shapeLayer.path = targetPath
+        hostingView.layer?.opacity = targetOpacity
+        hostingView.layer?.setAffineTransform(targetTransform)
+
+        if policy.animatesShape {
+            let pathAnimation: CABasicAnimation
+            if expanded {
+                let clampedIntensity = max(0, min(1, intensity))
+                let response = 0.32 + (1 - clampedIntensity) * 0.05
+                let dampingFraction = 0.9 - clampedIntensity * 0.06
+                let angularFrequency = (2 * Double.pi) / response
+                let spring = CASpringAnimation(keyPath: "path")
+                spring.mass = 1
+                spring.stiffness = angularFrequency * angularFrequency
+                spring.damping = 2 * dampingFraction * angularFrequency
+                spring.duration = spring.settlingDuration
+                pathAnimation = spring
+            } else {
+                let basic = CABasicAnimation(keyPath: "path")
+                basic.duration = 0.26
+                basic.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                pathAnimation = basic
+            }
+            pathAnimation.fromValue = currentPath
+            shapeLayer.add(pathAnimation, forKey: "notchMorph")
+        }
+
+        let contentAnimation = CABasicAnimation(keyPath: "opacity")
+        contentAnimation.fromValue = currentOpacity
+        contentAnimation.duration = expanded
+            ? policy.presentationContentDuration
+            : policy.dismissalContentDuration
+        contentAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        hostingView.layer?.add(contentAnimation, forKey: "contentOpacity")
+
+        if policy.animatesShape {
+            let transformAnimation = CABasicAnimation(keyPath: "transform")
+            transformAnimation.fromValue = CATransform3DMakeAffineTransform(currentTransform)
+            transformAnimation.duration = expanded ? 0.18 : 0.12
+            transformAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            hostingView.layer?.add(transformAnimation, forKey: "contentTransform")
+        }
+        CATransaction.commit()
+    }
+
+    private func path(expanded: Bool) -> CGPath {
+        let size = expanded ? layoutValue.expandedSize : layoutValue.collapsedSize
+        let rect = CGRect(
+            x: bounds.midX - size.width / 2,
+            y: layoutValue.topPadding,
+            width: size.width,
+            height: size.height
+        )
+        let topRadius: CGFloat = layoutValue.attachment == .notch ? 0 : min(24, size.height / 2)
+        return Self.roundedPath(
+            rect: rect,
+            topRadius: topRadius,
+            bottomRadius: min(16, size.height / 2)
+        )
+    }
+
+    private static func roundedPath(
+        rect: CGRect,
+        topRadius: CGFloat,
+        bottomRadius: CGFloat
+    ) -> CGPath {
+        let path = CGMutablePath()
+        let kappa: CGFloat = 0.552_284_75
+        let minX = rect.minX, maxX = rect.maxX
+        let minY = rect.minY, maxY = rect.maxY
+        let top = min(topRadius, rect.width / 2, rect.height / 2)
+        let bottom = min(bottomRadius, rect.width / 2, rect.height / 2)
+
+        path.move(to: CGPoint(x: minX + top, y: minY))
+        path.addLine(to: CGPoint(x: maxX - top, y: minY))
+        path.addCurve(
+            to: CGPoint(x: maxX, y: minY + top),
+            control1: CGPoint(x: maxX - top + top * kappa, y: minY),
+            control2: CGPoint(x: maxX, y: minY + top - top * kappa)
+        )
+        path.addLine(to: CGPoint(x: maxX, y: maxY - bottom))
+        path.addCurve(
+            to: CGPoint(x: maxX - bottom, y: maxY),
+            control1: CGPoint(x: maxX, y: maxY - bottom + bottom * kappa),
+            control2: CGPoint(x: maxX - bottom + bottom * kappa, y: maxY)
+        )
+        path.addLine(to: CGPoint(x: minX + bottom, y: maxY))
+        path.addCurve(
+            to: CGPoint(x: minX, y: maxY - bottom),
+            control1: CGPoint(x: minX + bottom - bottom * kappa, y: maxY),
+            control2: CGPoint(x: minX, y: maxY - bottom + bottom * kappa)
+        )
+        path.addLine(to: CGPoint(x: minX, y: minY + top))
+        path.addCurve(
+            to: CGPoint(x: minX + top, y: minY),
+            control1: CGPoint(x: minX, y: minY + top - top * kappa),
+            control2: CGPoint(x: minX + top - top * kappa, y: minY)
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct NotchOverlayContentView: View {
     @Bindable var model: OverlayModel
-    @Bindable var audio: AudioCaptureService
-    @Bindable var settings: SettingsStore
+    let waveform: WaveformLevelDriver
+    let settings: SettingsStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let contentProgress = min(1, max(0, (model.presentationProgress - 0.26) / 0.56))
-        ZStack(alignment: .top) {
-            NotchIslandShape(
-                progress: model.presentationProgress,
-                collapsedSize: model.layout.collapsedSize,
-                expandedSize: model.layout.expandedSize,
-                attachment: model.layout.attachment
+        content
+            .padding(.horizontal, 20)
+            .frame(
+                width: model.layout.expandedSize.width,
+                height: model.layout.expandedSize.height
             )
-                .fill(.black)
-                .overlay {
-                    content
-                        .padding(.horizontal, 20)
-                        .frame(
-                            width: model.layout.expandedSize.width,
-                            height: model.layout.expandedSize.height
-                        )
-                        .opacity(contentProgress)
-                        .scaleEffect(0.9 + contentProgress * 0.1)
-                        .transaction { transaction in
-                            if reduceMotion {
-                                transaction.animation = .easeOut(duration: 0.12)
-                            }
-                        }
-                }
-                .frame(
-                    width: model.layout.expandedSize.width,
-                    height: model.layout.expandedSize.height,
-                    alignment: .top
-                )
-                .compositingGroup()
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.top, model.layout.topPadding)
     }
@@ -317,7 +556,7 @@ private struct NotchOverlayView: View {
             Spacer(minLength: 20)
             PhaseActivity(
                 phase: model.phase,
-                level: audio.level,
+                waveform: waveform,
                 intensity: settings.animationIntensity,
                 reduceMotion: reduceMotion
             )
@@ -351,39 +590,9 @@ private struct NotchOverlayView: View {
     }
 }
 
-private struct NotchIslandShape: Shape {
-    var progress: CGFloat
-    let collapsedSize: CGSize
-    let expandedSize: CGSize
-    let attachment: OverlayAttachment
-
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let amount = min(1, max(0, progress))
-        let width = collapsedSize.width + (expandedSize.width - collapsedSize.width) * amount
-        let height = collapsedSize.height + (expandedSize.height - collapsedSize.height) * amount
-        let shapeRect = CGRect(x: rect.midX - width / 2, y: rect.minY, width: width, height: height)
-        let topRadius: CGFloat = attachment == .notch ? 0 : min(24, height / 2)
-        let bottomRadius = min(16, height / 2)
-        return UnevenRoundedRectangle(
-            cornerRadii: .init(
-                topLeading: topRadius,
-                bottomLeading: bottomRadius,
-                bottomTrailing: bottomRadius,
-                topTrailing: topRadius
-            ),
-            style: .continuous
-        ).path(in: shapeRect)
-    }
-}
-
 private struct PhaseActivity: View {
     let phase: DictationPhase
-    let level: Float
+    let waveform: WaveformLevelDriver
     let intensity: Double
     let reduceMotion: Bool
 
@@ -414,7 +623,7 @@ private struct PhaseActivity: View {
     private var activity: some View {
         switch kind {
         case .recording:
-            LevelBars(level: level, intensity: intensity, reduceMotion: reduceMotion)
+            LevelBars(waveform: waveform, intensity: intensity, reduceMotion: reduceMotion)
         case .processing:
             ProcessingDots(reduceMotion: reduceMotion)
         case .success:
@@ -431,12 +640,12 @@ private struct PhaseActivity: View {
     private var activityTransition: AnyTransition {
         .asymmetric(
             insertion: .modifier(
-                active: ActivityTransitionModifier(opacity: 0, scale: 0.72, blur: 6),
-                identity: ActivityTransitionModifier(opacity: 1, scale: 1, blur: 0)
+                active: ActivityTransitionModifier(opacity: 0, scale: 0.78),
+                identity: ActivityTransitionModifier(opacity: 1, scale: 1)
             ),
             removal: .modifier(
-                active: ActivityTransitionModifier(opacity: 0, scale: 1.18, blur: 6),
-                identity: ActivityTransitionModifier(opacity: 1, scale: 1, blur: 0)
+                active: ActivityTransitionModifier(opacity: 0, scale: 1.12),
+                identity: ActivityTransitionModifier(opacity: 1, scale: 1)
             )
         )
     }
@@ -449,37 +658,35 @@ private enum ActivityKind: Hashable {
 private struct ActivityTransitionModifier: ViewModifier {
     let opacity: Double
     let scale: CGFloat
-    let blur: CGFloat
 
     func body(content: Content) -> some View {
         content
             .opacity(opacity)
             .scaleEffect(scale)
-            .blur(radius: blur)
     }
 }
 
 private struct LevelBars: View {
-    let level: Float
+    @Bindable var waveform: WaveformLevelDriver
     let intensity: Double
     let reduceMotion: Bool
     private let multipliers: [CGFloat] = [0.55, 0.82, 1, 0.82, 0.55]
 
     var body: some View {
-        TimelineView(.animation(paused: reduceMotion)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .center, spacing: 3) {
-                ForEach(multipliers.indices, id: \.self) { index in
-                    Capsule()
-                        .fill(.white)
-                        .frame(width: 3, height: barHeight(index: index, time: time))
-                }
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(multipliers.indices, id: \.self) { index in
+                Capsule()
+                    .fill(.white)
+                    .frame(
+                        width: 3,
+                        height: barHeight(index: index, time: waveform.timestamp)
+                    )
             }
         }
     }
 
     private func barHeight(index: Int, time: TimeInterval) -> CGFloat {
-        let input = min(1, max(0, CGFloat(level)))
+        let input = min(1, max(0, CGFloat(waveform.level)))
         let animationStrength = max(0.15, CGFloat(intensity))
         let breathing = reduceMotion
             ? 0

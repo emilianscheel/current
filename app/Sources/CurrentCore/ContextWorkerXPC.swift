@@ -148,12 +148,12 @@ public struct ContextWorkerPromptRequest: Codable, Sendable {
 }
 
 private enum ContextWorkerTransportError: LocalizedError, Sendable {
-    case disconnected(String)
+    case disconnected(String, generation: UUID?)
     case timeout(String)
 
     var errorDescription: String? {
         switch self {
-        case .disconnected(let message): message
+        case .disconnected(let message, _): message
         case .timeout(let operation):
             "The context worker timed out while performing \(operation)."
         }
@@ -221,6 +221,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
     private var connection: NSXPCConnection?
     private var connectionGeneration: UUID?
     private var handshakeComplete = false
+    private var handshakeTask: Task<(Int, Int32), Error>?
     private var consecutiveFailures = 0
     private var retainsGemmaForIntentRouting = false
     private var routingReleaseTask: Task<Void, Never>?
@@ -368,6 +369,10 @@ public final class ContextWorkerClient: @unchecked Sendable {
 
     public func cancel(requestID: UUID) async {
         cancelPendingRequest(requestID)
+        await cancelRemoteRequest(requestID)
+    }
+
+    private func cancelRemoteRequest(_ requestID: UUID) async {
         guard connection != nil,
               let data = try? JSONEncoder().encode(
                   ContextWorkerCancellationRequest(requestID: requestID)
@@ -411,10 +416,19 @@ public final class ContextWorkerClient: @unchecked Sendable {
     }
 
     public func invalidate() {
+        invalidate(generation: nil)
+    }
+
+    private func invalidate(generation expectedGeneration: UUID?) {
+        if let expectedGeneration,
+           connectionGeneration != expectedGeneration {
+            return
+        }
         routingReleaseTask?.cancel()
         routingReleaseTask = nil
         let error = ContextWorkerTransportError.disconnected(
-            "The context worker connection was closed."
+            "The context worker connection was closed.",
+            generation: connectionGeneration
         )
         failAllPending(with: error)
         connection?.invalidationHandler = nil
@@ -423,6 +437,7 @@ public final class ContextWorkerClient: @unchecked Sendable {
         connection = nil
         connectionGeneration = nil
         handshakeComplete = false
+        handshakeTask = nil
         processIdentifier = nil
         onStateChange?(.idle)
     }
@@ -458,8 +473,18 @@ public final class ContextWorkerClient: @unchecked Sendable {
                     throw CancellationError()
                 } catch let error as ContextWorkerTransportError {
                     if Task.isCancelled { throw CancellationError() }
-                    lastError = error
-                    invalidate()
+                    switch error {
+                    case .timeout:
+                        await cancelRemoteRequest(requestID)
+                        consecutiveFailures += 1
+                        onStateChange?(.degraded)
+                        throw error
+                    case .disconnected(_, let generation):
+                        lastError = error
+                        if let generation {
+                            invalidate(generation: generation)
+                        }
+                    }
                     if attempt == 0 {
                         Self.logger.notice(
                             "Retrying \(operation, privacy: .public) after a transport failure"
@@ -518,12 +543,38 @@ public final class ContextWorkerClient: @unchecked Sendable {
             )
         }
         if !handshakeComplete {
-            let handshake: (Int, Int32) = try await performHandshake(
-                proxy: proxy,
-                generation: generation
-            )
+            let task: Task<(Int, Int32), Error>
+            if let handshakeTask {
+                task = handshakeTask
+            } else {
+                let newTask = Task { @MainActor [weak self] in
+                    guard let self else { throw CancellationError() }
+                    return try await self.performHandshake(
+                        proxy: proxy,
+                        generation: generation
+                    )
+                }
+                handshakeTask = newTask
+                task = newTask
+            }
+            let handshake: (Int, Int32)
+            do {
+                handshake = try await task.value
+            } catch {
+                if connectionGeneration == generation {
+                    handshakeTask = nil
+                }
+                throw error
+            }
+            guard connectionGeneration == generation else {
+                throw ContextWorkerTransportError.disconnected(
+                    "The context worker connection changed during handshake.",
+                    generation: generation
+                )
+            }
+            handshakeTask = nil
             guard handshake.0 == ContextWorkerProtocolVersion.current else {
-                invalidate()
+                invalidate(generation: generation)
                 throw CurrentError.modelUnavailable(
                     "The context worker version does not match Current."
                 )
@@ -568,6 +619,12 @@ public final class ContextWorkerClient: @unchecked Sendable {
         invoke: (ContextWorkerXPCProtocol, @escaping (Data?) -> Void) -> Void
     ) async throws -> Data {
         let proxy = try await proxy()
+        guard let generation = connectionGeneration else {
+            throw ContextWorkerTransportError.disconnected(
+                "The context worker connection is unavailable.",
+                generation: nil
+            )
+        }
         let invocationID = UUID()
         let start = ContinuousClock.now
         defer { pendingInvocations.removeValue(forKey: invocationID) }
@@ -579,7 +636,10 @@ public final class ContextWorkerClient: @unchecked Sendable {
                 fail: { error in gate.resume(with: .failure(error)) }
             )
             Self.scheduleTimeout(timeout, operation: operation, gate: gate)
-            invoke(proxy, Self.replyHandler(gate: gate))
+            invoke(
+                proxy,
+                Self.replyHandler(gate: gate, generation: generation)
+            )
         }
         let elapsed = start.duration(to: .now)
         Self.logger.debug(
@@ -626,13 +686,17 @@ public final class ContextWorkerClient: @unchecked Sendable {
         message: String
     ) {
         guard connectionGeneration == generation else { return }
-        let error = ContextWorkerTransportError.disconnected(message)
+        let error = ContextWorkerTransportError.disconnected(
+            message,
+            generation: generation
+        )
         connection?.invalidationHandler = nil
         connection?.interruptionHandler = nil
         connection?.invalidate()
         connection = nil
         connectionGeneration = nil
         handshakeComplete = false
+        handshakeTask = nil
         processIdentifier = nil
         failAllPending(with: error)
         if degraded { onStateChange?(.degraded) }
@@ -686,13 +750,15 @@ public final class ContextWorkerClient: @unchecked Sendable {
     }
 
     nonisolated private static func replyHandler(
-        gate: ContextWorkerCompletionGate<Data>
+        gate: ContextWorkerCompletionGate<Data>,
+        generation: UUID
     ) -> @Sendable (Data?) -> Void {
         { data in
             do {
                 guard let data else {
                     throw ContextWorkerTransportError.disconnected(
-                        "The context worker returned no reply."
+                        "The context worker returned no reply.",
+                        generation: generation
                     )
                 }
                 switch try JSONDecoder().decode(

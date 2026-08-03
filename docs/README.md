@@ -1,6 +1,6 @@
 # Current
 
-Current is a private, local-first voice writing utility for recent Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, automatically distinguishes literal dictation from writing instructions, and inserts the result into the field you were using.
+Current is a private, local-first voice writing utility for Apple-silicon MacBooks. Hold `fn`, speak, and release: Current records into memory, transcribes with the Apple Neural Engine, and inserts the result into the field you were using. Macs with at least 16 GiB of unified memory can also distinguish literal dictation from context-aware writing instructions.
 
 It is a native menu-bar app. There is no account, cloud transcription, synchronization, or analytics service. Successful, externally committed dictations are retained locally as one editable Markdown context document per day. Accessibility and on-device screen OCR additionally maintain one Markdown context document per visible application process and calendar day.
 
@@ -10,11 +10,11 @@ It is a native menu-bar app. There is no account, cloud transcription, synchroni
 | --- | --- |
 | Operating system | macOS 26 or newer |
 | Architecture | Apple silicon (`arm64`) only |
-| Chip | Apple M3, M4, M5, or newer |
-| Unified memory | 16 GiB or more |
+| Chip | Apple M1 or newer |
+| Unified memory | 8 GiB for dictation-first mode; 16 GiB for context features |
 | Display | Notched MacBook displays receive the attached notch treatment; other displays use a top-center island |
 
-Current checks these requirements before starting its capture and model services. Unsupported systems receive an explanatory window.
+Current checks these requirements before starting its capture and model services. On 8 GiB Macs it enforces dictation-first mode, which keeps local transcription and insertion but skips Gemma, prompt writing, continuous screen context, OCR, and the Screen Recording permission. Unsupported systems receive an explanatory window.
 
 ## How it works
 
@@ -45,16 +45,17 @@ Attributions are included in `app/Licenses/NOTICE.md` and the app’s About pane
 
 ## First launch and permissions
 
-On first launch, or whenever a required permission is missing, Current opens a SwiftUI onboarding window. The model begins downloading immediately while the user completes these steps:
+On first launch, or whenever a required permission is missing, Current opens a SwiftUI onboarding window. The required model downloads begin immediately while the user completes these steps:
 
-1. Local-processing and hardware overview
+1. Local-processing, hardware, and available-feature overview
 2. Microphone
 3. Accessibility
-4. Input Monitoring
-5. One required restart
-6. Model readiness
-7. Practice dictation
-8. Launch-at-login and sound preferences
+4. Screen Recording on Macs with 16 GiB or more
+5. Input Monitoring
+6. A restart only when a newly granted permission requires it
+7. Model readiness (Parakeet only in dictation-first mode; Parakeet and Gemma in rich mode)
+8. Practice dictation
+9. Launch-at-login and sound preferences
 
 Current polls permission state and automatically advances when a grant is detected. Permission pages link directly to the corresponding Privacy & Security pane.
 
@@ -62,10 +63,10 @@ Current polls permission state and automatically advances when a grant is detect
 | --- | --- | --- |
 | Microphone | Capture speech while dictating | `AVCaptureDevice.authorizationStatus(for: .audio)` |
 | Accessibility | Replace selected text or synthesize paste | `AXIsProcessTrusted()` |
-| Screen Recording | Read visible screen text for per-app context | `CGPreflightScreenCaptureAccess()` |
+| Screen Recording (16 GiB rich mode only) | Read visible screen text for per-app context | `CGPreflightScreenCaptureAccess()` |
 | Input Monitoring | Receive global `secondaryFn` events and detect when typing settles | `CGPreflightListenEventAccess()` |
 
-macOS requires Current to restart after Input Monitoring is enabled. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
+macOS can require Current to restart after Input Monitoring is enabled. Current shows the restart step only while such a permission remains unresolved; once all required permissions are granted, normal Back and Continue navigation skips it. A bundled helper waits for the existing process to exit and reopens the same installed bundle. The onboarding step and model cache survive that restart.
 
 Denied or revoked permissions never prevent the menu from opening. Choose **Permissions & Onboarding…** to repair access.
 
@@ -78,9 +79,9 @@ Denied or revoked permissions never prevent the menu from opening. Choose **Perm
 - Context Markdown is indexed locally in `Context/Context Search.sqlite` using SQLite FTS5. The index contains derived chunks and, when Apple's Latin contextual-embedding asset is available, normalized 512-dimensional vectors. It is rebuilt from the source documents after schema changes and never uses a network retrieval service.
 - Accessibility events plus one-shot Vision OCR screenshots update `Context/App Sessions/YYYY-MM-DD/*.md`. Screenshots run every 30 seconds across displays and three seconds after typing settles in the originating window; raw images are discarded after change detection/OCR.
 - Current's own process is excluded at the capture and repository boundaries. Other visible sensitive information may be retained when macOS exposes it.
-- Screen Recording permission remains required, and macOS controls whether its screen-capture privacy indicator appears.
+- When rich context features are enabled, Screen Recording permission remains required and macOS controls whether its screen-capture privacy indicator appears.
 - Context files stay local until edited or moved to Trash.
-- No analytics, crash upload, account, update check, or cloud inference is included.
+- Production builds check a signed GitHub appcast once per day and download verified app updates when available. They send no system profile; no analytics, crash upload, account, context synchronization, or cloud inference is included. Development and ad-hoc builds never contact the production update feed.
 - The last successful result is held in memory for recovery and can be cleared from Settings.
 - Accessibility insertion is attempted first. If the target rejects it, Current uses a temporary pasteboard and Command-V; when configured, it restores the previous pasteboard after a short delay.
 - Secure or inaccessible controls fall back to **Copied — paste manually**.
@@ -109,6 +110,7 @@ Instruments signposts contain durations only, never prompt content. The coordina
 - ServiceManagement `SMAppService` for launch at login
 - Swift Testing for core behavior
 - Hardened Runtime with the audio-input entitlement; App Sandbox is intentionally not enabled because Current must manipulate focused controls in other applications
+- Sparkle 2 for Ed25519-signed, Developer ID-validated automatic updates in production builds
 
 The coordinator owns a single session-tagged voice-interaction flow:
 
@@ -136,6 +138,7 @@ app/Assets/                      Editable SVG artwork and legacy app-icon rendit
 app/Tests/CurrentCoreTests/      State, hardware, permission, and insertion tests
 app/assemble-app.sh              Shared test, optimized build, assembly, and signing workflow
 app/build-install-restart.sh     Test, build, sign, install, and relaunch workflow
+app/package-dmg.sh               Finder layout and compressed DMG packaging workflow
 app/release.sh                   Developer ID signing, notarization, tag, and GitHub release workflow
 ```
 
@@ -161,14 +164,16 @@ Assembly checks can also inject a numeric semantic version into the staged bundl
 
 The script:
 
-1. Validates arm64, macOS 26+, Swift, and code-signing tools. Local installation additionally requires M3-or-newer hardware and 16 GiB of memory; assembly mode leaves runtime hardware validation to the packaged app.
+1. Validates arm64, macOS 26+, Swift, code-signing tools, M1-or-newer hardware, and at least 8 GiB of memory; assembly mode leaves runtime hardware validation to the packaged app.
 2. Runs the test suite.
 3. Builds optimized arm64 executables.
 4. Compiles the Icon Composer source into adaptive and standalone app-icon resources, then assembles `Current.app`.
-5. Signs with Hardened Runtime.
+5. Embeds and signs Sparkle while explicitly disabling its production feed in local builds.
 6. Gracefully stops the old copy, installs to `~/Applications/Current.app`, verifies the signature, and relaunches it.
 
 It never calls `tccutil`, resets UserDefaults, or removes model data.
+
+Local development and ad-hoc assemblies set `CurrentUpdateMode` to `disabled`, omit every active Sparkle feed key, and do not construct the updater at runtime. They therefore cannot replace themselves with the latest production release. Only `release.sh` creates a `production` update bundle.
 
 ### Stable local signing
 
@@ -208,7 +213,7 @@ The solid-black overlay follows Reduce Motion, joins all Spaces, can appear besi
 Automated tests cover:
 
 - quick `fn` taps, held presses, repeats, chords, release, and Escape
-- M3+/16 GiB hardware gating and future M-generation parsing
+- M1+/8 GiB launch eligibility, 16 GiB context-worker capability gating, and future M-generation parsing
 - permission snapshots and missing-permission ordering
 - deterministic text trimming and trailing-space behavior
 - session-safe coordinator boundaries and model-file SHA-256 support
@@ -228,9 +233,9 @@ Before release, manually test:
 - automatic detection and transcription of German, French, Italian, Spanish, and English
 - consecutive dictations in different supported languages
 - context search, rich formatting, autosave, copy, Trash confirmation, and reopen behavior
-- M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
+- M1 Air 8/16 GiB and M3 Pro cold/warm model load, peak memory, and short-phrase release-to-result latency
 
-Prompt release gates are warm release-to-final-paste p50 and p95 at or below 20% of the recorded baseline, context preparation p95 below 100 ms after successful recording-time capture, retrieval p95 below 20 ms after query embedding, intent regression no greater than one percentage point, Recall@6 of at least 95%, and direct-dictation p95 regression below 10%. Apple-success, warm-Gemma fallback, cold-start, continuous-context-disabled, Accessibility-only, and OCR-required runs must be measured separately on the reference M3 Pro before release.
+Prompt release gates are warm release-to-final-paste p50 and p95 at or below 20% of the recorded baseline, context preparation p95 below 100 ms after successful recording-time capture, retrieval p95 below 20 ms after query embedding, intent regression no greater than one percentage point, Recall@6 of at least 95%, and direct-dictation p95 regression below 10%. Apple-success, warm-Gemma fallback, cold-start, continuous-context-disabled, Accessibility-only, and OCR-required runs must be measured separately on the reference M3 Pro before release. Dictation-first stability and memory use must also be measured on an 8 GiB M1 Air; rich mode must be measured on a 16 GiB M1 Air.
 
 ## Known platform limits
 
@@ -246,7 +251,7 @@ The first Core ML load can take longer while macOS compiles models for the Neura
 - Meeting transcription and speaker diarization
 - Cloud inference or cross-device context
 - Actions or automation beyond generating text for the captured field
-- Intel, Windows, Linux, or pre-M3 support
+- Intel, Windows, Linux, or pre-M1 support
 
 ## Download and releases
 
@@ -273,11 +278,26 @@ Development builds are intentionally different: the installed local app uses a s
      --password "APP-SPECIFIC-PASSWORD"
    ```
 
-4. Validate all release prerequisites:
+4. Resolve dependencies and generate Current's Sparkle Ed25519 signing key once:
+
+   ```sh
+   cd app
+   swift package --disable-sandbox resolve
+   .build/artifacts/sparkle/Sparkle/bin/generate_keys \
+     --account com.emilianscheel.current
+   ```
+
+   The private key remains in the login Keychain. Store an encrypted backup with the tool's `-x` option and keep it outside the repository. `Packaging/SparklePublicKey.txt` contains only the matching public key.
+
+   Run `./app/release.sh --setup` once afterward and choose **Always Allow** if Keychain asks whether Sparkle's `sign_update` tool may use the private key. The setup check signs only an empty temporary probe and fails before a release build if signing access is unavailable.
+
+5. Validate all release prerequisites:
 
    ```sh
    ./app/release.sh --setup
    ```
+
+DMG layout metadata is generated headlessly from the locked `dmgbuild` packaging environment. The installer uses Finder's native appearance-aware canvas and a label-less arrow preview, so its compact drag-to-Applications layout follows macOS Light and Dark Mode without Finder Automation or a logged-in Finder session. Install `uv` alongside `gh` during one-time setup.
 
 The default notarization profile is `Current-notary`; override it with `CURRENT_NOTARY_PROFILE`. If the Keychain contains multiple Developer ID Application identities, select one by SHA-1 hash or full certificate name with `CURRENT_DEVELOPER_ID_APPLICATION`.
 
@@ -289,8 +309,10 @@ First push `main`, ensure the worktree is clean, and run:
 ./app/release.sh v0.2.0
 ```
 
-The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions into both the app and XPC service, signs every executable from the inside out, creates and signs `app/dist/Current.dmg`, submits it to Apple, staples and validates the ticket, and checks the mounted image with Gatekeeper. Only then does it create and push the annotated tag, upload a draft with generated notes, verify the downloaded asset checksum, and publish it as the latest GitHub release.
+The command requires `HEAD` to equal `origin/main`, runs all tests, creates an optimized arm64 app, injects the semantic and numeric build versions, enables the production updater, signs every executable from the inside out, creates and signs `Current.dmg`, notarizes and staples it, and checks the mounted image with Gatekeeper. It then generates an Ed25519-signed `appcast.xml`, creates and pushes the annotated tag, uploads both assets to a draft, verifies their downloaded checksums, publishes the release, and verifies GitHub's stable latest-asset URLs.
 
 Use `app/release.sh` rather than creating or pushing release tags manually. If publishing fails after the verified tag is pushed, rerunning the same command resumes a matching draft. It never overwrites a mismatched tag or published release.
 
-Every release uses the asset name `Current.dmg`, so the website and README keep using GitHub's permanent latest-release URL.
+Every release uses the asset names `Current.dmg` and `appcast.xml`. The website and README use GitHub's permanent latest-DMG URL, while production apps use `https://github.com/emilianscheel/current/releases/latest/download/appcast.xml`.
+
+Production builds check once per day, download updates silently, and wait to install until Current is idle, none of its windows are open, and the Mac has received no keyboard or mouse input for five minutes. Sparkle then uses Current's graceful termination path, atomically replaces the app, and relaunches it. A non-writable installation may still require macOS authorization.

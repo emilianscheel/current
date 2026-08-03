@@ -1,18 +1,101 @@
 import CoreAudio
+import CoreGraphics
 import Foundation
 import Testing
 @testable import CurrentCore
 
-@Test func supportedHardwareRequiresM3And16GB() {
-    #expect(HardwareSupport(isAppleSilicon: true, generation: 3, memoryBytes: 16 * 1_073_741_824, modelName: "Apple M3").isSupported)
-    #expect(!HardwareSupport(isAppleSilicon: true, generation: 2, memoryBytes: 32 * 1_073_741_824, modelName: "Apple M2").isSupported)
-    #expect(!HardwareSupport(isAppleSilicon: true, generation: 4, memoryBytes: 8 * 1_073_741_824, modelName: "Apple M4").isSupported)
+@Test func appleSiliconHardwareUsesMemoryBasedCapabilityTiers() {
+    let gibibyte = UInt64(1_073_741_824)
+    for generation in 1...5 {
+        let eightGB = HardwareSupport(
+            isAppleSilicon: true,
+            generation: generation,
+            memoryBytes: 8 * gibibyte,
+            modelName: "Apple M\(generation)"
+        )
+        #expect(eightGB.isSupported)
+        #expect(!eightGB.supportsContextWorker)
+        #expect(!eightGB.contextWorkerEnabled(requested: true))
+        #expect(eightGB.reason.contains("Dictation-first mode"))
+
+        let sixteenGB = HardwareSupport(
+            isAppleSilicon: true,
+            generation: generation,
+            memoryBytes: 16 * gibibyte,
+            modelName: "Apple M\(generation)"
+        )
+        #expect(sixteenGB.isSupported)
+        #expect(sixteenGB.supportsContextWorker)
+        #expect(sixteenGB.contextWorkerEnabled(requested: true))
+    }
+
+    #expect(!HardwareSupport(
+        isAppleSilicon: false,
+        generation: nil,
+        memoryBytes: 32 * gibibyte,
+        modelName: "Intel"
+    ).isSupported)
+    #expect(!HardwareSupport(
+        isAppleSilicon: true,
+        generation: nil,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Unknown Mac"
+    ).isSupported)
+    #expect(!HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 4 * gibibyte,
+        modelName: "Apple M1"
+    ).isSupported)
 }
 
 @Test func hardwareGenerationParser() {
     #expect(HardwareChecker.appleSiliconGeneration(from: "Apple M3 Pro") == 3)
     #expect(HardwareChecker.appleSiliconGeneration(from: "Apple M12 Max") == 12)
     #expect(HardwareChecker.appleSiliconGeneration(from: "Mac15,6") == nil)
+}
+
+@Test func automaticUpdateRequiresSafeIdleWindow() {
+    let ready = AutomaticUpdateInstallationState(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput:
+            AutomaticUpdateInstallationPolicy.requiredUserIdleTime
+    )
+    #expect(AutomaticUpdateInstallationPolicy.canInstall(ready))
+    #expect(AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .paused,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .recording,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        isBackgroundGenerationActive: true,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: true,
+        secondsSinceUserInput: 600
+    )))
+    #expect(!AutomaticUpdateInstallationPolicy.canInstall(.init(
+        dictationPhase: .idle,
+        hasVisibleCurrentWindows: false,
+        secondsSinceUserInput: 299
+    )))
+
+    var gate = AutomaticUpdateInstallationGate()
+    let firstDecision = gate.shouldInstall(ready)
+    let secondDecision = gate.shouldInstall(ready)
+    #expect(firstDecision)
+    #expect(!secondDecision)
+    #expect(gate.hasAllowedInstallation)
 }
 
 @Test func shortcutTapDoesNotRecord() {
@@ -434,6 +517,58 @@ private struct DictationEvaluationFixture: Decodable {
     #expect(envelope.value == 0)
 }
 
+@Test func waveformSmoothingIsFrameRateIndependent() {
+    var sixtyHertz = WaveformLevelSmoother()
+    var oneTwentyHertz = WaveformLevelSmoother()
+    for _ in 0..<30 { sixtyHertz.update(target: 1, deltaTime: 1.0 / 60.0) }
+    for _ in 0..<60 { oneTwentyHertz.update(target: 1, deltaTime: 1.0 / 120.0) }
+
+    #expect(abs(sixtyHertz.value - oneTwentyHertz.value) < 0.0001)
+    #expect(sixtyHertz.value > 0.99)
+
+    let released = sixtyHertz.update(target: 0, deltaTime: 1.0 / 60.0)
+    #expect(released > 0)
+    #expect(released < 1)
+    sixtyHertz.reset()
+    #expect(sixtyHertz.value == 0)
+}
+
+@Test func overlayPresentationMachineIgnoresRepeatedVisibleUpdates() {
+    var machine = OverlayPresentationMachine()
+    let command = machine.requestVisible(true)
+    #expect(command == .present(generation: 1))
+    #expect(machine.requestVisible(true) == nil)
+    let completed = machine.completePresentation(generation: 1)
+    #expect(completed)
+    #expect(machine.state == .visible)
+    #expect(machine.requestVisible(true) == nil)
+}
+
+@Test func overlayPresentationMachineRejectsStaleCompletionsAfterReversal() {
+    var machine = OverlayPresentationMachine()
+    #expect(machine.requestVisible(true) == .present(generation: 1))
+    #expect(machine.requestVisible(false) == .dismiss(generation: 2))
+    let stalePresentation = machine.completePresentation(generation: 1)
+    #expect(!stalePresentation)
+    #expect(machine.requestVisible(true) == .present(generation: 3))
+    let staleDismissal = machine.completeDismissal(generation: 2)
+    #expect(!staleDismissal)
+    let completed = machine.completePresentation(generation: 3)
+    #expect(completed)
+    #expect(machine.state == .visible)
+}
+
+@Test func overlayAnimationPolicyHonorsReduceMotion() {
+    let standard = OverlayAnimationPolicy(reduceMotion: false)
+    #expect(standard.animatesShape)
+    #expect(standard.presentationContentDuration == 0.18)
+
+    let reduced = OverlayAnimationPolicy(reduceMotion: true)
+    #expect(!reduced.animatesShape)
+    #expect(reduced.presentationContentDuration == 0.12)
+    #expect(reduced.dismissalContentDuration == 0.12)
+}
+
 @Test func automaticInputAvoidsBluetoothCaptureWhenBuiltInMicExists() {
     #expect(
         AudioCaptureService.preferredAutomaticInputDeviceID(
@@ -462,6 +597,50 @@ private struct DictationEvaluationFixture: Decodable {
     let snapshot = PermissionSnapshot(microphone: .granted, accessibility: .denied, inputMonitoring: .granted)
     #expect(snapshot.firstMissing == .accessibility)
     #expect(!snapshot.allGranted)
+}
+
+@Test func permissionSnapshotReportsEveryRuntimeTransition() {
+    let granted = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .granted
+    )
+    let revoked = PermissionSnapshot(
+        microphone: .denied,
+        accessibility: .denied,
+        screenRecording: .denied,
+        inputMonitoring: .denied
+    )
+    #expect(
+        revoked.revokedPermissions(since: granted)
+            == PermissionKind.allCases
+    )
+    #expect(
+        granted.restoredPermissions(since: revoked)
+            == PermissionKind.allCases
+    )
+    #expect(granted.revokedPermissions(since: granted).isEmpty)
+}
+
+@Test func shortcutEventTapDistinguishesTimeoutFromPermissionLoss() {
+    #expect(
+        ShortcutMonitor.disableAction(for: .tapDisabledByTimeout)
+            == .reenable
+    )
+    #expect(
+        ShortcutMonitor.disableAction(for: .tapDisabledByUserInput)
+            == .permissionLost
+    )
+    #expect(ShortcutMonitor.disableAction(for: .keyDown) == .none)
+}
+
+@Test func contextProcessingRetryBackoffIsBounded() {
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 1) == 30)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 2) == 60)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 3) == 120)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 4) == 300)
+    #expect(ContextProcessingRetryPolicy.delay(forAttempt: 20) == 300)
 }
 
 @Test func modelIntegrityDetectsMutation() throws {
@@ -729,6 +908,159 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     )
 }
 
+@Test func stageLightUsesThreeSecondFadeBloomAndHoldTimeline() {
+    let initial = StageLightAnimation.sample(elapsed: 0, reduceMotion: false)
+    let fadedIn = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.fadeInDuration,
+        reduceMotion: false
+    )
+    let held = StageLightAnimation.sample(elapsed: 1.5, reduceMotion: false)
+    let fadeOutStart = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.duration
+            - StageLightAnimation.fadeOutDuration,
+        reduceMotion: false
+    )
+    let finished = StageLightAnimation.sample(
+        elapsed: StageLightAnimation.duration,
+        reduceMotion: false
+    )
+
+    #expect(initial.overlayOpacity == 0)
+    #expect(fadedIn.overlayOpacity == 1)
+    #expect(held.overlayOpacity == 1)
+    #expect(held.beamExpansion > fadedIn.beamExpansion)
+    #expect(held.beamIntensity > fadedIn.beamIntensity)
+    #expect(fadeOutStart.overlayOpacity == 1)
+    #expect(finished.overlayOpacity == 0)
+}
+
+@Test func reduceMotionStageLightKeepsStaticBeamGeometry() {
+    let samples = [0.2, 1.5, 2.7].map {
+        StageLightAnimation.sample(elapsed: $0, reduceMotion: true)
+    }
+
+    #expect(samples.allSatisfy { $0.beamExpansion == 0 })
+    #expect(samples.allSatisfy { $0.beamIntensity == 0.58 })
+    #expect(samples[0].overlayOpacity < samples[1].overlayOpacity)
+    #expect(samples[2].overlayOpacity < samples[1].overlayOpacity)
+}
+
+@Test func stageLightBeamStartsOffscreenAndEndsBelowWindow() {
+    let notch = CGRect(x: 620, y: 868, width: 200, height: 32)
+    let window = CGRect(x: 360, y: 180, width: 720, height: 560)
+    let geometry = StageLightBeamGeometry(
+        bounds: CGRect(x: 0, y: 0, width: 1_440, height: 900),
+        focusFrame: window,
+        notchFrame: notch,
+        expansion: 60,
+        lowerExtension: 50
+    )
+
+    #expect(geometry.sourceLeft == CGPoint(x: 664, y: 972))
+    #expect(geometry.sourceRight == CGPoint(x: 776, y: 972))
+    #expect(geometry.destinationLeft == CGPoint(x: 300, y: 130))
+    #expect(geometry.destinationRight == CGPoint(x: 1_140, y: 130))
+}
+
+@Test func stageLightBeamUsesCenteredFallbackWithoutANotch() {
+    let geometry = StageLightBeamGeometry(
+        bounds: CGRect(x: 0, y: 0, width: 1_440, height: 900),
+        focusFrame: CGRect(x: 360, y: 180, width: 720, height: 560),
+        notchFrame: nil,
+        expansion: 60,
+        lowerExtension: 50
+    )
+
+    #expect(geometry.sourceLeft.x == 684)
+    #expect(geometry.sourceRight.x == 756)
+    #expect(geometry.sourceLeft.y == 972)
+}
+
+@Test func focusPresentationGenerationInvalidatesRapidReplays() {
+    var generation = FocusPresentationGeneration()
+    let first = generation.next()
+    let replay = generation.next()
+
+    #expect(!generation.matches(first))
+    #expect(generation.matches(replay))
+}
+
+@Test func microphonePromptMatcherFindsOnlyNewPermissionCandidates() {
+    let baseline: Set<CGWindowID> = [10]
+    let observations = [
+        FocusWindowObservation(
+            id: 10,
+            processIdentifier: 400,
+            ownerName: "CoreServicesUIAgent",
+            frame: CGRect(x: 100, y: 100, width: 420, height: 260)
+        ),
+        FocusWindowObservation(
+            id: 11,
+            processIdentifier: 999,
+            ownerName: "Unrelated App",
+            frame: CGRect(x: 120, y: 120, width: 400, height: 240)
+        ),
+        FocusWindowObservation(
+            id: 12,
+            processIdentifier: 400,
+            ownerName: "CoreServicesUIAgent",
+            frame: CGRect(x: 140, y: 140, width: 420, height: 260)
+        ),
+        FocusWindowObservation(
+            id: 13,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 160, y: 160, width: 320, height: 180)
+        ),
+    ]
+
+    let candidate = MicrophonePromptMatcher.candidate(
+        baselineWindowIDs: baseline,
+        observations: observations,
+        applicationProcessIdentifier: 42,
+        excludedWindowID: 13
+    )
+    #expect(candidate?.id == 12)
+}
+
+@Test func microphonePromptMatcherRejectsInvisibleAndUnsafeGeometry() {
+    let observations = [
+        FocusWindowObservation(
+            id: 20,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 0, y: 0, width: 180, height: 90)
+        ),
+        FocusWindowObservation(
+            id: 21,
+            processIdentifier: 42,
+            ownerName: "Current",
+            frame: CGRect(x: 0, y: 0, width: 420, height: 220),
+            alpha: 0
+        ),
+    ]
+
+    #expect(
+        MicrophonePromptMatcher.candidate(
+            baselineWindowIDs: [],
+            observations: observations,
+            applicationProcessIdentifier: 42,
+            excludedWindowID: nil
+        ) == nil
+    )
+}
+
+@Test func microphonePromptOverlayUsesTheModalAsItsSharpMask() {
+    let frame = CGRect(x: 140, y: 140, width: 420, height: 260)
+    let stacked = MicrophonePromptOverlayTarget(frame: frame, windowID: 12)
+    #expect(stacked.windowID == 12)
+    #expect(stacked.foregroundFocusFrame == nil)
+
+    let fallback = MicrophonePromptOverlayTarget(frame: frame, windowID: nil)
+    #expect(fallback.windowID == nil)
+    #expect(fallback.foregroundFocusFrame == frame)
+}
+
 @Test func menuBarSymbolStaysDefaultForEveryPhase() {
     for phase in DictationPhase.allCases {
         #expect(MenuBarPresentation.symbol(for: phase) == "alternatingcurrent")
@@ -738,7 +1070,7 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
 @Test func menuBarModelStatusTitlesCoverEveryState() {
     let states: [(ModelState, String)] = [
         (.notInstalled, "Preparing…"),
-        (.downloading(progress: 0.5), "Downloading…"),
+        (.downloading(progress: 0.5), "Downloading"),
         (.verifying, "Verifying…"),
         (.loading, "Loading…"),
         (.ready, "Ready"),
@@ -748,6 +1080,136 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     for (state, expectedTitle) in states {
         #expect(MenuBarPresentation.modelStatusTitle(for: state) == expectedTitle)
     }
+}
+
+@Test func modelDownloadMetricsStayMonotonicAndMeasureSpeed() {
+    var tracker = ModelDownloadMetricsTracker()
+    let start = Date(timeIntervalSinceReferenceDate: 1_000)
+    let initial = tracker.update(
+        fractionCompleted: 0.6,
+        downloadedBytes: 10_000_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start
+    )
+    #expect(initial.fractionCompleted == 0.6)
+    #expect(initial.bytesPerSecond == nil)
+
+    let resetComponent = tracker.update(
+        fractionCompleted: 0.2,
+        downloadedBytes: 22_400_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start.addingTimeInterval(1)
+    )
+    #expect(resetComponent.fractionCompleted == 0.6)
+    #expect(resetComponent.downloadedBytes == 22_400_000)
+    #expect(resetComponent.bytesPerSecond == 12_400_000)
+    #expect(resetComponent.hidingSpeed().bytesPerSecond == nil)
+
+    let compiling = tracker.update(
+        fractionCompleted: 0.55,
+        downloadedBytes: 22_400_000,
+        totalBytes: 100_000_000,
+        stage: .compiling,
+        at: start.addingTimeInterval(1.1)
+    )
+    #expect(compiling.fractionCompleted == 0.6)
+    #expect(compiling.bytesPerSecond == nil)
+
+    tracker.reset()
+    let retried = tracker.update(
+        fractionCompleted: 0.1,
+        downloadedBytes: 1_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start.addingTimeInterval(2)
+    )
+    #expect(retried.fractionCompleted == 0.1)
+    #expect(retried.bytesPerSecond == nil)
+}
+
+@Test func compactModelDownloadPresentationRoundsAndClampsProgress() {
+    #expect(MenuBarPresentation.roundedDownloadPercent(-0.2) == 0)
+    #expect(MenuBarPresentation.roundedDownloadPercent(0.404) == 40)
+    #expect(MenuBarPresentation.roundedDownloadPercent(0.405) == 41)
+    #expect(MenuBarPresentation.roundedDownloadPercent(1.2) == 100)
+    #expect(
+        MenuBarPresentation.downloadSpeedTitle(
+            bytesPerSecond: 12_400_000
+        ) == "12.4 MB/s"
+    )
+
+    let metrics = ModelDownloadMetrics(
+        fractionCompleted: 0.4,
+        downloadedBytes: 40,
+        totalBytes: 100,
+        bytesPerSecond: 12_400_000,
+        stage: .downloading
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 0.1),
+            metrics: metrics
+        ) == "Speech model · Downloading · 40%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 0),
+            metrics: nil
+        ) == "Speech model · Downloading · 0%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 1.2),
+            metrics: nil
+        ) == "Speech model · Downloading · 100%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Context model",
+            state: .downloading(progress: 0.4),
+            metrics: metrics,
+            statusOverride: "Disabled"
+        ) == "Context model · Disabled"
+    )
+    #expect(
+        MenuBarPresentation.onboardingModelStatus(
+            state: .downloading(progress: 0.4),
+            metrics: metrics
+        ) == "Downloading · 40% · 12.4 MB/s"
+    )
+}
+
+@Test func earlyModelPreparationOnlyIncludesGemmaInSupportedRichMode() {
+    let gibibyte = UInt64(1_073_741_824)
+    let fastOnly = HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 8 * gibibyte,
+        modelName: "Apple M1"
+    )
+    let rich = HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Apple M1"
+    )
+    #expect(!ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: fastOnly,
+        contextWorkerEnabled: true
+    ))
+    #expect(!ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: rich,
+        contextWorkerEnabled: false
+    ))
+    #expect(ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: rich,
+        contextWorkerEnabled: true
+    ))
 }
 
 @Test func menuBarShowsOnboardingWhileOnboardingIsIncomplete() {
@@ -800,7 +1262,7 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(OnboardingFlow.initialStep(saved: .practice, completed: true, permissions: permissions, modelInstalled: true) == .accessibility)
 }
 
-@Test func onboardingContinuesPastThePermissionRestart() {
+@Test func onboardingOmitsRestartWhenRequiredPermissionsAreGranted() {
     let granted = PermissionSnapshot(
         microphone: .granted,
         accessibility: .granted,
@@ -808,7 +1270,92 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
         inputMonitoring: .granted
     )
     #expect(OnboardingFlow.initialStep(saved: .restart, completed: false, permissions: granted, modelInstalled: false) == .model)
-    #expect(OnboardingFlow.automaticDestination(from: .inputMonitoring, permissions: granted) == .restart)
+    #expect(
+        OnboardingFlow.automaticDestination(
+            from: .inputMonitoring,
+            permissions: granted,
+            restartRequired: true
+        ) == .model
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: granted,
+            contextWorkerEnabled: true,
+            restartRequired: true
+        ) == .inputMonitoring
+    )
+}
+
+@Test func onboardingIncludesRestartOnlyForAnUnresolvedRestartRequirement() {
+    let missingInputMonitoring = PermissionSnapshot(
+        microphone: .granted,
+        accessibility: .granted,
+        screenRecording: .granted,
+        inputMonitoring: .denied
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: missingInputMonitoring,
+            contextWorkerEnabled: true,
+            restartRequired: true
+        ) == .restart
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: missingInputMonitoring,
+            contextWorkerEnabled: true,
+            restartRequired: false
+        ) == .inputMonitoring
+    )
+}
+
+@Test func onboardingKeyboardNavigationRespectsAvailabilityAndTextEditing() {
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: false,
+            canGoBack: true,
+            canAdvance: false
+        ) == .back
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .right,
+            isEditingText: false,
+            canGoBack: false,
+            canAdvance: true
+        ) == .advance
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: true,
+            canGoBack: true,
+            canAdvance: true
+        ) == .back
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .right,
+            isEditingText: true,
+            canGoBack: true,
+            canAdvance: true
+        ) == nil
+    )
+    #expect(
+        OnboardingKeyboardNavigation.action(
+            for: .left,
+            isEditingText: false,
+            canGoBack: false,
+            canAdvance: true
+        ) == nil
+    )
 }
 
 @MainActor
@@ -838,6 +1385,36 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     #expect(restored.continuousContextEnabled)
 }
 
+@MainActor
+@Test func hardwareCapabilitiesReconcilePersistedContextWorkerMode() {
+    let suiteName = "CurrentHardwareCapabilities.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let gibibyte = UInt64(1_073_741_824)
+
+    defaults.set(true, forKey: "contextWorkerEnabled")
+    let constrained = SettingsStore(defaults: defaults)
+    constrained.applyHardwareCapabilities(HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 8 * gibibyte,
+        modelName: "Apple M1"
+    ))
+    #expect(!constrained.contextWorkerEnabled)
+    #expect(!defaults.bool(forKey: "contextWorkerEnabled"))
+
+    defaults.set(true, forKey: "contextWorkerEnabled")
+    let rich = SettingsStore(defaults: defaults)
+    rich.applyHardwareCapabilities(HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Apple M1"
+    ))
+    #expect(rich.contextWorkerEnabled)
+    #expect(defaults.bool(forKey: "contextWorkerEnabled"))
+}
+
 @Test func fastModeOnboardingSkipsScreenRecordingAndGemmaRequirement() {
     let fastPermissions = PermissionSnapshot(
         microphone: .granted,
@@ -861,6 +1438,15 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
             permissions: fastPermissions,
             modelInstalled: true,
             contextWorkerEnabled: false
+        ) == .inputMonitoring
+    )
+    #expect(
+        OnboardingFlow.adjacentStep(
+            from: .model,
+            direction: -1,
+            permissions: fastPermissions,
+            contextWorkerEnabled: false,
+            restartRequired: true
         ) == .inputMonitoring
     )
     #expect(
@@ -944,6 +1530,46 @@ private func contextTestDate(
     #expect(firstDay.markdown.contains("**Friday, July 24, 2026 15:30 h**\nSecond conversation"))
     #expect(store.filteredDocuments(matching: "Second").map(\.id) == ["2026-07-24"])
     #expect(store.filteredDocuments(matching: "July 25").map(\.id) == ["2026-07-25"])
+}
+
+@MainActor
+@Test func contextStoreRepeatedlyReloadsAndSearchesMixedDirectoryContents() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "current-context-\(UUID().uuidString)"
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+        at: root,
+        withIntermediateDirectories: true
+    )
+    let calendar = contextTestCalendar(timeZoneID: "Europe/Berlin")
+    let store = ContextStore(
+        directory: root,
+        calendar: calendar,
+        locale: Locale(identifier: "en_US")
+    )
+    try Data("ignored".utf8).write(
+        to: root.appendingPathComponent("not-context.txt")
+    )
+    try store.append(
+        "Stable reload marker",
+        at: contextTestDate(2026, 7, 24, 9, 5, calendar: calendar)
+    )
+
+    for _ in 0..<100 {
+        store.reload()
+        #expect(store.lastError == nil)
+        #expect(
+            store.documents.prefix(2).map(\.id) == [
+                ContextStore.aboutMeDocumentID,
+                ContextStore.instructionsDocumentID,
+            ]
+        )
+        #expect(
+            store.filteredDocuments(matching: "reload marker").map(\.id)
+                == ["2026-07-24"]
+        )
+    }
 }
 
 @MainActor

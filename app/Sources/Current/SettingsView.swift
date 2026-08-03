@@ -28,7 +28,11 @@ struct SettingsView: View {
         .onChange(of: runtime.settings.showDockIcon) { _, _ in runtime.applyDockPolicy() }
         .onChange(of: runtime.settings.launchAtLogin) { _, _ in runtime.applyLaunchAtLogin() }
         .onChange(of: runtime.settings.isEnabled) { _, enabled in
-            enabled ? runtime.coordinator.startMonitoring() : runtime.coordinator.stopMonitoring()
+            if enabled, !runtime.inputMonitoringRestartRequired {
+                runtime.coordinator.startMonitoring()
+            } else {
+                runtime.coordinator.stopMonitoring()
+            }
         }
         .onChange(of: runtime.settings.inputDeviceID) { _, device in runtime.coordinator.audio.selectedDeviceID = device }
         .onChange(of: runtime.settings.continuousContextEnabled) { _, enabled in
@@ -94,8 +98,14 @@ struct SettingsView: View {
             )
             LabeledContent(
                 "State",
-                value: modelState(runtime.contextModel.state)
+                value: runtime.hardware.supportsContextWorker
+                    ? modelState(runtime.contextModel.state)
+                    : "Unavailable · Requires 16 GiB"
             )
+            if !runtime.hardware.supportsContextWorker {
+                Text("This Mac uses dictation-first mode. Speech recognition and insertion remain available without Gemma, prompt writing, or screen context.")
+                    .foregroundStyle(.secondary)
+            }
             if case .failed(let reason) = runtime.contextModel.state {
                 Text(reason).foregroundStyle(.red)
                 Button("Retry") { runtime.contextModel.retry() }
@@ -128,7 +138,11 @@ struct SettingsView: View {
             )
             .disabled(!runtime.settings.contextWorkerEnabled)
             if !runtime.settings.contextWorkerEnabled {
-                Text("Enable Context Worker from the menu bar to use contextual processing.")
+                Text(
+                    runtime.hardware.supportsContextWorker
+                        ? "Enable Context Worker from the menu bar to use contextual processing."
+                        : "Context features require at least 16 GiB of unified memory. Dictation remains available."
+                )
                     .foregroundStyle(.secondary)
             }
             LabeledContent(
@@ -144,7 +158,7 @@ struct SettingsView: View {
         }
         Section("Local processing") {
             Label("Audio is held in memory only", systemImage: "memorychip")
-            Label("Model downloads use the network during setup; inference remains local", systemImage: "network.slash")
+            Label("Model and production app updates use the network; inference remains local", systemImage: "network")
             Label("Successful dictations are saved as local daily context", systemImage: "text.page")
             Label("No analytics or context synchronization", systemImage: "eye.slash")
             Label("Screenshots are discarded after OCR; extracted text and metadata are retained", systemImage: "internaldrive")
@@ -171,12 +185,17 @@ struct SettingsView: View {
     }
 
     private var contextWorkerState: String {
+        guard runtime.hardware.supportsContextWorker else {
+            return "Unavailable · Requires 16 GiB"
+        }
         guard runtime.settings.contextWorkerEnabled else { return "Disabled" }
         return switch runtime.screenContext.backgroundState {
         case .idle: "Idle"
         case .waitingForIdle: "Waiting for idle"
         case .processing: "Processing"
         case .suspendedDuringDictation: "Suspended during dictation"
+        case .permissionRequired:
+            "Paused: \(runtime.screenContext.missingPermission?.title ?? "permission") required"
         case .deferredForPower: "Deferred for power or thermal pressure"
         case .degraded: "Degraded"
         }

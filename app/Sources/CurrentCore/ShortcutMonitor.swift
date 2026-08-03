@@ -50,6 +50,12 @@ public struct ShortcutStateMachine: Sendable {
     }
 }
 
+package enum ShortcutEventTapDisableAction: Equatable {
+    case reenable
+    case permissionLost
+    case none
+}
+
 struct ReturnInterceptionState: Sendable {
     private(set) var isEnabled = false
     private(set) var wasRequested = false
@@ -98,6 +104,7 @@ public final class ShortcutMonitor: @unchecked Sendable {
     public var onReturnKeyDown: (@Sendable () -> Void)?
     public var onKeyboardActivity: (@Sendable () -> Void)?
     public var onUserActivity: (@Sendable (ContextActivityKind) -> Void)?
+    public var onPermissionLoss: (@Sendable (PermissionKind) -> Void)?
     public var holdThreshold: Duration = .milliseconds(180)
     public var fallbackPreset = "control-option-space"
 
@@ -172,9 +179,15 @@ public final class ShortcutMonitor: @unchecked Sendable {
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        switch Self.disableAction(for: type) {
+        case .reenable:
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return false
+        case .permissionLost:
+            onPermissionLoss?(.inputMonitoring)
+            return false
+        case .none:
+            break
         }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyDown {
@@ -234,6 +247,16 @@ public final class ShortcutMonitor: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    package static func disableAction(
+        for type: CGEventType
+    ) -> ShortcutEventTapDisableAction {
+        switch type {
+        case .tapDisabledByTimeout: .reenable
+        case .tapDisabledByUserInput: .permissionLost
+        default: .none
+        }
     }
 
     private func matchesFallback(_ flags: CGEventFlags) -> Bool {

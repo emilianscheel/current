@@ -6,6 +6,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let runtime: AppRuntime
     private let updateController: UpdateController?
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private weak var speechModelItemView: ModelMenuItemView?
+    private weak var contextModelItemView: ModelMenuItemView?
+    private var modelRefreshTimer: Timer?
 
     init(
         runtime: AppRuntime,
@@ -26,6 +29,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        speechModelItemView = nil
+        contextModelItemView = nil
         let permissions = runtime.effectivePermissionSnapshot()
         let onboardingTitle = MenuBarPresentation.onboardingActionTitle(
             completed: runtime.settings.onboardingComplete,
@@ -123,15 +128,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             "Parakeet TDT v3 Multilingual",
             category: "Speech model",
             state: runtime.model.state,
+            metrics: runtime.model.downloadMetrics,
+            itemView: &speechModelItemView,
             to: menu
         )
         addModel(
             "Gemma 4 E2B 4-bit",
             category: "Context model",
             state: runtime.contextModel.state,
+            metrics: runtime.contextModel.downloadMetrics,
             statusOverride: runtime.hardware.supportsContextWorker
                 ? (runtime.settings.contextWorkerEnabled ? nil : "Disabled")
                 : "Unavailable · Requires 16 GiB",
+            itemView: &contextModelItemView,
             to: menu
         )
         if let updateController {
@@ -146,6 +155,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         add("About Current", to: menu, action: #selector(openAbout), symbol: "info.circle")
         menu.addItem(.separator())
         add("Quit Current", to: menu, action: #selector(quit), key: "q", symbol: "power")
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshModelMenuItems()
+        modelRefreshTimer?.invalidate()
+        let timer = Timer(
+            timeInterval: 0.5,
+            target: self,
+            selector: #selector(refreshModelMenuItems),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        modelRefreshTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        modelRefreshTimer?.invalidate()
+        modelRefreshTimer = nil
     }
 
     private var captureTitle: String {
@@ -196,17 +224,43 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         _ title: String,
         category: String,
         state: ModelState,
+        metrics: ModelDownloadMetrics?,
         statusOverride: String? = nil,
+        itemView: inout ModelMenuItemView?,
         to menu: NSMenu
     ) {
-        let status =
-            statusOverride
-            ?? MenuBarPresentation.modelStatusTitle(for: state)
-        let subtitle = "\(category) · \(status)"
+        let subtitle = MenuBarPresentation.modelSubtitle(
+            category: category,
+            state: state,
+            metrics: metrics,
+            statusOverride: statusOverride
+        )
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
-        item.view = ModelMenuItemView(title: title, subtitle: subtitle)
+        let view = ModelMenuItemView(title: title, subtitle: subtitle)
+        item.view = view
+        itemView = view
         menu.addItem(item)
+    }
+
+    @objc private func refreshModelMenuItems() {
+        speechModelItemView?.updateSubtitle(
+            MenuBarPresentation.modelSubtitle(
+                category: "Speech model",
+                state: runtime.model.state,
+                metrics: runtime.model.downloadMetrics
+            )
+        )
+        contextModelItemView?.updateSubtitle(
+            MenuBarPresentation.modelSubtitle(
+                category: "Context model",
+                state: runtime.contextModel.state,
+                metrics: runtime.contextModel.downloadMetrics,
+                statusOverride: runtime.hardware.supportsContextWorker
+                    ? (runtime.settings.contextWorkerEnabled ? nil : "Disabled")
+                    : "Unavailable · Requires 16 GiB"
+            )
+        )
     }
 
     @objc private func toggleCapture() { runtime.coordinator.beginFromMenu() }
@@ -232,13 +286,15 @@ private final class ModelMenuItemView: NSView {
     private static let horizontalPadding: CGFloat = 20
     private static let verticalPadding: CGFloat = 5
     private static let lineSpacing: CGFloat = 1
+    private let titleLabel: NSTextField
+    private let subtitleLabel: NSTextField
 
     init(title: String, subtitle: String) {
-        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .menuFont(ofSize: 0)
         titleLabel.textColor = .disabledControlTextColor
 
-        let subtitleLabel = NSTextField(labelWithString: subtitle)
+        subtitleLabel = NSTextField(labelWithString: subtitle)
         subtitleLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         subtitleLabel.textColor = .disabledControlTextColor
 
@@ -280,6 +336,18 @@ private final class ModelMenuItemView: NSView {
             subtitleLabel.bottomAnchor.constraint(
                 equalTo: bottomAnchor, constant: -Self.verticalPadding),
         ])
+    }
+
+    func updateSubtitle(_ subtitle: String) {
+        guard subtitleLabel.stringValue != subtitle else { return }
+        subtitleLabel.stringValue = subtitle
+        let requiredWidth = max(
+            titleLabel.intrinsicContentSize.width,
+            subtitleLabel.intrinsicContentSize.width
+        ) + (Self.horizontalPadding * 2)
+        if requiredWidth > frame.width {
+            setFrameSize(NSSize(width: requiredWidth, height: frame.height))
+        }
     }
 
     @available(*, unavailable)

@@ -4,6 +4,25 @@ import FluidAudio
 import Foundation
 import Observation
 
+public struct ModelPreparationProgress: Sendable, Equatable {
+    public let fractionCompleted: Double
+    public let downloadedBytes: Int64
+    public let totalBytes: Int64
+    public let stage: ModelDownloadStage
+
+    public init(
+        fractionCompleted: Double,
+        downloadedBytes: Int64,
+        totalBytes: Int64,
+        stage: ModelDownloadStage
+    ) {
+        self.fractionCompleted = fractionCompleted
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+        self.stage = stage
+    }
+}
+
 public actor TranscriptionService {
     private var manager: AsrManager?
     private var loadedModels: AsrModels?
@@ -15,7 +34,9 @@ public actor TranscriptionService {
         self.refinement = refinement
     }
 
-    public func prepare(progress: (@Sendable (Double) -> Void)? = nil) async throws {
+    public func prepare(
+        progress: (@Sendable (ModelPreparationProgress) -> Void)? = nil
+    ) async throws {
         guard manager == nil else { return }
         let locations = ModelSnapshotLocations.current
 
@@ -29,7 +50,25 @@ public actor TranscriptionService {
                 version: .v3,
                 encoderPrecision: .int8,
                 progressHandler: { update in
-                    progress?(update.fractionCompleted)
+                    let downloadedBytes = ModelIntegrity.directorySize(
+                        at: locations.snapshot
+                    )
+                    let totalBytes = ModelSnapshotLocations
+                        .approximateDownloadBytes
+                    let byteFraction = totalBytes > 0
+                        ? Double(downloadedBytes) / Double(totalBytes)
+                        : update.fractionCompleted
+                    let stage: ModelDownloadStage = switch update.phase {
+                    case .listing: .listing
+                    case .downloading: .downloading
+                    case .compiling: .compiling
+                    }
+                    progress?(ModelPreparationProgress(
+                        fractionCompleted: min(max(byteFraction, 0), 1),
+                        downloadedBytes: downloadedBytes,
+                        totalBytes: totalBytes,
+                        stage: stage
+                    ))
                 }
             )
         }
@@ -185,6 +224,11 @@ public actor TranscriptionService {
 }
 
 public struct ModelSnapshotLocations: Sendable {
+    /// Expected size of the pinned Parakeet TDT v3 INT8 artifact. FluidAudio
+    /// reports progress per Core ML component, so the aggregate on-disk byte
+    /// count is the stable source of truth for Current's overall progress.
+    public static let approximateDownloadBytes: Int64 = 483_000_000
+
     public let models: URL
     public let snapshot: URL
     public let integrityManifest: URL
@@ -262,9 +306,14 @@ public enum LegacyModelCleanup {
 @Observable
 public final class ModelManager {
     public private(set) var state: ModelState = .notInstalled
+    public private(set) var downloadMetrics: ModelDownloadMetrics?
     public private(set) var lastLoadDuration: Duration?
     public let transcription: TranscriptionService
     private var preparationTask: Task<Void, Never>?
+    private var speedExpiryTask: Task<Void, Never>?
+    private var metricsTracker = ModelDownloadMetricsTracker()
+    private var acceptsDownloadProgress = false
+    private var preparationGeneration = UUID()
 
     public init(transcription: TranscriptionService = TranscriptionService()) {
         self.transcription = transcription
@@ -282,40 +331,113 @@ public final class ModelManager {
 
     public func prepareIfNeeded() {
         guard preparationTask == nil, !state.isReady else { return }
-        state = .downloading(progress: 0.01)
+        let generation = UUID()
+        preparationGeneration = generation
+        metricsTracker.reset()
+        downloadMetrics = metricsTracker.update(
+            fractionCompleted: 0,
+            downloadedBytes: 0,
+            totalBytes: ModelSnapshotLocations.approximateDownloadBytes,
+            stage: .listing
+        )
+        state = .downloading(progress: 0)
+        acceptsDownloadProgress = true
         let clock = ContinuousClock()
         preparationTask = Task { [weak self, transcription] in
             guard let self else { return }
             let start = clock.now
             do {
                 try await transcription.prepare { [weak self] progress in
-                    Task { @MainActor [weak self] in self?.state = .downloading(progress: progress) }
+                    Task { @MainActor [weak self] in
+                        self?.applyDownloadProgress(
+                            progress,
+                            generation: generation
+                        )
+                    }
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      preparationGeneration == generation else { return }
+                acceptsDownloadProgress = false
+                expireDownloadSpeed()
                 state = .verifying
                 try transcription.verifyInstalledModel()
                 transcription.removeLegacyModelIfReplacementReady()
                 lastLoadDuration = start.duration(to: clock.now)
                 state = .ready
             } catch {
+                guard preparationGeneration == generation else { return }
+                acceptsDownloadProgress = false
+                expireDownloadSpeed()
                 state = .failed(error.localizedDescription)
             }
-            preparationTask = nil
+            if preparationGeneration == generation {
+                preparationTask = nil
+            }
         }
     }
 
     public func retry() {
+        preparationGeneration = UUID()
         preparationTask?.cancel()
         preparationTask = nil
+        acceptsDownloadProgress = false
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        metricsTracker.reset()
+        downloadMetrics = nil
         state = .notInstalled
         prepareIfNeeded()
     }
 
     public func unload() async {
+        preparationGeneration = UUID()
         preparationTask?.cancel()
         preparationTask = nil
+        acceptsDownloadProgress = false
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        metricsTracker.reset()
+        downloadMetrics = nil
         await transcription.unload()
         state = .notInstalled
+    }
+
+    private func applyDownloadProgress(
+        _ progress: ModelPreparationProgress,
+        generation: UUID
+    ) {
+        guard acceptsDownloadProgress,
+              preparationGeneration == generation else { return }
+        let metrics = metricsTracker.update(
+            fractionCompleted: progress.fractionCompleted,
+            downloadedBytes: progress.downloadedBytes,
+            totalBytes: progress.totalBytes,
+            stage: progress.stage
+        )
+        downloadMetrics = metrics
+        state = .downloading(progress: metrics.fractionCompleted)
+        scheduleSpeedExpiry(for: metrics)
+    }
+
+    private func scheduleSpeedExpiry(for metrics: ModelDownloadMetrics) {
+        speedExpiryTask?.cancel()
+        guard metrics.bytesPerSecond != nil else { return }
+        let downloadedBytes = metrics.downloadedBytes
+        speedExpiryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled,
+                  let self,
+                  self.downloadMetrics?.downloadedBytes == downloadedBytes else {
+                return
+            }
+            self.expireDownloadSpeed()
+        }
+    }
+
+    private func expireDownloadSpeed() {
+        speedExpiryTask?.cancel()
+        speedExpiryTask = nil
+        downloadMetrics = downloadMetrics?.hidingSpeed()
     }
 
     public func removeDownloadedModel() async throws {

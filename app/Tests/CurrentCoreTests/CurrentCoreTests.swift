@@ -1070,7 +1070,7 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
 @Test func menuBarModelStatusTitlesCoverEveryState() {
     let states: [(ModelState, String)] = [
         (.notInstalled, "Preparing…"),
-        (.downloading(progress: 0.5), "Downloading…"),
+        (.downloading(progress: 0.5), "Downloading"),
         (.verifying, "Verifying…"),
         (.loading, "Loading…"),
         (.ready, "Ready"),
@@ -1080,6 +1080,136 @@ private final class FailingRemovalFileManager: FileManager, @unchecked Sendable 
     for (state, expectedTitle) in states {
         #expect(MenuBarPresentation.modelStatusTitle(for: state) == expectedTitle)
     }
+}
+
+@Test func modelDownloadMetricsStayMonotonicAndMeasureSpeed() {
+    var tracker = ModelDownloadMetricsTracker()
+    let start = Date(timeIntervalSinceReferenceDate: 1_000)
+    let initial = tracker.update(
+        fractionCompleted: 0.6,
+        downloadedBytes: 10_000_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start
+    )
+    #expect(initial.fractionCompleted == 0.6)
+    #expect(initial.bytesPerSecond == nil)
+
+    let resetComponent = tracker.update(
+        fractionCompleted: 0.2,
+        downloadedBytes: 22_400_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start.addingTimeInterval(1)
+    )
+    #expect(resetComponent.fractionCompleted == 0.6)
+    #expect(resetComponent.downloadedBytes == 22_400_000)
+    #expect(resetComponent.bytesPerSecond == 12_400_000)
+    #expect(resetComponent.hidingSpeed().bytesPerSecond == nil)
+
+    let compiling = tracker.update(
+        fractionCompleted: 0.55,
+        downloadedBytes: 22_400_000,
+        totalBytes: 100_000_000,
+        stage: .compiling,
+        at: start.addingTimeInterval(1.1)
+    )
+    #expect(compiling.fractionCompleted == 0.6)
+    #expect(compiling.bytesPerSecond == nil)
+
+    tracker.reset()
+    let retried = tracker.update(
+        fractionCompleted: 0.1,
+        downloadedBytes: 1_000,
+        totalBytes: 100_000_000,
+        stage: .downloading,
+        at: start.addingTimeInterval(2)
+    )
+    #expect(retried.fractionCompleted == 0.1)
+    #expect(retried.bytesPerSecond == nil)
+}
+
+@Test func compactModelDownloadPresentationRoundsAndClampsProgress() {
+    #expect(MenuBarPresentation.roundedDownloadPercent(-0.2) == 0)
+    #expect(MenuBarPresentation.roundedDownloadPercent(0.404) == 40)
+    #expect(MenuBarPresentation.roundedDownloadPercent(0.405) == 41)
+    #expect(MenuBarPresentation.roundedDownloadPercent(1.2) == 100)
+    #expect(
+        MenuBarPresentation.downloadSpeedTitle(
+            bytesPerSecond: 12_400_000
+        ) == "12.4 MB/s"
+    )
+
+    let metrics = ModelDownloadMetrics(
+        fractionCompleted: 0.4,
+        downloadedBytes: 40,
+        totalBytes: 100,
+        bytesPerSecond: 12_400_000,
+        stage: .downloading
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 0.1),
+            metrics: metrics
+        ) == "Speech model · Downloading · 40%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 0),
+            metrics: nil
+        ) == "Speech model · Downloading · 0%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Speech model",
+            state: .downloading(progress: 1.2),
+            metrics: nil
+        ) == "Speech model · Downloading · 100%"
+    )
+    #expect(
+        MenuBarPresentation.modelSubtitle(
+            category: "Context model",
+            state: .downloading(progress: 0.4),
+            metrics: metrics,
+            statusOverride: "Disabled"
+        ) == "Context model · Disabled"
+    )
+    #expect(
+        MenuBarPresentation.onboardingModelStatus(
+            state: .downloading(progress: 0.4),
+            metrics: metrics
+        ) == "Downloading · 40% · 12.4 MB/s"
+    )
+}
+
+@Test func earlyModelPreparationOnlyIncludesGemmaInSupportedRichMode() {
+    let gibibyte = UInt64(1_073_741_824)
+    let fastOnly = HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 8 * gibibyte,
+        modelName: "Apple M1"
+    )
+    let rich = HardwareSupport(
+        isAppleSilicon: true,
+        generation: 1,
+        memoryBytes: 16 * gibibyte,
+        modelName: "Apple M1"
+    )
+    #expect(!ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: fastOnly,
+        contextWorkerEnabled: true
+    ))
+    #expect(!ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: rich,
+        contextWorkerEnabled: false
+    ))
+    #expect(ModelPreparationPolicy.shouldPrepareContextModel(
+        hardware: rich,
+        contextWorkerEnabled: true
+    ))
 }
 
 @Test func menuBarShowsOnboardingWhileOnboardingIsIncomplete() {

@@ -75,6 +75,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        runtime.prepareRequiredModels()
         step = OnboardingFlow.initialStep(
             saved: step,
             completed: runtime.settings.onboardingComplete,
@@ -124,6 +125,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         let wasAlreadyKey = window?.isKeyWindow == true
         window?.center()
         window?.makeKeyAndOrderFront(nil)
+        reconcilePracticeMonitoring()
         if wasAlreadyKey, step == .welcome, let window {
             focusOverlay.presentStage(around: window)
         }
@@ -313,9 +315,17 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             completionCelebration += 1
         }
         runtime.settings.onboardingStep = step
+        reconcilePracticeMonitoring()
         if step == .welcome, window?.isKeyWindow == true, let window {
             focusOverlay.presentStage(around: window)
         }
+    }
+
+    private func reconcilePracticeMonitoring() {
+        guard step == .practice,
+              permissions.inputMonitoring.isGranted,
+              !restartRequired else { return }
+        runtime.coordinator.startMonitoring()
     }
 
     private var canAdvanceWithKeyboard: Bool {
@@ -345,6 +355,7 @@ struct OnboardingView: View {
     @State private var transitionDirection = OnboardingNavigationDirection.forward
     @State private var pageTransitionProgress = CGFloat(1)
     @State private var pageTransitionGeneration = 0
+    @FocusState private var practiceEditorFocused: Bool
 
     init(controller: OnboardingController, runtime: AppRuntime) {
         self.controller = controller
@@ -414,6 +425,16 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.light)
+        .task(id: displayedStep) {
+            guard displayedStep == .practice else {
+                practiceEditorFocused = false
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled,
+                  controller.step == .practice else { return }
+            practiceEditorFocused = true
+        }
     }
 
     @ViewBuilder private func content(for step: OnboardingStep) -> some View {
@@ -449,6 +470,7 @@ struct OnboardingView: View {
             case .practice:
                 StepLayout(symbol: "text.cursor", title: "Try it here") {
                     TextEditor(text: $controller.practiceText)
+                        .focused($practiceEditorFocused)
                         .font(.title3).scrollContentBackground(.hidden).padding(12)
                         .frame(height: 120)
                         .background(Color(nsColor: .controlBackgroundColor), in: .rect(cornerRadius: 14))
@@ -627,43 +649,60 @@ struct OnboardingView: View {
             modelRow(
                 title: "Speech recognition — Parakeet TDT 0.6B",
                 state: runtime.model.state,
+                metrics: runtime.model.downloadMetrics,
                 retry: runtime.model.retry
             )
             if runtime.settings.contextWorkerEnabled {
                 modelRow(
                     title: "Context structuring — Gemma 4 E2B 4-bit",
                     state: runtime.contextModel.state,
+                    metrics: runtime.contextModel.downloadMetrics,
                     retry: runtime.contextModel.retry
                 )
             }
         }
-        .frame(maxWidth: 440)
+        .frame(maxWidth: 520)
     }
 
     @ViewBuilder private func modelRow(
         title: String,
         state: ModelState,
+        metrics: ModelDownloadMetrics?,
         retry: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                    .font(.headline)
+                Spacer(minLength: 8)
+                if state.isReady {
+                    Label("Ready", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text(MenuBarPresentation.onboardingModelStatus(
+                        state: state,
+                        metrics: metrics
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+            }
             switch state {
             case .ready:
-                Label("Ready", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                EmptyView()
             case .failed(let error):
                 Text(error).font(.caption).foregroundStyle(.red)
                 Button("Retry", action: retry)
             case .downloading(let progress):
-                ProgressView(value: progress) {
-                    Text("Downloading…")
-                }
-            case .verifying:
-                ProgressView("Verifying…")
-            case .loading:
-                ProgressView("Loading…")
-            case .notInstalled:
-                ProgressView("Preparing…")
+                ProgressView(value: metrics?.fractionCompleted ?? progress)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+            case .verifying, .loading, .notInstalled:
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
             }
         }
     }

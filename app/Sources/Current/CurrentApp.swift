@@ -321,6 +321,16 @@ final class AppRuntime {
         }
     }
 
+    func prepareRequiredModels() {
+        model.prepareIfNeeded()
+        if ModelPreparationPolicy.shouldPrepareContextModel(
+            hardware: hardware,
+            contextWorkerEnabled: settings.contextWorkerEnabled
+        ) {
+            contextModel.prepareIfNeeded()
+        }
+    }
+
     func setContextWorkerEnabled(_ enabled: Bool) {
         let effectiveEnabled = hardware.contextWorkerEnabled(
             requested: enabled
@@ -418,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let runtime = AppRuntime()
         self.runtime = runtime
+        runtime.prepareRequiredModels()
         runtime.applyDockPolicy()
         let updateController = UpdateController.updatesEnabled
             ? UpdateController() : nil
@@ -429,10 +440,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateController?.start(runtime: runtime)
         runtime.startPermissionMonitoring()
         runtime.usageMonitor.start()
-        runtime.model.prepareIfNeeded()
-        if runtime.settings.contextWorkerEnabled {
-            runtime.contextModel.prepareIfNeeded()
-        }
 
         if runtime.hardware.isSupported {
             if runtime.permissions.snapshot().inputMonitoring.isGranted { runtime.coordinator.startMonitoring() }

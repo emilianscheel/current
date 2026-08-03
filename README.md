@@ -1,6 +1,6 @@
 <a href="https://current-mac.vercel.app"><img src="./website/public/current-icon.png" alt="current" width="64px"/></a>
 
-# current
+# 🌊 current
 
 private, local-first voice writing for mac. hold fn, speak, and release for direct dictation or context-aware prompt writing.
 

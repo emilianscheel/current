@@ -26,7 +26,7 @@ function ApplePayButton() {
   const options: StripeExpressCheckoutElementOptions = {
     billingAddressRequired: true,
     emailRequired: true,
-    buttonHeight: 50,
+    buttonHeight: 44,
     buttonTheme: { applePay: "black" },
     buttonType: { applePay: "buy" },
     paymentMethods: {
@@ -155,7 +155,12 @@ export function CheckoutReceipt({ publishableKey }: { publishableKey: string }) 
             amount: 2000,
             currency: "usd",
             paymentMethodTypes: ["card"],
-            appearance: { variables: { borderRadius: "8px" } },
+            appearance: {
+              variables: {
+                borderRadius: "999px",
+                fontSizeBase: "14px",
+              },
+            },
           }}
         >
           <ApplePayButton />

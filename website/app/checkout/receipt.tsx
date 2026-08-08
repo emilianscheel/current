@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Elements, ExpressCheckoutElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
@@ -136,7 +137,9 @@ export function CheckoutReceipt({ publishableKey }: { publishableKey: string }) 
   return (
     <article className="receipt" aria-label="Buy Current">
       <header className="receipt-header">
-        <Image src="/apple-icon.png" width={58} height={58} alt="Current app icon" priority />
+        <Link className="receipt-home" href="/" aria-label="Back to Current home">
+          <Image src="/apple-icon.png" width={58} height={58} alt="Current app icon" priority />
+        </Link>
         <p className="receipt-date" suppressHydrationWarning>DATE: {formattedDate}</p>
       </header>
       <div className="receipt-rule" />

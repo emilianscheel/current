@@ -154,6 +154,7 @@ body {
 }
 
 .receipt-header { text-align: center; }
+.receipt-home { display: inline-block; }
 .receipt-header img { display: block; margin: 18px auto 24px; }
 .receipt-header h1 { margin: 12px 0 2px; letter-spacing: 0.08em; }
 .receipt-header p { margin: 0; }

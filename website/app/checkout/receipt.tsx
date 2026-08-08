@@ -37,7 +37,7 @@ function ApplePayButton() {
       paypal: "never",
       klarna: "never",
     },
-    layout: { maxColumns: 1, maxRows: 1, overflow: "never" },
+    layout: { maxColumns: 1, maxRows: 1, overflow: "auto" },
     lineItems: [{ name: "Current lifetime license — tax included", amount: 2000 }],
   };
 

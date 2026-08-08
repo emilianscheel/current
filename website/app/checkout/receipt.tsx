@@ -46,6 +46,13 @@ function ApplePayButton() {
       <div className={busy ? "stripe-wallet is-busy" : "stripe-wallet"}>
         <ExpressCheckoutElement
           options={options}
+          onReady={({ availablePaymentMethods }) =>
+            setAvailable(availablePaymentMethods?.applePay === true)
+          }
+          onLoadError={({ error: loadError }) => {
+            setAvailable(false);
+            setError(loadError.message ?? "Apple Pay could not be loaded.");
+          }}
           onAvailablePaymentMethodsChange={({ paymentMethods }) =>
             setAvailable(paymentMethods?.applePay?.available === true)
           }
@@ -98,8 +105,13 @@ function ApplePayButton() {
           }}
         />
       </div>
+      {available === null && (
+        <p className="wallet-message">Checking Apple Pay…</p>
+      )}
       {available === false && (
-        <p className="wallet-message">Apple Pay isn’t available in this browser or Wallet.</p>
+        <p className="wallet-message">
+          Apple Pay isn’t available here. Use a supported browser with a card in Wallet on a registered HTTPS domain.
+        </p>
       )}
       {busy && <p className="wallet-message">Finishing your purchase…</p>}
       {error && <p className="wallet-message wallet-error">{error}</p>}

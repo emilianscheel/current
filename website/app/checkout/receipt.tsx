@@ -16,13 +16,22 @@ const features = [
   "Local searchable context",
 ];
 
+const unavailableMessage =
+  "Apple Pay isn’t available here. Use a supported browser with a card in Wallet on a registered HTTPS domain.";
+
 function ApplePayButton() {
   const stripe = useStripe();
   const elements = useElements();
   const router = useRouter();
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [isLocalhost, setIsLocalhost] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const resolveAvailability = (nextAvailable: boolean) => {
+    setAvailable(nextAvailable);
+    setIsLocalhost(["localhost", "127.0.0.1", "::1"].includes(window.location.hostname));
+  };
 
   const options: StripeExpressCheckoutElementOptions = {
     billingAddressRequired: true,
@@ -45,8 +54,14 @@ function ApplePayButton() {
   return (
     <div className="receipt-payment">
       <div className="wallet-stage">
-        {available === null && (
-          <button className="apple-pay-placeholder" type="button" disabled aria-label="Apple Pay is loading">
+        {(available !== false || isLocalhost) && (
+          <button
+            className="apple-pay-placeholder"
+            type="button"
+            disabled
+            aria-label={available === null ? "Apple Pay is loading" : "Apple Pay is unavailable"}
+            title={available === false ? unavailableMessage : undefined}
+          >
             <span aria-hidden="true">Buy with</span>
             <span aria-hidden="true">Pay</span>
           </button>
@@ -55,14 +70,14 @@ function ApplePayButton() {
           <ExpressCheckoutElement
             options={options}
             onReady={({ availablePaymentMethods }) =>
-              setAvailable(availablePaymentMethods?.applePay === true)
+              resolveAvailability(availablePaymentMethods?.applePay === true)
             }
             onLoadError={({ error: loadError }) => {
-              setAvailable(false);
+              resolveAvailability(false);
               setError(loadError.message ?? "Apple Pay could not be loaded.");
             }}
             onAvailablePaymentMethodsChange={({ paymentMethods }) =>
-              setAvailable(paymentMethods?.applePay?.available === true)
+              resolveAvailability(paymentMethods?.applePay?.available === true)
             }
             onConfirm={async () => {
               if (!stripe || !elements || busy) return;
@@ -114,10 +129,8 @@ function ApplePayButton() {
           />
         </div>
       </div>
-      {available === false && (
-        <p className="wallet-message">
-          Apple Pay isn’t available here. Use a supported browser with a card in Wallet on a registered HTTPS domain.
-        </p>
+      {available === false && !isLocalhost && (
+        <p className="wallet-message">{unavailableMessage}</p>
       )}
       {busy && <p className="wallet-message">Finishing your purchase…</p>}
       {error && <p className="wallet-message wallet-error">{error}</p>}

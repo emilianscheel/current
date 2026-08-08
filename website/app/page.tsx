@@ -1,8 +1,11 @@
 import { AnimatedAppIcon } from "./animated-app-icon";
+import { DictationDemo } from "./dictation-demo";
 
 export default function Home() {
   return (
     <main className="flex min-h-svh w-full items-center justify-center px-6 py-12 sm:px-10">
+      <DictationDemo />
+
       <section
         className="flex w-full max-w-3xl flex-col items-center text-center"
         aria-labelledby="page-title"
@@ -23,7 +26,7 @@ export default function Home() {
 
         <div className="mt-8 flex items-center justify-center gap-3 sm:mt-9">
           <a
-            className="inline-flex h-9 cursor-pointer items-center justify-center rounded-full border-2 border-[var(--primary-button-border)] bg-[var(--primary-button-background)] px-3 text-base font-normal text-[var(--primary-button-foreground)] transition-colors duration-200 hover:bg-[var(--primary-button-hover)] active:bg-[var(--primary-button-active)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--focus-ring)] sm:h-10 sm:px-4 motion-reduce:transition-none"
+            className="inline-flex h-9 cursor-pointer items-center justify-center rounded-full border-2 border-[var(--primary-button-border)] bg-[var(--primary-button-background)] px-3 text-base font-normal text-[var(--primary-button-foreground)] transition-colors duration-200 hover:border-[var(--primary-button-hover)] hover:bg-[var(--primary-button-hover)] active:border-[var(--primary-button-active)] active:bg-[var(--primary-button-active)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--focus-ring)] sm:h-10 sm:px-4 motion-reduce:transition-none"
             href="https://github.com/emilianscheel/current/releases/latest/download/Current.dmg"
             aria-label="Download Current for macOS"
           >

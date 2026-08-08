@@ -43,71 +43,75 @@ function ApplePayButton() {
 
   return (
     <div className="receipt-payment">
-      <div className={busy ? "stripe-wallet is-busy" : "stripe-wallet"}>
-        <ExpressCheckoutElement
-          options={options}
-          onReady={({ availablePaymentMethods }) =>
-            setAvailable(availablePaymentMethods?.applePay === true)
-          }
-          onLoadError={({ error: loadError }) => {
-            setAvailable(false);
-            setError(loadError.message ?? "Apple Pay could not be loaded.");
-          }}
-          onAvailablePaymentMethodsChange={({ paymentMethods }) =>
-            setAvailable(paymentMethods?.applePay?.available === true)
-          }
-          onConfirm={async () => {
-            if (!stripe || !elements || busy) return;
-            setBusy(true);
-            setError("");
-            const submitted = await elements.submit();
-            if (submitted.error) {
-              setError(submitted.error.message ?? "Apple Pay could not start.");
-              setBusy(false);
-              return;
+      <div className="wallet-stage">
+        {available === null && (
+          <button className="apple-pay-placeholder" type="button" disabled aria-label="Apple Pay is loading">
+            Buy with <span aria-hidden="true">Pay</span>
+          </button>
+        )}
+        <div className={`stripe-wallet${busy ? " is-busy" : ""}${available !== true ? " is-checking" : ""}`}>
+          <ExpressCheckoutElement
+            options={options}
+            onReady={({ availablePaymentMethods }) =>
+              setAvailable(availablePaymentMethods?.applePay === true)
             }
-            const origin = window.location.origin;
-            const created = await stripe.createConfirmationToken({
-              elements,
-              params: { return_url: `${origin}/checkout/complete` },
-            });
-            if (created.error || !created.confirmationToken) {
-              setError(created.error?.message ?? "Payment details could not be read.");
-              setBusy(false);
-              return;
+            onLoadError={({ error: loadError }) => {
+              setAvailable(false);
+              setError(loadError.message ?? "Apple Pay could not be loaded.");
+            }}
+            onAvailablePaymentMethodsChange={({ paymentMethods }) =>
+              setAvailable(paymentMethods?.applePay?.available === true)
             }
-            const response = await fetch("/api/checkout/intent", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ confirmationTokenId: created.confirmationToken.id }),
-            });
-            const result = (await response.json()) as {
-              clientSecret?: string;
-              licenseKey?: string;
-              error?: string;
-            };
-            if (!response.ok || !result.clientSecret || !result.licenseKey) {
-              setError(result.error ?? "Checkout could not be created.");
-              setBusy(false);
-              return;
-            }
-            const confirmed = await stripe.confirmPayment({
-              clientSecret: result.clientSecret,
-              confirmParams: { confirmation_token: created.confirmationToken.id },
-              redirect: "if_required",
-            });
-            if (confirmed.error) {
-              setError(confirmed.error.message ?? "Payment was not completed.");
-              setBusy(false);
-              return;
-            }
-            router.push(`/${result.licenseKey}`);
-          }}
-        />
+            onConfirm={async () => {
+              if (!stripe || !elements || busy) return;
+              setBusy(true);
+              setError("");
+              const submitted = await elements.submit();
+              if (submitted.error) {
+                setError(submitted.error.message ?? "Apple Pay could not start.");
+                setBusy(false);
+                return;
+              }
+              const origin = window.location.origin;
+              const created = await stripe.createConfirmationToken({
+                elements,
+                params: { return_url: `${origin}/checkout/complete` },
+              });
+              if (created.error || !created.confirmationToken) {
+                setError(created.error?.message ?? "Payment details could not be read.");
+                setBusy(false);
+                return;
+              }
+              const response = await fetch("/api/checkout/intent", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ confirmationTokenId: created.confirmationToken.id }),
+              });
+              const result = (await response.json()) as {
+                clientSecret?: string;
+                licenseKey?: string;
+                error?: string;
+              };
+              if (!response.ok || !result.clientSecret || !result.licenseKey) {
+                setError(result.error ?? "Checkout could not be created.");
+                setBusy(false);
+                return;
+              }
+              const confirmed = await stripe.confirmPayment({
+                clientSecret: result.clientSecret,
+                confirmParams: { confirmation_token: created.confirmationToken.id },
+                redirect: "if_required",
+              });
+              if (confirmed.error) {
+                setError(confirmed.error.message ?? "Payment was not completed.");
+                setBusy(false);
+                return;
+              }
+              router.push(`/${result.licenseKey}`);
+            }}
+          />
+        </div>
       </div>
-      {available === null && (
-        <p className="wallet-message">Checking Apple Pay…</p>
-      )}
       {available === false && (
         <p className="wallet-message">
           Apple Pay isn’t available here. Use a supported browser with a card in Wallet on a registered HTTPS domain.

@@ -295,7 +295,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
 @MainActor
 private final class ModelMenuItemView: NSView {
-    private static let horizontalPadding: CGFloat = 20
+    private static let horizontalPadding: CGFloat = 18
     private static let verticalPadding: CGFloat = 5
     private static let lineSpacing: CGFloat = 1
     private let titleLabel: NSTextField

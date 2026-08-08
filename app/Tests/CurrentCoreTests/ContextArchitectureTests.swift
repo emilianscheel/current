@@ -522,6 +522,28 @@ private actor PromptScreenStub: ScreenContextProviding {
     // This remains data only: no production keyword classifier exists.
 }
 
+@Test func promptGenerationBackendsShareIdentitySafeWritingPolicy() {
+    let apple = AppleFoundationModelProvider.promptInstructionText
+    let gemma = GemmaWorkerInferenceEngine.promptInstructionText
+    let normalized = apple.lowercased()
+
+    #expect(apple == gemma)
+    #expect(normalized.contains("embedded writing engine"))
+    #expect(normalized.contains("not a conversational assistant"))
+    #expect(normalized.contains("never introduce yourself"))
+    #expect(normalized.contains("ai or language model"))
+    #expect(normalized.contains("facts describe the current user"))
+    #expect(normalized.contains("never your identity"))
+    #expect(normalized.contains("not authorized for insertion merely because they are available"))
+    #expect(normalized.contains("unless the spoken instruction explicitly asks"))
+    #expect(normalized.contains("a general email or message request does not authorize them"))
+    #expect(normalized.contains("never turn the profile into a self-introduction"))
+    #expect(normalized.contains("the only profile fact you may use without an explicit request"))
+    #expect(normalized.contains("destination-appropriate template"))
+    #expect(normalized.contains("concise, conventional placeholders"))
+    #expect(normalized.contains("neither grounded insertion text nor a meaningful template"))
+}
+
 @Test func appleIntentRouterPassesEvaluationCorpusWhenGated() async throws {
     guard ProcessInfo.processInfo.environment[
         "CURRENT_RUN_INTENT_ROUTER_INTEGRATION"
@@ -591,6 +613,15 @@ private actor PromptScreenStub: ScreenContextProviding {
             .aboutMe,
         ]
     )
+    #expect(
+        disabled.sections.first(where: { $0.kind == .aboutMe })?.title
+            == PromptGenerationPolicy.aboutMeSectionTitle
+    )
+    #expect(
+        disabled.rendered().contains(
+            "Private Current user profile (reference only; never model identity)"
+        )
+    )
     #expect(await screen.refreshCount == 0)
 
     let enabled = try await preparer.prepare(
@@ -613,6 +644,84 @@ private actor PromptScreenStub: ScreenContextProviding {
     )
     #expect(await screen.refreshCount == 1)
     #expect(await screen.activityCount == 1)
+}
+
+@Test func applePromptGenerationAvoidsAssistantPersonaWhenGated() async throws {
+    guard ProcessInfo.processInfo.environment[
+        "CURRENT_RUN_PROMPT_GENERATION_INTEGRATION"
+    ] == "1" else { return }
+
+    let provider = AppleFoundationModelProvider()
+    let aboutMe = PromptContextSection(
+        kind: .aboutMe,
+        title: PromptGenerationPolicy.aboutMeSectionTitle,
+        content: """
+        - Name: TN08021
+        - Mac: Apple M4 Max
+        - Memory: 128 GB
+        - macOS: 26.5.2
+        """
+    )
+    let destination = DictationContext(destination: .emailOrDocument)
+
+    let vague = try await provider.generatePromptDisposition(
+        PromptGenerationRequest(
+            envelope: PromptContextEnvelope(
+                instruction: "Draft an email",
+                focusedContext: destination,
+                sections: [aboutMe]
+            ),
+            conversationID: UUID(),
+            contextScope: .focused,
+            maximumResponseTokens: 256
+        )
+    )
+    let vagueText = try #require(vague.response?.text)
+    let normalizedVagueText = vagueText.lowercased()
+    #expect(
+        ["hello", "hi ", "dear ", "subject:", "best", "regards"]
+            .contains(where: normalizedVagueText.contains)
+    )
+    #expect(
+        ["ai language model", "how can i assist", "apple m4 max", "128 gb", "macos 26.5.2"]
+            .allSatisfy { !normalizedVagueText.contains($0) }
+    )
+
+    let contextual = try await provider.generatePromptDisposition(
+        PromptGenerationRequest(
+            envelope: PromptContextEnvelope(
+                instruction: "Draft an email to Alex confirming Tuesday at 10",
+                focusedContext: destination,
+                sections: [aboutMe]
+            ),
+            conversationID: UUID(),
+            contextScope: .focused,
+            maximumResponseTokens: 256
+        )
+    )
+    let contextualText = try #require(contextual.response?.text.lowercased())
+    #expect(contextualText.contains("alex"))
+    #expect(contextualText.contains("tuesday"))
+    #expect(contextualText.contains("10"))
+    #expect(!contextualText.contains("apple m4 max"))
+
+    let explicitProfile = try await provider.generatePromptDisposition(
+        PromptGenerationRequest(
+            envelope: PromptContextEnvelope(
+                instruction: "Write one sentence introducing me by name and mentioning my Mac model and memory",
+                focusedContext: destination,
+                sections: [aboutMe]
+            ),
+            conversationID: UUID(),
+            contextScope: .focused,
+            maximumResponseTokens: 128
+        )
+    )
+    let profileText = try #require(explicitProfile.response?.text.lowercased())
+    #expect(profileText.contains("tn08021"))
+    #expect(profileText.contains("apple m4 max"))
+    #expect(profileText.contains("128 gb"))
+    #expect(!profileText.contains("ai language model"))
 }
 
 @Test func promptEnvelopeKeepsTargetContextAheadOfOtherApps() {

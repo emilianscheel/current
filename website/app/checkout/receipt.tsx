@@ -46,7 +46,8 @@ function ApplePayButton() {
       <div className="wallet-stage">
         {available === null && (
           <button className="apple-pay-placeholder" type="button" disabled aria-label="Apple Pay is loading">
-            Buy with <span aria-hidden="true">Pay</span>
+            <span aria-hidden="true">Buy with</span>
+            <span aria-hidden="true">Pay</span>
           </button>
         )}
         <div className={`stripe-wallet${busy ? " is-busy" : ""}${available !== true ? " is-checking" : ""}`}>

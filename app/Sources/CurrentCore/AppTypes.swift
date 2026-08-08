@@ -487,7 +487,7 @@ public enum ModelPreparationPolicy {
 
 public enum OnboardingStep: String, Codable, Sendable, CaseIterable {
     case welcome, microphone, accessibility, screenRecording, inputMonitoring
-    case restart, model, practice, preferences, complete
+    case restart, model, practice, preferences, trial, complete
 }
 
 public enum OnboardingFlow {

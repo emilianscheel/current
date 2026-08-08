@@ -86,6 +86,9 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             contextWorkerEnabled: runtime.settings.contextWorkerEnabled,
             restartRequired: restartRequired
         )
+        if runtime.license.requiresTrialConsent, step == .complete {
+            step = .trial
+        }
         runtime.settings.onboardingStep = step
         if window == nil {
             let view = OnboardingView(controller: self, runtime: runtime)
@@ -252,7 +255,14 @@ final class OnboardingController: NSObject, NSWindowDelegate {
             back()
             return true
         case .advance:
-            step == .complete ? finish() : next()
+            if step == .complete {
+                finish()
+            } else if step == .trial {
+                if !runtime.license.isAuthorized { runtime.license.startTrial() }
+                next()
+            } else {
+                next()
+            }
             return true
         case nil:
             return false
@@ -266,6 +276,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     }
 
     func finish() {
+        guard runtime.license.isAuthorized else { return }
         runtime.settings.onboardingComplete = true
         runtime.settings.onboardingStep = .complete
         runtime.applyLaunchAtLogin()
@@ -305,7 +316,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         permissionGuidance.dismiss()
         focusOverlay.dismissStage()
         navigationDirection = direction
-        let shouldCelebrate = self.step == .preferences
+        let shouldCelebrate = self.step == .trial
             && step == .complete
             && !hasCelebratedCompletion
             && !runtime.settings.onboardingComplete
@@ -494,6 +505,27 @@ struct OnboardingView: View {
                         )
                     }
                     .frame(maxWidth: 360)
+                }
+            case .trial:
+                StepLayout(symbol: "clock.badge.checkmark", title: "Start your free trial") {
+                    VStack(spacing: 12) {
+                        Text("Use every Current feature free for 7 days. No card is required. After the trial, dictation pauses until you redeem a lifetime license.")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 470)
+                        if runtime.license.currentLicenseKey == nil {
+                            HStack {
+                                Button("Redeem a License") { runtime.licenseWindow.show() }
+                                Button("Buy License") {
+                                    NSWorkspace.shared.open(URL(string: "https://current-mac.vercel.app/checkout")!)
+                                }
+                            }
+                            .padding(.top, 8)
+                        } else {
+                            Label("Lifetime license active", systemImage: "checkmark.seal.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
                 }
             case .complete:
                 StepLayout(symbol: "checkmark.seal.fill", title: "Current is ready") { EmptyView() }
@@ -731,8 +763,23 @@ struct OnboardingView: View {
             restartRequired: controller.restartRequired
         ) != nil
     }
-    private var nextTitle: String { controller.step == .complete ? "Done" : "Continue" }
-    private func advance() { controller.step == .complete ? controller.finish() : controller.next() }
+    private var nextTitle: String {
+        if controller.step == .complete { return "Done" }
+        if controller.step == .trial, runtime.license.currentLicenseKey == nil {
+            return "Start 7-day free trial"
+        }
+        return "Continue"
+    }
+    private func advance() {
+        if controller.step == .complete {
+            controller.finish()
+        } else if controller.step == .trial {
+            if !runtime.license.isAuthorized { runtime.license.startTrial() }
+            controller.next()
+        } else {
+            controller.next()
+        }
+    }
     private func permissionSymbol(_ kind: PermissionKind) -> String {
         switch kind {
         case .microphone: "mic"

@@ -99,6 +99,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             )
         }
         menu.addItem(.separator())
+        add(runtime.license.statusTitle, to: menu, symbol: runtime.license.isAuthorized ? "checkmark.seal" : "clock", enabled: false)
+        if runtime.license.currentLicenseKey == nil {
+            add("Redeem License…", to: menu, action: #selector(openLicense), symbol: "key")
+            add("Buy License…", to: menu, action: #selector(buyLicense), symbol: "cart")
+        } else {
+            add("Manage License…", to: menu, action: #selector(openLicense), symbol: "key")
+        }
+        menu.addItem(.separator())
         add(
             runtime.settings.isEnabled ? "Pause Current" : "Resume Current",
             to: menu,
@@ -275,6 +283,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
     @objc private func openOnboarding() { runtime.onboarding.show() }
     @objc private func openAbout() { runtime.about.show() }
+    @objc private func openLicense() { runtime.licenseWindow.show() }
+    @objc private func buyLicense() {
+        NSWorkspace.shared.open(URL(string: "https://current-mac.vercel.app/checkout")!)
+    }
     @objc private func checkForUpdates() {
         updateController?.checkForUpdates()
     }

@@ -1,5 +1,6 @@
 import { AnimatedAppIcon } from "./animated-app-icon";
 import { DictationDemo } from "./dictation-demo";
+import Link from "next/link";
 
 export default function Home() {
   return (
@@ -33,16 +34,16 @@ export default function Home() {
             Download
           </a>
 
-          <a
+          <Link
             className="inline-flex h-9 cursor-pointer items-center justify-center rounded-full border border-[var(--secondary-button-border)] bg-[var(--secondary-button-background)] px-3 text-base font-normal text-[var(--secondary-button-foreground)] transition-colors duration-200 hover:bg-[var(--secondary-button-hover)] active:bg-[var(--secondary-button-active)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--focus-ring)] sm:h-10 sm:px-4 motion-reduce:transition-none"
-            href="https://github.com/emilianscheel/current"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/checkout"
           >
-            GitHub
-          </a>
+            Buy
+          </Link>
         </div>
       </section>
+
+      <p className="landing-price-note">7 trial days · $20 one time</p>
     </main>
   );
 }

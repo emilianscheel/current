@@ -63,6 +63,8 @@ public final class DictationCoordinator {
     public var onSuccessfulTranscription: ((String, Date) -> Void)?
     public var onTextCommitted: ((ContextCaptureTarget) -> Void)?
     public var onMonitoringChange: ((Bool) -> Void)?
+    public var isAuthorized: () -> Bool = { true }
+    public var onAuthorizationRequired: (() -> Void)?
     private var maximumDurationTask: Task<Void, Never>?
     private var transcriptProcessingTask: Task<Void, Never>?
     private var processingGeneration = UUID()
@@ -146,6 +148,10 @@ public final class DictationCoordinator {
     }
 
     public func beginFromMenu() {
+        guard isAuthorized() else {
+            onAuthorizationRequired?()
+            return
+        }
         // The menu is an explicit request to dictate. If Current was paused,
         // resume global monitoring first so this capture works and fn keeps
         // working for subsequent captures. Previously the paused phase fell
@@ -218,6 +224,10 @@ public final class DictationCoordinator {
 
     private func handleShortcut(_ event: ShortcutEvent) {
         guard settings.isEnabled else { return }
+        if event == .armed || event == .pressed, !isAuthorized() {
+            onAuthorizationRequired?()
+            return
+        }
         switch event {
         case .armed:
             guard phase == .idle else { return }
@@ -235,6 +245,10 @@ public final class DictationCoordinator {
     }
 
     private func beginRecording() {
+        guard isAuthorized() else {
+            onAuthorizationRequired?()
+            return
+        }
         guard currentSession == nil, model.state.isReady else {
             if !model.state.isReady { fail(CurrentError.modelUnavailable("Download or loading is still in progress.")) }
             return

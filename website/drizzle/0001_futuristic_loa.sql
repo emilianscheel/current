@@ -1,0 +1,1 @@
+ALTER TABLE "licenses" ADD CONSTRAINT "licenses_id_format" CHECK ("licenses"."id" ~ '^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$');

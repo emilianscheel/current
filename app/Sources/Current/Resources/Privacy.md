@@ -1,5 +1,9 @@
 # Privacy
 
+Current offers a seven-day trial and a lifetime license. Apple Pay and Stripe process payment details; Current never receives or stores card numbers. Stripe provides the payer email for receipts, and the Current website stores only that email, opaque Stripe customer/payment identifiers, the license key, purchase status, and timestamps in Neon. Billing addresses are passed directly to Stripe Tax for the transaction and are not retained in Current's database.
+
+When a license is activated, Current sends the key and a SHA-256 hash of a random installation identifier to the Current website. The service retains only an additional hash of that identifier, activation timestamps, and license status to enforce the three-Mac limit. The app stores trial dates, its random identifier, and the redeemed key in the macOS Keychain. Paid use remains available offline; when online, Current periodically checks whether a license was refunded, disputed, or revoked. No audio, transcript, screen context, usage statistics, hardware profile, or device name is included in licensing requests.
+
 Current records audio only while dictation is active. Audio is buffered in memory, transcribed on this Mac, and discarded. Transcripts are never uploaded.
 
 Every successfully inserted or pasted dictation into another nonsecure application is appended to a local Markdown document for that day under `~/Library/Application Support/Current/Context/`. Secure fields, copied-only fallbacks, and dictation directly into Current are excluded. Context remains on this Mac until you edit it or move its document to Trash from the Context window.

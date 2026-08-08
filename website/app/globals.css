@@ -2,6 +2,8 @@
 
 :root {
   color-scheme: light dark;
+  --font-geist-sans: "Geist Variable";
+  --font-geist-mono: "Geist Mono Variable";
   --background: #ffffff;
   --foreground: #000000;
   --secondary-foreground: #6e6e73;
@@ -85,6 +87,109 @@ body {
     "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+.landing-price-note {
+  position: fixed;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  margin: 0;
+  translate: -50% 0;
+  color: var(--secondary-foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 12px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.checkout-page {
+  display: grid;
+  min-height: 100svh;
+  place-items: center;
+  padding: 48px 20px;
+  background: #fff;
+  color: #111;
+}
+
+.receipt {
+  isolation: isolate;
+  position: relative;
+  width: min(100%, 400px);
+  padding: 32px 28px 28px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 24px 58px rgb(0 0 0 / 0.13), 0 3px 10px rgb(0 0 0 / 0.08);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.receipt::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background-image: url("/receipt-paper-texture.jpg");
+  background-position: center;
+  background-size: cover;
+  content: "";
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.receipt :where(h1, p, span) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.receipt::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 7px;
+  background: linear-gradient(135deg, transparent 5px, #fff 0) 0 0 / 10px 10px repeat-x;
+  content: "";
+  z-index: 1;
+}
+
+.receipt-header { text-align: center; }
+.receipt-header img { display: block; margin: 18px auto 24px; }
+.receipt-header h1 { margin: 12px 0 2px; letter-spacing: 0.08em; }
+.receipt-header p { margin: 0; }
+.receipt-header .receipt-date { margin-top: 18px; }
+.receipt-rule { margin: 15px 0; border-top: 1px dashed #222; }
+.receipt-row { display: flex; justify-content: space-between; gap: 18px; margin: 6px 0; }
+.receipt-row span:first-child { min-width: 0; }
+.receipt-row span:last-child { flex: none; text-align: right; }
+.receipt-total { margin-top: 10px; }
+.receipt-barcode {
+  height: 58px;
+  margin: 22px 0 18px;
+  background: repeating-linear-gradient(90deg, #111 0 2px, transparent 2px 4px, #111 4px 8px, transparent 8px 10px, #111 10px 11px, transparent 11px 15px);
+}
+.receipt-payment { padding-top: 2px; }
+.stripe-wallet { min-height: 50px; transition: opacity 150ms ease; }
+.stripe-wallet.is-busy { opacity: 0.55; pointer-events: none; }
+.wallet-message { margin: 10px 0 0; color: #646464; text-align: center; }
+.wallet-error { color: #9b2525; }
+
+.license-page { display: grid; min-height: 100svh; place-items: center; padding: 30px; background: #f5f5f3; color: #111; }
+.license-card { width: min(100%, 520px); padding: 44px; border: 1px solid #deded9; border-radius: 24px; background: white; box-shadow: 0 18px 50px rgb(0 0 0 / 0.08); text-align: center; font-family: var(--font-geist-sans), sans-serif; }
+.license-symbol { display: grid; width: 48px; height: 48px; margin: 0 auto 20px; place-items: center; border-radius: 50%; background: #111; color: white; font-size: 22px; }
+.license-symbol.is-error { background: #9b2525; }
+.license-eyebrow { margin: 0 0 10px !important; font-size: 11px; letter-spacing: 0.12em; }
+.license-card h1 { margin: 0; font-family: var(--font-geist-mono), monospace; font-size: clamp(28px, 8vw, 42px); letter-spacing: 0.05em; }
+.license-card p { margin: 14px auto 0; max-width: 400px; color: #6e6e73; line-height: 1.5; }
+.license-actions { display: grid; gap: 10px; margin-top: 28px; }
+.license-primary, .license-secondary { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; border: 1px solid #111; border-radius: 999px; padding: 0 18px; background: #111; color: white; font: inherit; text-decoration: none; cursor: pointer; }
+.license-secondary { background: white; color: #111; }
+.license-card .license-footnote { margin-top: 24px; font-size: 11px; }
+
+@media (max-width: 520px) {
+  .checkout-page { padding: 24px 14px; }
+  .receipt { padding: 28px 22px 32px; }
+  .license-card { padding: 34px 24px; }
 }
 
 button,

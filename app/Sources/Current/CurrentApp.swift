@@ -30,6 +30,7 @@ final class AppRuntime {
         category: "ContextWorkerMode"
     )
     var settings: SettingsStore
+    let license: LicenseManager
     let hardware: HardwareSupport
     let permissions = PermissionManager()
     let model = ModelManager()
@@ -86,11 +87,13 @@ final class AppRuntime {
         runtime: self
     )
     @ObservationIgnored lazy var about = AboutWindowController(runtime: self)
+    @ObservationIgnored lazy var licenseWindow = LicenseWindowController(runtime: self)
     @ObservationIgnored private var auxiliaryWindowIDs: Set<UUID> = []
     @ObservationIgnored private var phaseUpdateGeneration = UUID()
     @ObservationIgnored private var promptMemoryPressureSource:
         DispatchSourceMemoryPressure?
     @ObservationIgnored private var permissionMonitorTask: Task<Void, Never>?
+    @ObservationIgnored private var licenseValidationTask: Task<Void, Never>?
     @ObservationIgnored private var lastPermissionSnapshot: PermissionSnapshot?
     private(set) var inputMonitoringRestartRequired = false
 
@@ -100,6 +103,7 @@ final class AppRuntime {
     ) {
         self.settings = settings
         self.hardware = hardware
+        self.license = LicenseManager()
         settings.applyHardwareCapabilities(hardware)
         contextStore.reload()
         scheduleRetrievalReindex()
@@ -192,6 +196,13 @@ final class AppRuntime {
                     target: target
                 )
             }
+        }
+        coordinator.isAuthorized = { [weak license] in
+            license?.refreshLocalState()
+            return license?.isAuthorized ?? false
+        }
+        coordinator.onAuthorizationRequired = { [weak self] in
+            self?.licenseWindow.show()
         }
         coordinator.onMonitoringChange = { [weak self] active in
             guard let self else { return }
@@ -416,6 +427,31 @@ final class AppRuntime {
         try? process.run()
         NSApp.terminate(nil)
     }
+
+    func startLicenseValidation() {
+        licenseValidationTask?.cancel()
+        licenseValidationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.license.refreshLocalState()
+                await self.license.validateIfPossible()
+                try? await Task.sleep(for: .seconds(6 * 60 * 60))
+            }
+        }
+    }
+
+    func stopLicenseValidation() {
+        licenseValidationTask?.cancel()
+        licenseValidationTask = nil
+    }
+
+    func handleLicenseURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "current",
+              url.host?.lowercased() == "redeem" else { return }
+        let rawKey = url.pathComponents.dropFirst().first ?? ""
+        guard let key = LicenseKeyFormat.normalize(rawKey) else { return }
+        licenseWindow.show(prefilledKey: key)
+    }
 }
 
 @MainActor
@@ -439,11 +475,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         updateController?.start(runtime: runtime)
         runtime.startPermissionMonitoring()
+        runtime.startLicenseValidation()
         runtime.usageMonitor.start()
 
         if runtime.hardware.isSupported {
             if runtime.permissions.snapshot().inputMonitoring.isGranted { runtime.coordinator.startMonitoring() }
             if !runtime.settings.onboardingComplete
+                || runtime.license.requiresTrialConsent
                 || !runtime.permissions.snapshot().allGranted(
                     contextWorkerEnabled:
                         runtime.settings.contextWorkerEnabled
@@ -463,6 +501,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await runtime?.refreshPermissionState(force: true) }
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let runtime else { return }
+        for url in urls { runtime.handleLicenseURL(url) }
+    }
+
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
@@ -471,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         isFinishingTermination = true
         runtime.stopPermissionMonitoring()
+        runtime.stopLicenseValidation()
         runtime.context.flush()
         Task {
             runtime.coordinator.stopMonitoring()

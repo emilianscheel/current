@@ -140,6 +140,7 @@ function ApplePayButton() {
 
 export function CheckoutReceipt({ publishableKey }: { publishableKey: string }) {
   const stripe = useMemo(() => (publishableKey ? loadStripe(publishableKey) : null), [publishableKey]);
+  const [textureLoaded, setTextureLoaded] = useState(false);
   const [formattedDate] = useState(() =>
     new Intl.DateTimeFormat("en-US", {
       dateStyle: "short",
@@ -149,6 +150,17 @@ export function CheckoutReceipt({ publishableKey }: { publishableKey: string }) 
 
   return (
     <article className="receipt" aria-label="Buy Current">
+      <Image
+        className={`receipt-texture${textureLoaded ? " is-loaded" : ""}`}
+        src="/receipt-paper-texture.jpg"
+        alt=""
+        fill
+        sizes="(max-width: 520px) calc(100vw - 28px), 400px"
+        loading="lazy"
+        placeholder="blur"
+        blurDataURL="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQIBLAEsAAD/2wBDACAWGBwYFCAcGhwkIiAmMFA0MCwsMGJGSjpQdGZ6eHJmcG6AkLicgIiuim5woNqirr7EztDOfJri8uDI8LjKzsb/2wBDASIkJDAqMF40NF7GhHCExsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsb/wAARCAAIAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAVEAEBAAAAAAAAAAAAAAAAAAAAAf/EABQBAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwC5QAf/2Q=="
+        onLoad={() => setTextureLoaded(true)}
+      />
       <header className="receipt-header">
         <Link className="receipt-home" href="/" aria-label="Back to Current home">
           <Image src="/apple-icon.png" width={58} height={58} alt="Current app icon" priority />

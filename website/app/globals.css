@@ -126,18 +126,26 @@ body {
   line-height: 1.45;
 }
 
-.receipt::before {
+.receipt-texture {
   position: absolute;
-  z-index: -1;
+  z-index: 0;
   inset: 0;
-  background-image: url("/receipt-paper-texture.jpg");
-  background-position: center;
-  background-size: cover;
-  content: "";
+  object-fit: cover;
   mix-blend-mode: multiply;
-  opacity: 0.55;
+  opacity: 0.16;
   pointer-events: none;
+  filter: blur(12px);
+  scale: 1.04;
+  transition: opacity 500ms ease, filter 650ms ease, scale 650ms ease;
 }
+
+.receipt-texture.is-loaded {
+  opacity: 0.55;
+  filter: blur(0);
+  scale: 1;
+}
+
+.receipt > :not(.receipt-texture) { position: relative; z-index: 1; }
 
 .receipt :where(h1, p, span) {
   font-family: inherit;
@@ -162,8 +170,14 @@ body {
   background: repeating-linear-gradient(90deg, #111 0 2px, transparent 2px 4px, #111 4px 8px, transparent 8px 10px, #111 10px 11px, transparent 11px 15px);
 }
 .receipt-payment { height: 54px; padding-top: 2px; }
-.wallet-stage { position: relative; min-height: 52px; }
-.stripe-wallet { position: relative; z-index: 2; min-height: 52px; transition: opacity 150ms ease; }
+.wallet-stage { position: absolute; inset: 2px 0 auto; height: 52px; }
+.stripe-wallet {
+  position: absolute;
+  z-index: 2;
+  inset: 4px 0 auto;
+  height: 44px;
+  transition: opacity 150ms ease;
+}
 .stripe-wallet.is-checking { opacity: 0; }
 .stripe-wallet.is-busy { opacity: 0.55; pointer-events: none; }
 .apple-pay-placeholder {
